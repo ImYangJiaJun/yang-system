@@ -253,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "需要独立 MySQL 测试库"]
-    async fn real_mysql_reopen_restarts_retryable_tasks_but_never_running_or_backfilled(
+    async fn real_mysql_reopen_restarts_retryable_and_backfilled_tasks_but_never_running_ones(
     ) -> anyhow::Result<()> {
         let context = context().await?;
         let snapshot = snapshot(&context).await?;
@@ -310,19 +310,47 @@ mod tests {
                 .await?;
         assert!(payload.is_some(), "review 行重新受理时应补写缺席的快照");
 
-        // 编号已回填的任务重开没有意义。
+        // 编号已回填的任务也能重开：用户清空表格里的编号后再点击，就是显式重发。
+        // 实例已存在时 `effect_phase` 必须是 `created`（走实例恢复 + 重新回填，
+        // 不新建审批），且重开后立即可认领。
         let claim = claimed(&context, &snapshot).await?;
         sqlx::query(
-            "UPDATE feishu_approval_task SET state='backfilled', worker_id=NULL, lease_until=NULL WHERE id=?",
+            "UPDATE feishu_approval_task SET state='backfilled', instance_code='INSTANCE-KEPT', worker_id=NULL, lease_until=NULL WHERE id=?",
         )
         .bind(claim.id)
         .execute(context.approval_tasks().pool())
         .await?;
-        assert!(!reopen(&context, claim.id).await?, "backfilled 不应被重开");
+        assert!(
+            reopen(&context, claim.id).await?,
+            "backfilled 在人工点击且回填列为空时应可重开"
+        );
+        let (state, phase): (String, String) =
+            sqlx::query_as("SELECT state,effect_phase FROM feishu_approval_task WHERE id=?")
+                .bind(claim.id)
+                .fetch_one(context.approval_tasks().pool())
+                .await?;
+        assert_eq!(
+            (state.as_str(), phase.as_str()),
+            ("pending", "created"),
+            "实例已存在时重开必须走 recovery 相位"
+        );
+        assert!(
+            !claim_ready(&context, 0, Some(claim.id), 1)
+                .await?
+                .is_empty(),
+            "backfilled 重开后应能立刻认领"
+        );
 
-        // 租约有效 = 有 worker 正在执行，不许抢。
+        // 租约有效 = 有 worker 正在执行，不许抢（backfilled 也一样）。
         let claim = claimed(&context, &snapshot).await?;
-        assert!(!reopen(&context, claim.id).await?, "执行中的任务不应被重开");
+        sqlx::query("UPDATE feishu_approval_task SET state='backfilled' WHERE id=?")
+            .bind(claim.id)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        assert!(
+            !reopen(&context, claim.id).await?,
+            "backfilled 且执行中的任务不应被重开"
+        );
         Ok(())
     }
 

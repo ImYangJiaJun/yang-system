@@ -200,6 +200,14 @@ pub(crate) fn conversion_reason(
         widget_name(&form, id), source, one_line(id, 100), one_line(field, 100))
 }
 
+/// 用户清空回填编号后再次点击的反馈：原审批已存在，只重新回填，不重复建单。
+pub(crate) fn already_initiated_message(serial: &str) -> String {
+    format!(
+        "该记录已发起过审批（编号 {}），已重新回填到表格，未重复创建。",
+        one_line(serial, 100)
+    )
+}
+
 /// 飞书原始响应可能含内部信息，用户只看业务码与固定说明。
 pub(crate) fn outbound_reason(failure: &OutboundFailure) -> String {
     match failure.kind {
@@ -339,6 +347,27 @@ mod tests {
             );
             assert!(body.contains(heading) && body.contains(next), "{body}");
         }
+    }
+
+    #[test]
+    fn already_initiated_message_names_the_original_serial_and_keeps_one_line() {
+        let message = already_initiated_message("202610260001");
+        assert!(
+            message.contains("该记录已发起过审批") && message.contains("202610260001"),
+            "{message}"
+        );
+        assert!(
+            message.contains("已重新回填到表格") && message.contains("未重复创建"),
+            "{message}"
+        );
+        let long = already_initiated_message(&"1".repeat(500));
+        assert_eq!(
+            long.chars().count(),
+            "该记录已发起过审批（编号 ），已重新回填到表格，未重复创建。"
+                .chars()
+                .count()
+                + 100
+        );
     }
 
     #[test]

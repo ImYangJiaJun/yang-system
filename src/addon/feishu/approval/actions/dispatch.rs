@@ -45,7 +45,9 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
-use crate::addon::feishu::domain::approval_convert::{amount_currency, format_local, FixedOffset};
+use crate::addon::feishu::domain::approval_convert::{
+    amount_currency, format_local, is_empty, FixedOffset,
+};
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id, dispatch_one, widget_maps_from_rows, BitableBackfill,
     DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
@@ -699,6 +701,9 @@ async fn handle_dispatch(
                 Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
             };
             // 批量受理：`record_id = None`，发起人落到本轮播种/重开的所有行。
+            // `resolved` 另留一份给 outcome：受理回执要发给点击人（见
+            // `fallback_recipient_of` 对 `Accepted` 的放行）。
+            let clicker = resolved.clone();
             if let Err(error) = handle.request_dispatch(config_id, resolved, None) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
@@ -715,7 +720,7 @@ async fn handle_dispatch(
             // `config_key` 定位的；按表分流会让同一队列出现「点了 A 的
             // 按钮却不处理 B 的数据」这种反直觉行为。多表并发时谁先点谁先跑整批，
             // 结果仍是一致的（uuid 幂等兜底）。
-            Ok(DispatchOutcome::success(
+            let mut outcome = DispatchOutcome::success(
                 Outcome::Accepted,
                 Some(config_id),
                 Some(base_token),
@@ -724,7 +729,9 @@ async fn handle_dispatch(
                 FeedbackStatus::Accepted,
                 "已受理，处理结果稍后回填至表格".to_string(),
                 None,
-            ))
+            );
+            outcome.applicant_open_id = clicker;
+            Ok(outcome)
         }
     }
 }
@@ -895,6 +902,21 @@ fn applicant_failure_message(failure: &OutboundFailure) -> String {
         }
         _ => format!("发起人姓名解析失败：{}", failure.message),
     }
+}
+
+/// 单条点击时「要不要 reopen」以及「是不是清空编号后的重发」。
+///
+/// - 任务停在 `backfilled` 且源记录回填单元格为空 → 用户删掉了编号再点一次：
+///   重开（实例已存在，`reopen` 会把 `effect_phase` 置 `created`，`dispatch_one`
+///   走实例恢复 + 重新回填，不新建审批），文案换成「已发起过」。
+/// - `backfilled` 且单元格仍有值 → 维持原有 Queued 行为，不重开。
+/// - 其它状态 → 与原逻辑一致，点击即人工重试。
+fn click_reopen_plan(prior_state: &str, backfill_empty: bool) -> (bool, bool) {
+    let backfilled = prior_state == "backfilled";
+    (
+        if backfilled { backfill_empty } else { true },
+        backfilled && backfill_empty,
+    )
 }
 
 /// 同步处理一条记录。
@@ -1151,6 +1173,19 @@ async fn dispatch_single(
     let task_id = approval_execution::admit(context, &snapshot, record_id)
         .await
         .map_err(|e| BaseError::ConfigError(e.to_string()))?;
+    // 点击前任务行停在什么状态：`backfilled` 且源记录的回填列被清空，就是
+    // 「用户删掉编号后再点一次」——只恢复原实例并重新回填，不新建审批。
+    let prior_state = context
+        .approval_tasks()
+        .query()
+        .select_fields(&["state"])?
+        .where_primary_key_eq(serde_json::json!(task_id))?
+        .optional()
+        .await?
+        .and_then(|row| row.optional::<String>("state").ok().flatten())
+        .unwrap_or_default();
+    let backfill_empty = cells.get(&backfill_field).map_or(true, is_empty);
+    let (should_reopen, reinitiated) = click_reopen_plan(&prior_state, backfill_empty);
     let claim = approval_execution::claim_ready(context, 0, Some(task_id), 1)
         .await
         .map_err(|e| BaseError::ConfigError(e.to_string()))?
@@ -1161,9 +1196,12 @@ async fn dispatch_single(
     // 而不是直接回「已转人工核查 / 已被受理」。任务行与 uuid 都不变——uuid 是
     // 飞书创建接口的幂等键，重新发起不会建出第二条审批（真建过会回 60012，
     // 走按 uuid 回捞）。
+    //
+    // `backfilled` 只在回填列**为空**（用户清空后重发）时重开；编号还在表里时
+    // 维持原有「已在队列/已处理」的语义，不把任务拉回队列。
     let claim = match claim {
         Some(claim) => Some(claim),
-        None => {
+        None if should_reopen => {
             if approval_execution::reopen(context, task_id)
                 .await
                 .map_err(|e| BaseError::ConfigError(e.to_string()))?
@@ -1177,6 +1215,7 @@ async fn dispatch_single(
                 None
             }
         }
+        None => None,
     };
     let Some(claim) = claim else {
         // 任务存在但不可认领。`review` 是「外部写入结果未知，禁止自动重放」的
@@ -1334,6 +1373,14 @@ async fn dispatch_single(
     let outcome_kind = outcome_for(&result);
     let status = result.feedback_status();
     let (accepted, message, serial_number) = result.response_parts();
+    // 清空编号后的重发：结论说「已创建审批实例」会误导用户以为又建了一单。
+    // 这里换成「已发起过、只重新回填」的文案，编号用实际回填的那个。
+    let message = match (&result, reinitiated) {
+        (OrchestrationResult::Backfilled { serial_number, .. }, true) => {
+            approval_feedback::already_initiated_message(serial_number)
+        }
+        _ => message,
+    };
     let instance_code = match &result {
         // CreatedPendingBackfill 也带实例坐标（实例已创建、编号/回填未完成）——
         // 与 worker 的 `record_outcome` 同口径落 task 行，并让通知里的审批链接可用。
@@ -1392,20 +1439,21 @@ fn response(
 
 /// 请求未显式指定接收人时的兜底链：申请人 open_id → 记录创建人 open_id。
 ///
-/// **只在终态（成功/失败）兜底**：那是「最终结论」，HTTP 层当场发掉、消息不等
-/// worker 轮询。中间态（waiting / retryable / created_pending_backfill）交给
-/// worker——那边对**所有**结论都通知，并按「结论是否变化」去重。
+/// **只在终态（成功/失败）与批量受理兜底**：终态是「最终结论」，HTTP 层当场发掉、
+/// 消息不等 worker 轮询。中间态（waiting / retryable / created_pending_backfill）
+/// 交给 worker——那边对**所有**结论都通知，并按「结论是否变化」去重。
 ///
 /// 两层为什么必须这样分工：worker 的去重判据是 `http_path_notified`，而它只把
 /// `outcome=succeeded` 的请求日志视作「HTTP 已通知」。若 HTTP 对 waiting 也发，
 /// 那条日志（outcome=waiting）匹配不上，worker 会对**同一个 waiting** 再发一条
 /// ——用户收到两条一样的消息（这正是本次要修的病症之一）。
 ///
-/// `Accepted`（全表受理）也落在 `None`：它只是「已入队」，结果由 worker 逐条
-/// 通知，避免受理 N 条先来一条「已受理」再跟 N 条结果。
+/// `Accepted`（全表受理）现在**发一条受理回执**给点击人：批量点击同步返回后
+/// 就没有别的即时反馈，等 worker 逐条处理可能好几分钟。逐条结果仍由 worker 发
+/// （那条链路按 record 去重，与这条「整批已受理」不冲突）。
 fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipient> {
     match outcome.status {
-        FeedbackStatus::Succeeded | FeedbackStatus::Failed => outcome
+        FeedbackStatus::Succeeded | FeedbackStatus::Failed | FeedbackStatus::Accepted => outcome
             .applicant_open_id
             .as_deref()
             .or(outcome.creator_open_id.as_deref())
@@ -1424,14 +1472,16 @@ fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipi
 /// 「中间态不在本层发」是两件事，响应文案与日志必须分开说——否则请求里传了发起人
 /// 的人会读到一句与事实相反的话。
 ///
-/// `Accepted`（全表受理）也在这里：它只是「已入队」，结果由 worker 逐条通知。
+/// `Accepted` **不在这里**：它现在给点击人发一条受理回执（见
+/// [`fallback_recipient_of`]），逐条结果仍由 worker 发。只有没拿到点击人
+/// （未传 applicant）时，[`notification_for_missing_recipient`] 才把它报成
+/// deferred_to_worker。
 fn deferred_notification(outcome: &DispatchOutcome) -> bool {
     matches!(
         outcome.status,
         FeedbackStatus::Waiting
             | FeedbackStatus::Retryable
             | FeedbackStatus::CreatedPendingBackfill
-            | FeedbackStatus::Accepted
             | FeedbackStatus::Queued
     )
 }
@@ -1439,14 +1489,21 @@ fn deferred_notification(outcome: &DispatchOutcome) -> bool {
 /// HTTP 同步路径本轮要不要发通知、发给谁。
 ///
 /// **状态门先于接收人**：中间态（`Waiting` / `Retryable` /
-/// `CreatedPendingBackfill`）与 `Accepted` 统一交给 worker，即便请求显式传了
+/// `CreatedPendingBackfill`）统一交给 worker，即便请求显式传了
 /// `notification_recipient` 也不在本层发——否则 worker 会按「结论变化」再发一条，
 /// 用户收到重复或超量消息（#32）。终态才允许发送：显式接收人优先，其次申请人
 /// open_id，最后记录创建人。
+///
+/// `Accepted` 单独一条：受理回执只发给**点击人**（解析出的 applicant），不认
+/// `notification_recipient`——那条字段是「终态结论发给谁」，不是「受理回执给谁」。
+/// 没传 applicant 时维持原行为（不发，由 worker 逐条通知）。
 fn http_notification_recipient(
     input: &DispatchInput,
     outcome: &DispatchOutcome,
 ) -> Option<NotificationRecipient> {
+    if outcome.status == FeedbackStatus::Accepted {
+        return fallback_recipient_of(outcome);
+    }
     if deferred_notification(outcome) {
         return None;
     }
@@ -1459,8 +1516,12 @@ fn http_notification_recipient(
 /// 无显式接收人时选哪种「未发」结论文案：中间态/受理 → 交给 worker 的措辞，
 /// 终态 → 「未指定接收人」。抽成纯函数是为了让**接线**本身可测——只钉谓词和
 /// 构造器，把 `None => not_requested()` 改回来测试依然全绿，这层接线就没人守。
+///
+/// `Accepted` 在这里**仍算交给 worker**：批量受理的逐条结果确实由 worker 发，
+/// 而走到这个函数就说明受理回执没能发给点击人（未传 applicant），文案不能
+/// 反过来说成「未指定接收人」。
 fn notification_for_missing_recipient(outcome: &DispatchOutcome) -> NotificationResult {
-    if deferred_notification(outcome) {
+    if deferred_notification(outcome) || outcome.status == FeedbackStatus::Accepted {
         NotificationResult::deferred_to_worker()
     } else {
         NotificationResult::not_requested()
@@ -1577,7 +1638,8 @@ async fn complete_feedback(
     // 「本层不发」有两种原因，必须分开报（见 [`deferred_notification`]）：
     // 真取不到接收人 vs 中间态/受理刻意交给 worker。合并成一句「未指定接收人」
     // 会把后者说成前者——请求里传了发起人、发起人也解析成功时，那句话是假的。
-    let deferred = deferred_notification(outcome);
+    // `Accepted` 有接收人时已经发受理回执，只有没接收人时才属于「交给 worker」。
+    let deferred = deferred_notification(outcome) || outcome.status == FeedbackStatus::Accepted;
     let notification = match &recipient {
         None => notification_for_missing_recipient(outcome),
         Some(_) if config.is_none() => NotificationResult::skipped(),
@@ -1826,6 +1888,9 @@ mod tests {
     /// waiting，而 worker 的 `http_path_notified` 只认 outcome=succeeded——
     /// 匹配不上就会对同一个 waiting 再发一条，用户收到两条一样的消息。
     /// 中间态的通知统一由 worker（全结论 + 去重）负责。
+    ///
+    /// `Accepted` 例外：批量受理同步返回时给点击人一条受理回执（逐条结果仍由
+    /// worker 发），所以它也走同一条接收人链。
     #[test]
     fn fallback_recipient_covers_terminal_states_and_falls_back_to_the_creator() {
         let mut outcome = DispatchOutcome::fail(1, Some(7), "创建失败");
@@ -1850,13 +1915,11 @@ mod tests {
         outcome.creator_open_id = None;
         assert!(fallback_recipient_of(&outcome).is_none());
 
-        // 中间态与受理都不在 HTTP 层发：前者由 worker 通知（避免重复），
-        // 后者只是「已入队」（结果由 worker 逐条通知，避免 1 + N 轰炸）。
+        // 中间态不在 HTTP 层发：由 worker 通知（避免重复）。
         for status in [
             FeedbackStatus::Waiting,
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
-            FeedbackStatus::Accepted,
             FeedbackStatus::Queued,
         ] {
             let mut interim = DispatchOutcome::fail(0, Some(7), "中间态");
@@ -1868,6 +1931,21 @@ mod tests {
                 "{status:?} 不该在 HTTP 层兜底"
             );
         }
+
+        // 批量受理回执发给点击人（applicant_open_id 现在由批量分支写入）。
+        let mut accepted = DispatchOutcome::fail(0, Some(7), "已受理");
+        accepted.status = FeedbackStatus::Accepted;
+        accepted.applicant_open_id = Some("ou_clicker".into());
+        assert_eq!(
+            fallback_recipient_of(&accepted).map(|recipient| recipient.receive_id),
+            Some("ou_clicker".to_string()),
+            "Accepted 必须给点击人发受理回执"
+        );
+        accepted.applicant_open_id = None;
+        assert!(
+            fallback_recipient_of(&accepted).is_none(),
+            "未传 applicant 时维持现状，不发受理回执"
+        );
     }
 
     /// 「本层没发」的两种原因分开报：中间态/受理是**刻意交给 worker**，不是
@@ -1882,11 +1960,33 @@ mod tests {
             outcome.creator_open_id = Some("ou_creator".into());
             outcome
         };
+        // 点击闸门：backfilled + 单元格已清空才重开，否则维持 Queued。
+        assert_eq!(
+            click_reopen_plan("backfilled", true),
+            (true, true),
+            "清空编号后点击应重开并改文案"
+        );
+        assert_eq!(
+            click_reopen_plan("backfilled", false),
+            (false, false),
+            "编号还在表里时不重开"
+        );
+        for state in ["pending", "review", "terminal", "unnotified"] {
+            assert_eq!(
+                click_reopen_plan(state, false),
+                (true, false),
+                "{state} 点击即人工重试"
+            );
+        }
+        assert_eq!(
+            click_reopen_plan("pending", true),
+            (true, false),
+            "非 backfilled 的空单元格不是「重新发起」"
+        );
         for status in [
             FeedbackStatus::Waiting,
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
-            FeedbackStatus::Accepted,
             FeedbackStatus::Queued,
         ] {
             assert!(
@@ -1894,6 +1994,21 @@ mod tests {
                 "{status:?} 应判为交给 worker"
             );
         }
+        // Accepted 有接收人时发受理回执，不再算「交给 worker」。
+        let accepted = interim(FeedbackStatus::Accepted);
+        assert!(
+            !deferred_notification(&accepted),
+            "Accepted 给点击人发受理回执"
+        );
+        let value = serde_json::to_value(notification_for_missing_recipient(&accepted))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("后台"),
+            "没拿到点击人时仍要说结果由后台发"
+        );
         for status in [FeedbackStatus::Succeeded, FeedbackStatus::Failed] {
             assert!(
                 !deferred_notification(&interim(status)),
@@ -1952,12 +2067,11 @@ mod tests {
             outcome
         };
 
-        // 0 条：中间态与受理即使显式指定了接收人也不由 HTTP 同步路径发送。
+        // 0 条：中间态即使显式指定了接收人也不由 HTTP 同步路径发送。
         for status in [
             FeedbackStatus::Waiting,
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
-            FeedbackStatus::Accepted,
             FeedbackStatus::Queued,
         ] {
             assert!(
@@ -1966,7 +2080,8 @@ mod tests {
             );
         }
 
-        // 1 条：终态照旧发送，且显式接收人优先于申请人/创建人兜底。
+        // 1 条：终态与批量受理照旧发送，且显式接收人优先于申请人/创建人兜底
+        // （批量受理只看点击人，见 `http_notification_recipient`）。
         for status in [FeedbackStatus::Succeeded, FeedbackStatus::Failed] {
             assert_eq!(
                 http_notification_recipient(&input, &with_status(status))
@@ -1975,6 +2090,13 @@ mod tests {
                 "{status:?} 终态必须发 1 条，且显式接收人优先"
             );
         }
+        // 受理回执只给点击人：显式接收人不能截走它。
+        assert_eq!(
+            http_notification_recipient(&input, &with_status(FeedbackStatus::Accepted))
+                .map(|recipient| recipient.receive_id),
+            Some("ou_applicant".to_string()),
+            "受理回执必须发给点击人"
+        );
 
         // 显式接收人缺省时，终态的兜底链不回归。
         let mut without_explicit = valid_input();

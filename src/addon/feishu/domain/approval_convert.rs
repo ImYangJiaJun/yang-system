@@ -945,7 +945,10 @@ fn text_from_cell(cell: &Value) -> String {
 
 /// 空值判定。多维表格的「空」有多种形态：null、空串、空数组、
 /// 以及只有空文本的多态单元格（`[{"text": ""}]`）。
-fn is_empty(value: &Value) -> bool {
+///
+/// `pub(crate)`：点击路径要判断「回填单元格是否被用户清空」，必须与这里的
+/// 「空」同一口径——否则用户清了一格却仍被当成有值，重新发起不会触发。
+pub(crate) fn is_empty(value: &Value) -> bool {
     match unwrap_typed_cell(value) {
         Value::Null => true,
         Value::String(text) => text.trim().is_empty(),

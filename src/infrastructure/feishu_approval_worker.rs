@@ -571,8 +571,9 @@ async fn run_loop(
 /// 状态推进发生在 [`record_outcome`]（逐条、处理结束时）。进程在轮中被
 /// `docker stop` 杀掉时，剩下的任务仍是 `pending`（`worker_id` 与租约还在）。
 /// 轮询时播种对**已存在**的任务行一律不动（见 [`seed_config`] 的
-/// `Some(_) => {}` 分支），人工点击的 `reopen` 白名单是
-/// `pending`/`review`/`terminal`/`unnotified`。真正的恢复在 [`claim`] 调用的
+/// `Some(_) => {}` 分支），人工点击的 `reopen` 覆盖
+/// `pending`/`review`/`terminal`/`unnotified` 与「回填列已被清空」的
+/// `backfilled`（重新回填原实例）。真正的恢复在 [`claim`] 调用的
 /// `claim_ready`：过期租约的只读阶段（`effect_phase` 为 `ready`/`created`）
 /// 可直接重新认领；外部写入结果未知（`creating`/`backfilling`）的行被清扫成
 /// `review`，之后靠人工点击重开。
@@ -587,6 +588,8 @@ async fn run_round(
     tracing::Span::current().record("trigger", trigger.as_str());
     runner.heartbeat.mark("seed", None);
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
+    // 点击上下文（配置、点击人、被点记录）在下面被 move 走，这里先留一份给轮末汇总。
+    let click = applicant.as_ref().cloned();
     // 单条点击的 record_id：传给播种，让「0 条待处理」通知不发给单条点击
     // （dispatch_single 已经处理了那条记录并给了用户反馈）。
     let clicked_record_id = applicant.as_ref().and_then(|(_, _, rid)| rid.as_deref());
@@ -602,7 +605,24 @@ async fn run_round(
         // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
         Err(error) => {
             tracing::warn!(error = %error, "审批派发播种失败");
-            SeedReport::default()
+            // 整轮扫描失败时把原因带进汇总：否则点击人会以为「没有待处理记录」。
+            let failed = trigger
+                .manual_config()
+                .map(|config_id| {
+                    vec![(
+                        config_id,
+                        format!("{error:#}")
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )]
+                })
+                .unwrap_or_default();
+            SeedReport {
+                failed,
+                ..SeedReport::default()
+            }
         }
     };
     if report.seeded > 0 {
@@ -627,6 +647,8 @@ async fn run_round(
         Ok(claimed) => claimed,
         Err(error) => {
             tracing::error!(error = %error, "审批派发认领失败");
+            // 认领失败也要把「本轮到此为止」告诉点击人。
+            notify_round_summary(runner, trigger, click.as_ref(), &report, &[]).await;
             return;
         }
     };
@@ -636,6 +658,8 @@ async fn run_round(
     if claimed.is_empty() {
         cursor.advance(&claimed);
         runner.heartbeat.mark("idle", None);
+        // 零认领也要发汇总：手动点击的人不能等一条永远不来的消息。
+        notify_round_summary(runner, trigger, click.as_ref(), &report, &[]).await;
         tracing::debug!(
             stage = "claim",
             cursor_next = cursor.0,
@@ -649,6 +673,8 @@ async fn run_round(
     let mut counts = [0usize; 4];
     let mut idled = false;
     let mut row_edits = Vec::new();
+    // 被点击配置的逐条结果，供轮末汇总使用（见 [`notify_round_summary`]）。
+    let mut entries: Vec<(String, String)> = Vec::new();
     for task in &claimed {
         if idled {
             break;
@@ -692,6 +718,16 @@ async fn run_round(
             DispatchResult::Retryable { .. } | DispatchResult::CreatedPendingBackfill { .. } => 2,
             DispatchResult::Terminal { .. } => 3,
         }] += 1;
+        // 逐条结果只收集**被点击配置**的记录：汇总发给点击人，别的配置的
+        // 记录与他这次点击无关。
+        if let Some((config_id, _, _)) = click.as_ref() {
+            if task.config_id == *config_id {
+                entries.push((
+                    task.record_id.clone(),
+                    round_result_label(task.existing_serial.as_deref(), &outcome),
+                ));
+            }
+        }
     }
     // 全部走完才推进游标：中途 `idled` 中断时**不推进**，否则会跳过未处理的记录。
     if !idled {
@@ -724,6 +760,9 @@ async fn run_round(
         );
     }
     runner.heartbeat.mark("idle", None);
+    // 轮末汇总：手动批量点击跑完一轮后，点击人收到一次「命中多少、成败分布」。
+    // 放在指标/日志之前，best-effort，不影响轮次语义。
+    notify_round_summary(runner, trigger, click.as_ref(), &report, &entries).await;
     tracing::debug!(
         claimed = claimed.len(),
         backfilled = counts[0],
@@ -767,6 +806,9 @@ struct ClaimedTask {
     /// 结论，本轮原因与它相同即「上一轮已经通知过」，不再重复发消息
     /// （见 [`should_notify`]）。
     last_error: Option<String>,
+    /// 任务行已有的审批编号（`serial_number`）。用户清空表格编号后重新点击时，
+    /// 本轮结论是 `Backfilled` 但这是一次**人工重发**，通知要说明「已发起过」。
+    existing_serial: Option<String>,
 }
 
 /// 单条配置的播种结果。
@@ -780,6 +822,11 @@ struct SeedOutcome {
     /// 受理发起人只该落到这些行上：广播到该配置的全部 `pending` 行会把一个点击人
     /// 的身份覆盖到别的记录上（见 [`persist_applicant`]）。
     touched: Vec<String>,
+    /// 「命中 0 条」的说明消息是否**确实送达**。
+    ///
+    /// 轮末汇总靠它避免双发：已经发过「批量提交未处理任何记录」，就不该再发一条
+    /// 「本轮无新增待处理记录」。
+    empty_notified: bool,
 }
 
 /// 一轮播种的汇总结果。
@@ -788,6 +835,10 @@ struct SeedReport {
     seeded: usize,
     /// 本轮新播种/重开的 `(config_id, record_id)`，跨配置汇总。
     touched: Vec<(i64, String)>,
+    /// 每个配置本轮的播种结果（轮末汇总用）。
+    per_config: Vec<(i64, SeedOutcome)>,
+    /// 本轮播种失败的配置与首行错误文案。
+    failed: Vec<(i64, String)>,
 }
 
 /// 一次播种失败该落哪条日志。
@@ -839,14 +890,15 @@ fn note_seed_success(failures: &Mutex<HashMap<i64, String>>, config_id: i64) -> 
 ///
 /// 这也是使用方的**重试通道**——清空那一格就等于「这条再来一遍」。但轮询**不会**
 /// 动已存在的任务行（见 [`seed_config`] 里 `Some(_) => {}` 分支）；只有点击被点
-/// 配置时才走 `reopen`，而它的白名单只有 `pending`/`review`/`terminal`/`unnotified`：
+/// 配置时才走 `reopen`，白名单是 `pending`/`review`/`terminal`/`unnotified`，
+/// 外加「回填列已被清空」的 `backfilled`（只重新回填原实例）：
 ///
 /// | 库里状态 | 字段为空意味着 | 处置 |
 /// |---|---|---|
 /// | `pending` | 已在队列里（含崩溃遗留的进行中行） | 轮询不动；点击时重置为 `pending` |
 /// | `review` / `unnotified` | 外部写入结果未知 / 结论没送到人 | 点击时拉回 `pending` |
 /// | `terminal` | 人工清空要重试 | 点击时拉回 `pending` |
-/// | `backfilled` | 编号已落表，重开无意义 | 不重开（`reopen` 白名单不含它） |
+/// | `backfilled` | 编号已落表 | 单元格仍有编号时不动；**用户清空后点击**才重开（重新回填原实例） |
 ///
 /// # 为什么要扫多维表格而不是「只看有任务的行」
 ///
@@ -894,9 +946,11 @@ async fn seed_tasks(
                 report.touched.extend(
                     outcome
                         .touched
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .map(|record_id| (config_id, record_id)),
                 );
+                report.per_config.push((config_id, outcome));
             }
             // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
             // 坏配置每轮都失败，只在首次/文案变化时告警，其余降 DEBUG，
@@ -918,6 +972,10 @@ async fn seed_tasks(
                         );
                     }
                 }
+                report.failed.push((
+                    config_id,
+                    message.lines().next().unwrap_or_default().to_string(),
+                ));
             }
         }
     }
@@ -1084,9 +1142,10 @@ async fn seed_config(
         // 会让用户以为自己的点击走错了路径（2026-10-30 真机）。
         let is_single_click =
             trigger.manual_config() == Some(config_id) && clicked_record_id.is_some();
+        let mut empty_notified = false;
         if !is_single_click {
             if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
-                notify_empty_selection(
+                empty_notified = notify_empty_selection(
                     runner,
                     config_id,
                     open_id,
@@ -1097,7 +1156,10 @@ async fn seed_config(
                 .await;
             }
         }
-        return Ok(SeedOutcome::default());
+        return Ok(SeedOutcome {
+            empty_notified,
+            ..SeedOutcome::default()
+        });
     }
 
     // 已有的任务行：**只查本轮待处理记录**，行数与本轮记录同量级，与历史任务
@@ -1154,6 +1216,7 @@ async fn seed_config(
         reopened,
         skipped,
         touched,
+        empty_notified: false,
     };
     tracing::debug!(
         stage = "seed",
@@ -1208,7 +1271,7 @@ fn empty_selection_feedback(batch_scope_name: Option<&str>, backfill_name: &str)
 /// 点击受理命中 0 条时向点击人发一条 IM 说明。
 ///
 /// best-effort，与其它 Worker 通知一致：任何失败只告警，**不返回 Err**，
-/// 不中断本轮其余配置的播种。
+/// 不中断本轮其余配置的播种。返回「是否确实送达」——轮末汇总据此避免双发。
 async fn notify_empty_selection(
     runner: &RoundRunner,
     config_id: i64,
@@ -1216,7 +1279,7 @@ async fn notify_empty_selection(
     config: &Record,
     backfill_name: &str,
     batch_scope_name: Option<&str>,
-) {
+) -> bool {
     let title = approval_feedback::display_name(
         config.optional::<String>("title").ok().flatten().as_deref(),
     );
@@ -1286,6 +1349,7 @@ async fn notify_empty_selection(
                 message_id = ?result.message_id,
                 "审批派发：点击受理命中 0 条，已向点击人发送说明"
             );
+            true
         }
         status => {
             tracing::warn!(
@@ -1295,8 +1359,297 @@ async fn notify_empty_selection(
                 message = %result.message,
                 "审批派发：点击受理命中 0 条，说明消息未送达"
             );
+            false
         }
     }
+}
+
+/// 「本轮结论是不是清空编号后的人工重发」。
+///
+/// 判据：结论是 `Backfilled`，且任务行**在这次处理之前**已有编号
+/// （`existing_serial`）。首次成功时任务行还没有编号，不会命中；所以命中只可能
+/// 来自「用户清空表格编号 → 点击 → reopen → 实例恢复 → 重新回填」那条路径。
+fn already_initiated(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
+    matches!(outcome, DispatchResult::Backfilled { .. }) && task.existing_serial.is_some()
+}
+
+/// 轮末汇总里一条记录的结果描述（约 80 字符内）。抽成纯函数以便离线钉住措辞。
+fn round_result_label(existing_serial: Option<&str>, outcome: &DispatchResult) -> String {
+    let text = match outcome {
+        DispatchResult::Backfilled { serial_number, .. } => {
+            if existing_serial.is_some() {
+                format!("已发起过：编号 {serial_number}（已重新回填）")
+            } else {
+                format!("成功：编号 {serial_number}")
+            }
+        }
+        DispatchResult::Waiting { reason } => format!("待补齐：{reason}"),
+        DispatchResult::Retryable { message }
+        | DispatchResult::CreatedPendingBackfill { message, .. } => {
+            format!("待重试：{message}")
+        }
+        DispatchResult::Terminal { message } => format!("失败：{message}"),
+    };
+    approval_feedback::one_line(&text, 80)
+}
+
+/// 轮末汇总正文（首行是卡片标题）。
+///
+/// 逐条结果最多列 8 条，其余折成「等 N 条」；积压与主因来自任务行
+/// （`state=pending` 的 `last_error` 众数）。整体按 1800 字符截断。
+#[allow(clippy::too_many_arguments)] // 9 个参数：汇总要素逐个平铺，收结构体只是挪位置。
+fn round_summary_text(
+    title: &str,
+    base_token: &str,
+    table_id: &str,
+    seeded: usize,
+    reopened: usize,
+    entries: &[(String, String)],
+    backlog: Option<u64>,
+    backlog_reason: Option<&str>,
+    scan_failure: Option<&str>,
+) -> String {
+    let mut lines = vec!["【批量派发结果】".to_string(), format!("配置：{title}")];
+    let hit = seeded + reopened;
+    if hit == 0 {
+        lines.push("记录：本轮无新增待处理记录".to_string());
+    } else {
+        lines.push(format!(
+            "记录：本轮命中 {hit} 条（新提交 {seeded}，重试 {reopened}）"
+        ));
+    }
+    if let Some(error) = scan_failure {
+        lines.push(format!(
+            "原因：本轮扫描失败：{}",
+            approval_feedback::one_line(error, 200)
+        ));
+    } else if entries.is_empty() {
+        if hit == 0 {
+            lines.push("原因：本轮没有需要处理的记录".to_string());
+        } else {
+            // 命中记录已入队，但本轮可能还没轮到认领（游标/批量上限），
+            // 不能说成「没有需要处理的记录」。
+            lines.push("原因：命中的记录已入队，将在后续轮次处理".to_string());
+        }
+    } else {
+        // 记录 id 只取尾部，避免整行被一长串 id 占满。
+        let tail = |record_id: &str| -> String {
+            record_id
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        };
+        let items: Vec<String> = entries
+            .iter()
+            .take(8)
+            .map(|(record_id, label)| format!("{} {label}", tail(record_id)))
+            .collect();
+        let mut reason = items.join("；");
+        if entries.len() > 8 {
+            reason.push_str(&format!("；等 {} 条", entries.len()));
+        }
+        lines.push(format!("原因：{reason}"));
+    }
+    if let Some(count) = backlog {
+        if count > 0 {
+            // `backlog_reason` 是原因文案，不是名称：没有非空原因时不能落
+            // `display_name` 的「名称暂不可用」兜底。
+            match backlog_reason.filter(|reason| !reason.trim().is_empty()) {
+                Some(reason) => lines.push(format!(
+                    "原因：积压 {count} 条待处理，多数原因：{}",
+                    approval_feedback::one_line(reason, 100)
+                )),
+                None => lines.push(format!("原因：积压 {count} 条待处理")),
+            }
+        }
+    }
+    lines.push("下一步：按原因补齐后重新点击；已成功的记录无需处理。".to_string());
+    lines.push(format!(
+        "技术定位：Base={}；表={}",
+        approval_feedback::one_line(base_token, 100),
+        approval_feedback::one_line(table_id, 100)
+    ));
+    approval_feedback::truncate(&lines.join("\n"), 1800)
+}
+
+/// 轮末汇总：向点击人发一条「本轮跑完了」的说明。
+///
+/// 只在**批量点击**（`record_id = None`）且拿得到点击人时发；该配置本轮已经发过
+/// 「批量提交未处理任何记录」时跳过（那条已经说明了情况）。全程 best-effort：
+/// 任何查询失败都降级，发送失败只告警。
+async fn notify_round_summary(
+    runner: &RoundRunner,
+    trigger: RoundTrigger,
+    click: Option<&(i64, String, Option<String>)>,
+    report: &SeedReport,
+    entries: &[(String, String)],
+) {
+    let Some(config_id) = trigger.manual_config() else {
+        return;
+    };
+    let Some((_, open_id, record_id)) = click else {
+        return;
+    };
+    if record_id.is_some() {
+        return;
+    }
+    let open_id = open_id.trim();
+    if open_id.is_empty() {
+        return;
+    }
+    let outcome = report
+        .per_config
+        .iter()
+        .find(|(id, _)| *id == config_id)
+        .map(|(_, outcome)| outcome);
+    if outcome.is_some_and(|outcome| outcome.empty_notified) {
+        return;
+    }
+    let seeded = outcome.map_or(0, |outcome| outcome.seeded);
+    let reopened = outcome.map_or(0, |outcome| outcome.reopened);
+    let scan_failure = report
+        .failed
+        .iter()
+        .find(|(id, _)| *id == config_id)
+        .map(|(_, message)| message.as_str());
+
+    // 配置展示名（2 秒预算，失败用兜底文案）与坐标。
+    let config_lookup = async {
+        runner
+            .context
+            .approval_configs()
+            .query()
+            .where_primary_key_eq(serde_json::json!(config_id))?
+            .optional()
+            .await
+    };
+    let config = match tokio::time::timeout(std::time::Duration::from_secs(2), config_lookup).await
+    {
+        Ok(Ok(row)) => row,
+        _ => None,
+    };
+    let field = |name: &str| {
+        config
+            .as_ref()
+            .and_then(|row| row.optional::<String>(name).ok().flatten())
+    };
+    let title = approval_feedback::display_name(field("title").as_deref());
+    let base_token = field("base_token").unwrap_or_default();
+    let table_id = field("table_id").unwrap_or_default();
+    let base_name = approval_feedback::display_name(field("base_name").as_deref());
+    let table_name = approval_feedback::display_name(field("table_name").as_deref());
+
+    // 积压：该配置 state=pending 的总数与最多 20 行的 last_error（众数即主因）。
+    // 查询失败只降级为「不写积压行」，不影响汇总的其余部分。
+    let (backlog, backlog_reason) = pending_backlog(runner, config_id).await;
+
+    let filtered: Vec<(String, String)> = entries
+        .iter()
+        .filter(|(_, label)| !label.is_empty())
+        .cloned()
+        .collect();
+    let text = round_summary_text(
+        &title,
+        &base_token,
+        &table_id,
+        seeded,
+        reopened,
+        &filtered,
+        backlog,
+        backlog_reason.as_deref(),
+        scan_failure,
+    );
+
+    let table_url = (|| -> anyhow::Result<String> {
+        bitable::validate_path_segment("base_token", &base_token)?;
+        bitable::validate_path_segment("table_id", &table_id)?;
+        Ok(format!(
+            "https://www.feishu.cn/base/{base_token}?table={table_id}"
+        ))
+    })()
+    .ok();
+    let references = vec![FeedbackReference {
+        label: "多维表",
+        text: format!("{base_name} / {table_name}"),
+        href: table_url,
+    }];
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+    let result = crate::addon::feishu::domain::approval_notification::send_feedback(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &recipient,
+        &text,
+        &references,
+    )
+    .await;
+    match result.status {
+        crate::addon::feishu::domain::approval_notification::NotificationStatus::Sent => {
+            tracing::info!(
+                config_id,
+                message_id = ?result.message_id,
+                "审批派发：已向点击人发送轮末汇总"
+            );
+        }
+        status => {
+            tracing::warn!(
+                config_id,
+                status = ?status,
+                message = %result.message,
+                "审批派发：轮末汇总未送达"
+            );
+        }
+    }
+}
+
+/// 该配置 `state=pending` 的积压条数与主要原因（`last_error` 众数）。
+///
+/// 查询失败时返回 `(None, None)`——汇总里少一行，不影响其余内容。
+async fn pending_backlog(runner: &RoundRunner, config_id: i64) -> (Option<u64>, Option<String>) {
+    let pending = || {
+        runner
+            .context
+            .approval_tasks()
+            .query()
+            .where_eq("config_id", serde_json::json!(config_id))
+            .and_then(|query| query.where_eq("state", serde_json::json!("pending")))
+    };
+    let Ok(count_query) = pending() else {
+        return (None, None);
+    };
+    let count = count_query.count().await.ok();
+    let reasons = match pending().and_then(|query| {
+        query
+            .select_fields(&["last_error"])
+            .and_then(|query| query.page(1, 20))
+    }) {
+        Ok(query) => query.all().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in reasons {
+        let reason = row
+            .optional::<String>("last_error")
+            .ok()
+            .flatten()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(reason) = reason {
+            *counts.entry(reason).or_default() += 1;
+        }
+    }
+    let main = counts
+        .into_iter()
+        .max_by_key(|(reason, count)| (*count, reason.clone()))
+        .map(|(reason, _)| reason);
+    (count, main)
 }
 
 /// 播种一条任务行；插入失败只告警并返回 `false`。
@@ -1596,6 +1949,9 @@ async fn load_task(
         widgets,
         form_snapshot,
         last_error: row.optional("last_error")?,
+        existing_serial: row
+            .optional::<String>("serial_number")?
+            .filter(|value| !value.trim().is_empty()),
     }))
 }
 
@@ -2131,9 +2487,14 @@ async fn send_worker_notification(
         let query = query.where_eq("config_id", serde_json::json!(task.config_id))?;
         query.all().await
     };
+    // 清空编号后的人工重发：结论是 `Backfilled` 但任务行早已有编号。
+    // 无论哪条路径，点击时间都取**这次点击**的请求记录（见下）。
+    let reinitiated = already_initiated(task, outcome);
     let clicked_at = match request_log_check.await {
         Ok(rows) => {
-            if rows.iter().any(http_path_notified) {
+            // 清空编号后的人工重发：历史 HTTP 记录（含 outcome=succeeded 的那条）
+            // 不能压掉这条「已发起过、已重新回填」的通知——用户要的是这次点击的回执。
+            if rows.iter().any(http_path_notified) && !reinitiated {
                 tracing::info!(
                     task_id = task.id,
                     config_id = task.config_id,
@@ -2206,9 +2567,17 @@ async fn send_worker_notification(
 
     // 渲染消息正文（先按「无行号」出站，行号由轮末批量扫描后编辑补上）
     let status = outcome.feedback_status();
-    let (accepted, reason, _serial) = outcome.response_parts();
-    let _ = accepted; // 通知不关心 HTTP 语义的 accepted
-    let clicked_at = clicked_at.map(|seconds| format_local(seconds, task.timezone_offset));
+    let (accepted, reason, serial) = outcome.response_parts();
+    // 通知不关心 HTTP 语义的 accepted。
+    let _ = accepted;
+    // 人工重发不写「点击时间」：这条不是一次新的创建，措辞与时间都会误导。
+    let clicked_at = clicked_at
+        .filter(|_| !reinitiated)
+        .map(|seconds| format_local(seconds, task.timezone_offset));
+    let reason = match (&serial, reinitiated) {
+        (Some(serial), true) => approval_feedback::already_initiated_message(serial),
+        _ => reason,
+    };
     let message = approval_feedback::render(
         status,
         &reason,
@@ -2766,7 +3135,167 @@ mod tests {
             widgets: Vec::new(),
             form_snapshot: String::new(),
             last_error: last_error.map(str::to_string),
+            existing_serial: None,
         }
+    }
+
+    /// 清空编号后的重发：结论是 `Backfilled` 且**处理前**任务行已有编号。
+    #[test]
+    fn already_initiated_requires_a_backfill_and_a_known_serial() {
+        let mut task = claimed(None);
+        let success = DispatchResult::Backfilled {
+            serial_number: "S".into(),
+            instance_code: "I".into(),
+        };
+        assert!(
+            !already_initiated(&task, &success),
+            "首次成功时任务行还没有编号，不是重发"
+        );
+        task.existing_serial = Some("S".into());
+        assert!(
+            already_initiated(&task, &success),
+            "已有编号 + 再次回填 = 重发"
+        );
+        assert!(
+            !already_initiated(
+                &task,
+                &DispatchResult::Waiting {
+                    reason: "缺字段".into()
+                }
+            ),
+            "失败/等待不是重发"
+        );
+    }
+
+    #[test]
+    fn round_result_labels_cover_every_outcome() {
+        let success = DispatchResult::Backfilled {
+            serial_number: "S1".into(),
+            instance_code: "I".into(),
+        };
+        assert_eq!(round_result_label(None, &success), "成功：编号 S1");
+        assert_eq!(
+            round_result_label(Some("S1"), &success),
+            "已发起过：编号 S1（已重新回填）"
+        );
+        assert!(round_result_label(
+            None,
+            &DispatchResult::Waiting {
+                reason: "缺少必填值".into()
+            }
+        )
+        .starts_with("待补齐："));
+        for outcome in [
+            DispatchResult::Retryable {
+                message: "超时".into(),
+            },
+            DispatchResult::CreatedPendingBackfill {
+                message: "编号未生成".into(),
+                instance_code: "I".into(),
+                serial_number: None,
+            },
+        ] {
+            assert!(round_result_label(None, &outcome).starts_with("待重试："));
+        }
+        assert!(round_result_label(
+            None,
+            &DispatchResult::Terminal {
+                message: "映射坏了".into()
+            }
+        )
+        .starts_with("失败："));
+        // 逐条结果截断到约 80 字符。
+        let long = round_result_label(
+            None,
+            &DispatchResult::Terminal {
+                message: "长".repeat(200),
+            },
+        );
+        assert_eq!(long.chars().count(), 80);
+    }
+
+    #[test]
+    fn round_summary_reports_hits_zero_and_backlog() {
+        let text = round_summary_text(
+            "财务审批",
+            "base1",
+            "tbl1",
+            3,
+            2,
+            &[
+                ("recAAAAAAAAAA".into(), "成功：编号 S1".into()),
+                ("recBBBBBBBBBB".into(), "失败：映射坏了".into()),
+            ],
+            Some(7),
+            Some("请填写申请人"),
+            None,
+        );
+        assert!(text.starts_with("【批量派发结果】"), "{text}");
+        assert!(text.contains("配置：财务审批"), "{text}");
+        assert!(text.contains("本轮命中 5 条（新提交 3，重试 2）"), "{text}");
+        assert!(text.contains("AAAAAA 成功：编号 S1"), "{text}");
+        assert!(
+            text.contains("积压 7 条待处理，多数原因：请填写申请人"),
+            "{text}"
+        );
+        assert!(text.contains("技术定位：Base=base1；表=tbl1"), "{text}");
+
+        // 零命中：不能只说「命中 0 条」，要写清「本轮无新增待处理记录」。
+        let zero = round_summary_text("财务审批", "b", "t", 0, 0, &[], Some(0), None, None);
+        assert!(zero.contains("本轮无新增待处理记录"), "{zero}");
+        assert!(!zero.contains("积压"), "零积压不写积压行：{zero}");
+
+        // 扫描失败：原因行写失败原因，而不是「没有需要处理的记录」。
+        let failed = round_summary_text(
+            "财务审批",
+            "b",
+            "t",
+            0,
+            0,
+            &[],
+            None,
+            None,
+            Some("读取表结构失败：TableIdNotFound"),
+        );
+        assert!(
+            failed.contains("本轮扫描失败：读取表结构失败：TableIdNotFound"),
+            "{failed}"
+        );
+
+        // 命中但本轮还没轮到认领（游标/批量上限）：不能自相矛盾地说
+        // 「命中 2 条」又「没有需要处理的记录」。
+        let queued = round_summary_text("财务审批", "b", "t", 2, 0, &[], None, None, None);
+        assert!(queued.contains("本轮命中 2 条"), "{queued}");
+        assert!(queued.contains("已入队"), "{queued}");
+        assert!(!queued.contains("没有需要处理的记录"), "{queued}");
+
+        // 有积压但 pending 行都没有非空原因：只写条数，不落展示名的
+        // 「名称暂不可用」兜底。
+        let no_reason = round_summary_text("财务审批", "b", "t", 0, 0, &[], Some(3), None, None);
+        assert!(no_reason.contains("积压 3 条待处理"), "{no_reason}");
+        assert!(!no_reason.contains("名称暂不可用"), "{no_reason}");
+        assert!(!no_reason.contains("多数原因"), "{no_reason}");
+    }
+
+    #[test]
+    fn round_summary_caps_entries_and_total_length() {
+        let entries: Vec<(String, String)> = (0..12)
+            .map(|index| (format!("rec{index:012}"), "失败：很长的原因".to_string()))
+            .collect();
+        let text = round_summary_text("t", "b", "t", 12, 0, &entries, None, None, None);
+        assert!(text.contains("等 12 条"), "超出 8 条要写等 N 条：{text}");
+        assert_eq!(text.matches("失败：很长的原因").count(), 8);
+
+        let many: Vec<(String, String)> = (0..200)
+            .map(|index| {
+                (
+                    format!("rec{index}"),
+                    "失败：".to_string() + &"因".repeat(300),
+                )
+            })
+            .collect();
+        let long = round_summary_text("t", "b", "t", 200, 0, &many, Some(999), None, None);
+        assert_eq!(long.chars().count(), 1800, "整体截到 1800 字符");
     }
 
     /// 通知去重：**结论变化才发**。

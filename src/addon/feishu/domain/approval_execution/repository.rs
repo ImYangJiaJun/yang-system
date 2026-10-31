@@ -90,8 +90,12 @@ pub(crate) async fn admit(
 ///
 /// # 收窄条件
 ///
-/// - 只有 `pending / review / terminal / unnotified` 可重开；`backfilled`
-///   编号已落表，重开没有意义。
+/// - `pending / review / terminal / unnotified` 可重开。
+/// - `backfilled` **也能重开，但只由调用方在「人工点击且源记录回填列为空」时**调用
+///   ——那是用户清空编号之后的显式重发请求。重开后 `effect_phase` 因实例已存在
+///   变为 `created`，`dispatch_one` 走「按 instance_code / uuid 恢复实例并重新
+///   回填」，不新建审批；uuid 幂等兜底。（单条点击若回填列非空则不调用本函数，
+///   保持原有 Queued 行为。）
 /// - 有执行者持有有效租约时不动（条件 UPDATE 兜底），避免把正在写入的任务
 ///   抢回来并发执行。
 /// - 顺带清退避（`available_at`）与重试计数：点击的语义就是「现在再来一次」。
@@ -101,7 +105,7 @@ pub(crate) async fn admit(
 pub(crate) async fn reopen(context: &FeishuContext, task_id: i64) -> anyhow::Result<bool> {
     // tenant-boundary: raw-sql feishu-approval-reopen
     let result = sqlx::query(
-        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
+        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified','backfilled') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
     )
     .bind(task_id)
     .execute(context.approval_tasks().pool())
