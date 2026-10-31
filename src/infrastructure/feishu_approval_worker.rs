@@ -334,7 +334,7 @@ struct RoundRunner {
     tools: Arc<Tools>,
     context: Arc<FeishuContext>,
     tokens: Arc<TenantTokenProvider>,
-    transport: Arc<HttpClientTransport>,
+    transport: Arc<dyn OutboundTransport>,
     sleeper: Arc<TokioSleeper>,
     timezone_offset: FixedOffset,
     heartbeat: ProgressHeartbeat,
@@ -2758,6 +2758,15 @@ fn _assert_widget_map_type(_: &WidgetMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 0 的接口断言：字段必须是 trait 对象，真实库测试才能注入回放传输。
+    /// 只做编译期检查，无运行时行为。
+    #[test]
+    fn round_runner_transport_is_injectable_trait_object() {
+        let field_type: fn(&RoundRunner) -> &Arc<dyn OutboundTransport> =
+            |runner| &runner.transport;
+        let _ = field_type;
+    }
 
     #[test]
     fn record_read_failures_are_terminal_only_when_fatal() {
