@@ -600,6 +600,31 @@ pub(crate) fn check_batch_scope_field(
     Vec::new()
 }
 
+/// 校验聚合开关与批量范围复选框列的组合（设计 §2 决策 1）。
+///
+/// 打开聚合派发时必须有批量范围列：组只建在「同一次批量勾选」内，没有勾选列
+/// 就无从划定批次。关闭时不要求任何东西。
+pub(crate) fn check_aggregate_batch(
+    aggregate_batch: bool,
+    batch_scope_field_id: Option<&str>,
+) -> Vec<String> {
+    if !aggregate_batch {
+        return Vec::new();
+    }
+    let configured = batch_scope_field_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if configured {
+        Vec::new()
+    } else {
+        vec![
+            "开启同批聚合派发前必须先配置批量范围复选框列（用于划定同一次批量勾选的范围）"
+                .to_string(),
+        ]
+    }
+}
+
 /// 六个可选回填目标与申请/回填列之间不得重复使用同一 `field_id`。
 ///
 /// 多列写同一格会让后写覆盖先写，而两条写入路径的顺序并不稳定；配置期拒绝
@@ -2294,5 +2319,32 @@ mod tests {
         );
         assert!(reasons.iter().any(|reason| reason.contains("fldBackfill")));
         assert!(reasons.iter().any(|reason| reason.contains("fldFlow")));
+    }
+
+    /// 聚合开关打开却没有批量范围复选框列 → 保存必须拒绝（设计 §2 决策 1）。
+    #[test]
+    fn check_aggregate_batch_rejects_aggregate_without_batch_scope() {
+        let reasons = check_aggregate_batch(true, None);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("批量范围复选框列"),
+            "文案要指出缺的是哪一列: {}",
+            reasons[0]
+        );
+        // 空白 id 等同未配置：列坐标存的是 field_id，空串不指向任何列。
+        assert!(
+            !check_aggregate_batch(true, Some("   ")).is_empty(),
+            "空白 field_id 不能视为已配置"
+        );
+    }
+
+    /// 有批量范围列时聚合可以打开；开关关闭时无论有没有范围列都放行。
+    #[test]
+    fn check_aggregate_batch_accepts_aggregate_with_batch_scope() {
+        assert!(check_aggregate_batch(true, Some("fldScope")).is_empty());
+        assert!(
+            check_aggregate_batch(false, None).is_empty(),
+            "关闭聚合不要求批量范围列"
+        );
     }
 }

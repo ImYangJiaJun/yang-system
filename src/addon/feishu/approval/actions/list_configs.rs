@@ -44,6 +44,7 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "handler_field",
     "base_timezone",
     "enabled",
+    "aggregate_batch",
     "config_key",
     "token_rotated_at",
     "form_snapshot_at",
@@ -155,6 +156,8 @@ pub(super) struct ConfigItem {
     base_timezone: String,
     /// 是否启用。
     enabled: bool,
+    /// 同批聚合派发开关（默认关闭）。
+    aggregate_batch: bool,
     /// 工作流接入用的配置标识（进派发 URL 路径段）；未签发过则为 `None`。
     config_key: Option<String>,
     /// 最近一次轮换/签发访问 Token 的时间（unix 秒）；从未签发过则为 `None`。
@@ -343,6 +346,7 @@ pub(super) async fn handle(
             handler_field: record.optional("handler_field")?,
             base_timezone: record.require("base_timezone")?,
             enabled: record.require("enabled")?,
+            aggregate_batch: record.require("aggregate_batch")?,
             config_key: record.optional("config_key")?,
             token_rotated_at: record.optional("token_rotated_at")?,
             form_snapshot_at: record.optional("form_snapshot_at")?,
@@ -415,6 +419,12 @@ mod tests {
             .is_empty());
     }
 
+    /// 聚合开关必须出现在配置行投影里，控制台才能回显与回填。
+    #[test]
+    fn config_projection_includes_the_aggregate_switch() {
+        assert!(CONFIG_ITEM_COLUMNS.contains(&"aggregate_batch"));
+    }
+
     /// 列表项序列化**不得**出现 `form_snapshot` 大字段——投影与列表项两处都要钉住。
     #[test]
     fn the_item_never_serializes_the_form_snapshot() {
@@ -442,6 +452,7 @@ mod tests {
             handler_field: Some("fldHandler".to_string()),
             base_timezone: "Asia/Shanghai".to_string(),
             enabled: true,
+            aggregate_batch: true,
             config_key: Some("cfgkeytest".to_string()),
             token_rotated_at: Some(1_700_000_002),
             form_snapshot_at: Some(1_700_000_000),
@@ -458,6 +469,11 @@ mod tests {
             "列表项不得携带 form_snapshot 大字段"
         );
         assert_eq!(value.get("maps"), Some(&serde_json::json!([])));
+        assert_eq!(
+            value.get("aggregate_batch"),
+            Some(&serde_json::json!(true)),
+            "聚合开关按布尔量投影"
+        );
         // 六个回填列按 `Option` 形态返回（未配置的列是 null，不是缺键）。
         assert_eq!(
             value.get("status_field"),

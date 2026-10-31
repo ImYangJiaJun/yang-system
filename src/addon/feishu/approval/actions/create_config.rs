@@ -25,7 +25,7 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::approval::subscribe_approval;
 use crate::addon::feishu::domain::approval_match::FieldMapping;
 use crate::addon::feishu::domain::approval_provision::{
-    build_plan, fill_table_names, insert_plan, ProvisionInput,
+    build_plan, check_aggregate_batch, fill_table_names, insert_plan, ProvisionInput,
 };
 use crate::addon::feishu::domain::bitable::resolve_bitable_link;
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -79,6 +79,10 @@ pub(super) struct CreateConfigInput {
     /// 留空 = 不启用，播种仍按旧行为（只处理回填列为空的记录）。
     #[serde(default)]
     pub(super) batch_scope_field: Option<String>,
+    /// 同批聚合派发开关（设计 §4.2）：默认关闭。打开时必须同时配置批量范围
+    /// 复选框列，组合校验在 `build_plan` 之后进行。
+    #[serde(default)]
+    pub(super) aggregate_batch: bool,
 }
 
 impl ParamInput for CreateConfigInput {
@@ -201,6 +205,16 @@ pub(super) async fn handle(
     .await
     .map_err(|failure| BaseError::ParamInvalid("feishu".to_string(), failure.to_string()))?;
 
+    // 聚合开关（设计 §4.2）：打开时必须已配置批量范围复选框列。
+    let reasons =
+        check_aggregate_batch(input.aggregate_batch, plan.batch_scope_field_id.as_deref());
+    if !reasons.is_empty() {
+        return Err(BaseError::ParamInvalid(
+            "aggregate_batch".to_string(),
+            reasons.join("；"),
+        ));
+    }
+
     fill_table_names(
         &mut plan,
         outbound.transport(),
@@ -239,6 +253,7 @@ pub(super) async fn handle(
             }
         }
         columns.insert("config_key", serde_json::json!(&config_key));
+        columns.insert("aggregate_batch", serde_json::json!(input.aggregate_batch));
         columns.insert("token_hash", serde_json::json!(&issued.hash));
         columns.insert("token_cipher", serde_json::json!(&issued.cipher));
         columns.insert("token_rotated_at", serde_json::json!(issued_at));
@@ -324,7 +339,35 @@ mod tests {
             department_field: None,
             handler_field: None,
             batch_scope_field: None,
+            aggregate_batch: false,
         }
+    }
+
+    /// 老请求体不带聚合开关 → 默认关闭，行为与现状一致。
+    #[test]
+    fn aggregate_batch_defaults_to_off() {
+        let parsed = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
+            "applicant_field": "申请人", "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai"
+        }))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!parsed.aggregate_batch, "省略 aggregate_batch 落 false");
+    }
+
+    /// 显式打开聚合开关要能被接收（组合校验在 build_plan 之后做）。
+    #[test]
+    fn aggregate_batch_switch_is_accepted() {
+        let parsed = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
+            "applicant_field": "申请人", "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai",
+            "batch_scope_field": "纳入批量",
+            "aggregate_batch": true
+        }))
+        .unwrap_or_else(|error| panic!("聚合开关应接受: {error}"));
+        assert!(parsed.aggregate_batch);
+        assert_eq!(parsed.batch_scope_field.as_deref(), Some("纳入批量"));
     }
 
     #[test]

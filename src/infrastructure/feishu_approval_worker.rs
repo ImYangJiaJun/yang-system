@@ -934,6 +934,7 @@ async fn seed_tasks(
             "approval_code",
             "backfill_field",
             "batch_scope_field",
+            "aggregate_batch",
         ])?
         .where_eq("enabled", serde_json::json!(true))?;
     let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;

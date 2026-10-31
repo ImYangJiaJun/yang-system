@@ -18,8 +18,8 @@ use yang_db::{field, table, CompareOp, QueryBuilder};
 
 use crate::addon::feishu::domain::approval_match::{columns_from_fields, FieldMapping};
 use crate::addon::feishu::domain::approval_provision::{
-    build_plan, check_backfill_targets, check_batch_scope_field, display_name, fill_table_names,
-    insert_maps, resolve_optional_id, ProvisionInput,
+    build_plan, check_aggregate_batch, check_backfill_targets, check_batch_scope_field,
+    display_name, fill_table_names, insert_maps, resolve_optional_id, ProvisionInput,
 };
 use crate::addon::feishu::domain::bitable::{list_all_fields, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -66,6 +66,9 @@ pub(super) struct UpdateConfigInput {
     /// `Some("")` = 清空（回到旧行为：只按回填列为空扫描）。
     #[serde(default)]
     pub(super) batch_scope_field: Option<String>,
+    /// 同批聚合派发开关（设计 §4.2）；省略即不改。
+    #[serde(default)]
+    pub(super) aggregate_batch: Option<bool>,
 }
 
 impl ParamInput for UpdateConfigInput {
@@ -99,10 +102,12 @@ impl UpdateConfigInput {
             && self.base_timezone.is_none()
             && self.approval_id.is_none()
             && self.maps.is_none()
+            && self.aggregate_batch.is_none()
             && !self.has_column_updates()
         {
             return Err(BaseError::ParamInvalid(
-                "title/enabled/base_timezone/approval_id/maps/回填列/批量范围列".to_string(),
+                "title/enabled/base_timezone/approval_id/maps/回填列/批量范围列/聚合开关"
+                    .to_string(),
                 "至少提供一个要更新的字段".to_string(),
             ));
         }
@@ -136,6 +141,26 @@ impl UpdateConfigInput {
             }
         }
         Ok(())
+    }
+
+    /// 按「本次修改 + 库内现值」合并后校验聚合开关（设计 §4.2）。
+    ///
+    /// 开关没给就沿用库内值；范围列没给也沿用库内 id，`Some("")` 表示清空
+    /// （`resolved_batch_scope` 为 `None`）。只改开关时不会拉字段，所以库内
+    /// 现值必须参与判定，否则「清空范围列但开关仍开着」会被漏掉。
+    fn aggregate_reasons(
+        &self,
+        stored_aggregate: bool,
+        stored_batch_scope: Option<&str>,
+        resolved_batch_scope: Option<&str>,
+    ) -> Vec<String> {
+        let aggregate = self.aggregate_batch.unwrap_or(stored_aggregate);
+        let scope = if self.batch_scope_field.is_some() {
+            resolved_batch_scope
+        } else {
+            stored_batch_scope
+        };
+        check_aggregate_batch(aggregate, scope)
     }
 }
 
@@ -280,7 +305,13 @@ pub(super) async fn handle(
                     ctx.tools().mysql()?.pool(),
                     table!("feishu_approval_config"),
                 )
-                .fields(&[field!("title"), field!("enabled"), field!("base_timezone")])
+                .fields(&[
+                    field!("title"),
+                    field!("enabled"),
+                    field!("base_timezone"),
+                    field!("batch_scope_field"),
+                    field!("aggregate_batch"),
+                ])
                 .where_and(field!("id"), CompareOp::Eq, input.config_id)?,
             )
             .await?
@@ -290,11 +321,31 @@ pub(super) async fn handle(
         let old_title: String = before.require("title")?;
         let old_enabled: bool = before.require("enabled")?;
         let old_timezone: String = before.require("base_timezone")?;
+        let old_batch_scope: Option<String> = before.optional("batch_scope_field")?;
+        let old_aggregate: bool = before.require("aggregate_batch")?;
+
+        // 聚合开关按「本次修改 + 库内现值」合并校验：只改开关时没有拉字段，
+        // 库内的范围列必须参与判定，否则「清空范围列但开关仍开着」会漏过。
+        let resolved_scope = columns
+            .as_ref()
+            .and_then(|columns| resolve_optional_id(columns, input.batch_scope_field.as_deref()));
+        let reasons = input.aggregate_reasons(
+            old_aggregate,
+            old_batch_scope.as_deref(),
+            resolved_scope.as_deref(),
+        );
+        if !reasons.is_empty() {
+            return Err(BaseError::ParamInvalid(
+                "aggregate_batch".to_string(),
+                reasons.join("；"),
+            ));
+        }
 
         let mut record = Record::new();
         let mut after_title = old_title.clone();
         let mut after_enabled = old_enabled;
         let mut after_timezone = old_timezone.clone();
+        let mut after_aggregate = old_aggregate;
         if let Some(title) = input.title.as_deref() {
             let title = title.trim();
             record.insert("title", serde_json::json!(title));
@@ -308,6 +359,10 @@ pub(super) async fn handle(
             let timezone = timezone.trim();
             record.insert("base_timezone", serde_json::json!(timezone));
             after_timezone = timezone.to_string();
+        }
+        if let Some(aggregate_batch) = input.aggregate_batch {
+            record.insert("aggregate_batch", serde_json::json!(aggregate_batch));
+            after_aggregate = aggregate_batch;
         }
         // 审批定义 ID：空串 = 清空（写 NULL），非空写 trim 后的值。
         if let Some(value) = input.approval_id.as_deref() {
@@ -419,12 +474,14 @@ pub(super) async fn handle(
                 old_enabled,
                 &old_timezone,
                 old_maps_count,
+                old_aggregate,
             )?),
             Some(config_audit_summary(
                 &after_title,
                 after_enabled,
                 &after_timezone,
                 plan.as_ref().map(|p| p.widgets.len()),
+                after_aggregate,
             )?),
         )?;
         audit::append_in_tx(&mut transaction, &event).await?;
@@ -442,6 +499,7 @@ fn config_audit_summary(
     enabled: bool,
     base_timezone: &str,
     maps_count: Option<usize>,
+    aggregate_batch: bool,
 ) -> Result<audit::AuditSummary, BaseError> {
     // 审计摘要禁止嵌套对象；映射明细仍由配置表保存，审计记录数量即可。
     audit::summary([
@@ -449,6 +507,7 @@ fn config_audit_summary(
         ("enabled", serde_json::json!(enabled)),
         ("base_timezone", serde_json::json!(base_timezone)),
         ("maps_count", serde_json::json!(maps_count)),
+        ("aggregate_batch", serde_json::json!(aggregate_batch)),
     ])
 }
 
@@ -458,8 +517,19 @@ mod tests {
 
     #[test]
     fn mapping_updates_have_valid_audit_summaries() -> Result<(), BaseError> {
-        for count in [None, Some(0), Some(13), Some(1000)] {
-            let summary = config_audit_summary("技术测试专用", true, "Asia/Shanghai", count)?;
+        for (count, aggregate_batch) in [
+            (None, false),
+            (Some(0), false),
+            (Some(13), true),
+            (Some(1000), true),
+        ] {
+            let summary = config_audit_summary(
+                "技术测试专用",
+                true,
+                "Asia/Shanghai",
+                count,
+                aggregate_batch,
+            )?;
             assert_eq!(
                 summary.as_json(),
                 serde_json::json!({
@@ -467,6 +537,7 @@ mod tests {
                     "enabled": true,
                     "base_timezone": "Asia/Shanghai",
                     "maps_count": count,
+                    "aggregate_batch": aggregate_batch,
                 })
             );
         }
@@ -488,12 +559,77 @@ mod tests {
             department_field: None,
             handler_field: None,
             batch_scope_field: None,
+            aggregate_batch: None,
         }
     }
 
     #[test]
     fn at_least_one_field_is_required() {
         assert!(input().validate().is_err(), "没有更新字段必须被拒");
+    }
+
+    /// 只开关聚合也算一次合法更新（不触发字段拉取，见 `has_column_updates`）。
+    #[test]
+    fn aggregate_batch_alone_is_a_valid_update() {
+        for aggregate_batch in [true, false] {
+            let value = UpdateConfigInput {
+                aggregate_batch: Some(aggregate_batch),
+                ..input()
+            };
+            assert!(value.validate().is_ok(), "仅聚合开关也是合法更新");
+            assert!(
+                !value.has_column_updates(),
+                "开关不是列坐标更新，不应触发 list_all_fields 出站"
+            );
+        }
+    }
+
+    /// 库内没有批量范围列时，单独打开聚合必须拒绝。
+    #[test]
+    fn enabling_aggregate_without_stored_scope_is_rejected() {
+        let value = UpdateConfigInput {
+            aggregate_batch: Some(true),
+            ..input()
+        };
+        let reasons = value.aggregate_reasons(false, None, None);
+        assert!(!reasons.is_empty(), "缺批量范围列必须拒绝");
+        assert!(reasons[0].contains("批量范围复选框列"), "{}", reasons[0]);
+    }
+
+    /// 清空范围列而聚合仍是 true（库内现值）→ 合并后拒绝。
+    #[test]
+    fn clearing_scope_while_aggregate_remains_on_is_rejected() {
+        let value = UpdateConfigInput {
+            batch_scope_field: Some(String::new()),
+            ..input()
+        };
+        let reasons = value.aggregate_reasons(true, Some("fldScope"), None);
+        assert!(!reasons.is_empty(), "聚合仍开着时不能清空范围列");
+    }
+
+    /// 只关开关 → 不需要范围列，校验通过。
+    #[test]
+    fn disabling_aggregate_alone_is_allowed() {
+        let value = UpdateConfigInput {
+            aggregate_batch: Some(false),
+            ..input()
+        };
+        assert!(value
+            .aggregate_reasons(true, Some("fldScope"), Some("fldScope"))
+            .is_empty());
+    }
+
+    /// 同一次更新里既开开关又给范围列 → 合并后通过。
+    #[test]
+    fn enabling_aggregate_with_scope_in_the_same_update_is_allowed() {
+        let value = UpdateConfigInput {
+            aggregate_batch: Some(true),
+            batch_scope_field: Some("fldScope".to_string()),
+            ..input()
+        };
+        assert!(value
+            .aggregate_reasons(false, None, Some("fldScope"))
+            .is_empty());
     }
 
     #[test]
