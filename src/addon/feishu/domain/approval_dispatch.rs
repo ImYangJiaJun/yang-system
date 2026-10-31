@@ -107,6 +107,13 @@ impl DispatchResult {
     }
 }
 
+/// 任务没有发起人身份时的等待文案。
+///
+/// worker（认领后零出站早退）与编排层（`dispatch_one` 第 2 步）共用同一句：
+/// 两处各写一份必然漂移，而用户看到的就是这句话。
+pub(crate) const MISSING_INITIATOR_REASON: &str =
+    "该任务没有发起人身份（发起人只能来自点击按钮的人）。请在表格里重新点击按钮发起。";
+
 /// 一条记录的处理输入。
 pub(crate) struct DispatchInput<'a> {
     pub(crate) fields: &'a [FieldItem],
@@ -116,16 +123,19 @@ pub(crate) struct DispatchInput<'a> {
     pub(crate) record_id: &'a str,
     /// 该记录的原始单元格（键是字段 id）。
     pub(crate) cells: &'a serde_json::Map<String, Value>,
-    /// 申请人的人员字段 id。
+    /// 申请人的人员字段 id —— **写目标**：创建成功后系统把点击人 open_id 写进该列。
+    ///
+    /// 它不再是发起人的**来源**（2026-10-31 起）：发起人只能是请求里的点击人，
+    /// 读该列等于允许「谁填的列就是谁发起」，即替别人发起审批。
     pub(crate) applicant_field: &'a str,
-    /// 请求传入的发起人（工作流触发人）**open_id**。
+    /// 请求传入的发起人（工作流触发人）**open_id**，派发与写回的唯一身份来源。
     ///
     /// # 上层契约（别在这里做姓名解析）
     ///
     /// 真机 `$.step_btn.user` 渲染出来的是**姓名**（设计 M11 定论），所以
     /// 「姓名 → open_id」的 contact 解析是**调用方**（dispatch Action / worker）的
-    /// 职责；本字段拿到的**已是 open_id**。`Some` 时替代表格列读取（设计 §6.2 D2），
-    /// 未传参的存量工作流行为零变化。
+    /// 职责；本字段拿到的**已是 open_id**。`None` 只可能出现在**旧任务行**上
+    /// （身份落库之前的存量），编排层据此落等待态、零出站。
     pub(crate) applicant: Option<String>,
     /// 回填字段 id。
     /// 回填列的**当前列名**（不是 `field_id`）。
@@ -241,7 +251,7 @@ impl BitableBackfill<'_> {
                         return Err(OutboundFailure {
                             kind: FailureKind::Fatal { code: 0 },
                             message: "单选字段的值必须是字符串".to_string(),
-                        })
+                        });
                     }
                 }
             }
@@ -254,14 +264,14 @@ impl BitableBackfill<'_> {
                         return Err(OutboundFailure {
                             kind: FailureKind::Fatal { code: 0 },
                             message: format!("日期字段的值不是毫秒时间戳：{text}"),
-                        })
+                        });
                     }
                 },
                 _ => {
                     return Err(OutboundFailure {
                         kind: FailureKind::Fatal { code: 0 },
                         message: "日期字段的值必须是毫秒时间戳".to_string(),
-                    })
+                    });
                 }
             },
             // 人员：`[{"id":"ou_.."}]`（官方：记录写接口仅支持传入 id）。
@@ -270,14 +280,14 @@ impl BitableBackfill<'_> {
                 return Err(OutboundFailure {
                     kind: FailureKind::Fatal { code: 0 },
                     message: "人员字段的值必须是 [{\"id\":\"ou_..\"}] 数组".to_string(),
-                })
+                });
             }
             Some(1) | None => value.get("text").unwrap_or(value).clone(),
             _ => {
                 return Err(OutboundFailure {
                     kind: FailureKind::Fatal { code: 0 },
                     message: "回填列必须是文本/链接/单选/日期/人员字段".to_string(),
-                })
+                });
             }
         };
         Ok(Some(cell))
@@ -414,7 +424,7 @@ pub(crate) async fn dispatch_one(
             _ => {
                 return DispatchResult::Retryable {
                     message: "任务执行权失效或外部结果未知，禁止重新创建".into(),
-                }
+                };
             }
         }
     }
@@ -463,45 +473,39 @@ pub(crate) async fn dispatch_one(
         }
     }
 
-    // ---- 2. 申请人 ----
+    // ---- 2. 发起人 ----
     //
-    // D2 回退语义（设计 §6.2）：请求传了 `applicant`（上层已把触发人姓名解析成
-    // open_id）就**直接用它**，跳过表格列读取；没传则回退读表格列——存量工作流
-    // 行为零变化。`Waiting` 判据因此从「表格缺申请人」变为「请求缺 applicant
-    // 且表格也缺」。传参路径下 `applicant_field` 的语义翻转为**写目标**：回填
-    // 成功时把 open_id 写回该列（设计 §6.4，见 `write_extended`），回退路径不写。
-    let open_id = match input
+    // **唯一来源是请求参数**（上层已把点击人姓名解析成 open_id）。系统不读多维
+    // 表格的申请人列：那一列是「填表人认为该谁发起」，而审批必须由点按钮的人
+    // 发起——否则任何人填一列别人的名字就能替别人提单。传参路径下
+    // `applicant_field` 的语义只剩**写目标**：回填成功时把 open_id 覆盖进该列
+    // （设计 §6.4，见 `write_extended`）。
+    //
+    // 没有身份只有一种来源：上线前的旧任务行（身份落库机制之前建的行）。它对
+    // 应「等待」，且**零出站**——不读表结构、不读记录、不打飞书，等有人再点一次
+    // 该行把身份补上。
+    let Some(open_id) = input
         .applicant
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        Some(applicant) => applicant.to_string(),
-        None => match applicant_open_id(input.cells, input.applicant_field) {
-            Some(open_id) => open_id,
-            None => {
-                tracing::info!(
-                    stage = "applicant",
-                    applicant_field = input.applicant_field,
-                    field_present = input.cells.contains_key(input.applicant_field),
-                    outcome = "waiting",
-                    reason = "缺少申请人或人员字段中没有有效 ID",
-                    "审批派发等待补齐数据"
-                );
-                return DispatchResult::Waiting {
-                    reason: format!(
-                        "申请人字段「{}」缺少有效人员 ID，请填写该人员列（字段定位：{}）。",
-                        super::approval_feedback::field_name(input.fields, input.applicant_field),
-                        input.applicant_field
-                    ),
-                };
-            }
-        },
+    else {
+        tracing::info!(
+            stage = "initiator",
+            record_id = input.record_id,
+            outcome = "waiting",
+            reason = "任务没有发起人身份",
+            "审批派发等待补齐发起人"
+        );
+        return DispatchResult::Waiting {
+            reason: MISSING_INITIATOR_REASON.to_string(),
+        };
     };
+    let open_id = open_id.to_string();
     tracing::debug!(
-        stage = "applicant",
+        stage = "initiator",
         applicant_field = input.applicant_field,
-        "申请人字段校验通过"
+        "发起人校验通过"
     );
 
     // ---- 3. 组装 form ----
@@ -709,7 +713,7 @@ pub(crate) async fn dispatch_one(
                     };
                 }
                 Err(failure) => {
-                    return classify_failure(failure, input, backfill, uuid.as_str()).await
+                    return classify_failure(failure, input, backfill, uuid.as_str()).await;
                 }
             }
         }
@@ -1032,16 +1036,16 @@ pub(crate) async fn write_extended(
             fields.push((field, Value::String(flow)));
         }
     }
-    // 发起人列写回（§6.4）：传参路径把 open_id 写回 `applicant_field` 目标列。
-    // 仅在传参路径（D2）写——回退读表格列时该列本就有值，不回写。
-    if input.applicant.is_some() && !input.applicant_field.trim().is_empty() {
-        let applicant = input.applicant.as_deref().unwrap_or_default().trim();
-        if !applicant.is_empty() {
-            fields.push((
-                input.applicant_field,
-                Value::Array(vec![serde_json::json!({"id": applicant})]),
-            ));
-        }
+    // 发起人列写回（§6.4）：把点击人 open_id **覆盖**进 `applicant_field` 列。
+    // 这是该列唯一的写入方——用户手填的值在下一次成功创建时被改写成真正的发起人。
+    // 与六个扩展列同一口径：列不在表结构里就是整批失败（`write_fields` 全有全无），
+    // 任务留在 `CreatedPendingBackfill` 等人修，而不是悄悄只写一半。
+    let applicant = input.applicant.as_deref().unwrap_or_default().trim();
+    if !input.applicant_field.trim().is_empty() && !applicant.is_empty() {
+        fields.push((
+            input.applicant_field,
+            Value::Array(vec![serde_json::json!({"id": applicant})]),
+        ));
     }
     // 发起人部门：**优先写解析出的部门名**（`fill_department_name` 在拿详情后
     // 补上），解析失败/未配时退化为写 `department_id` 原值——信息不丢，用户
@@ -1268,32 +1272,6 @@ fn sanitize_terminal_message(raw: &str, code: i32) -> String {
         head
     } else {
         format!("[飞书 {code}] {head}")
-    }
-}
-
-/// 从单元格里取申请人的 `open_id`。
-///
-/// 多维表格的人员字段是对象数组（`[{"id": "ou_…"}]`）。取第一个——审批实例只能
-/// 有一个发起人，而人员字段若配成多选，多出来的人没有对应的语义。
-pub(crate) fn applicant_open_id(
-    cells: &serde_json::Map<String, Value>,
-    field_id: &str,
-) -> Option<String> {
-    let cell = cells.get(field_id)?;
-    let first = match cell {
-        Value::Array(items) => items.first()?,
-        other => other,
-    };
-    let id = match first {
-        Value::Object(map) => map.get("id").and_then(Value::as_str),
-        Value::String(text) => Some(text.as_str()),
-        _ => None,
-    }?;
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 
@@ -1645,7 +1623,10 @@ mod tests {
     fn approval_link_encodes_both_paths_and_rejects_query_injection() {
         let link =
             super::super::approval::instance_applink("INST-A").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(link, "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path_pc=pc%2Fpages%2Fin-process%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable&path=pages%2Fdetail%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable");
+        assert_eq!(
+            link,
+            "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path_pc=pc%2Fpages%2Fin-process%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable&path=pages%2Fdetail%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable"
+        );
         for invalid in ["", "x&injected=y", "bad/id", "a%26b", "中文"] {
             assert!(super::super::approval::instance_applink(invalid).is_err());
         }
@@ -1745,8 +1726,11 @@ mod tests {
             ui_type: None,
             property: None,
         }];
+        // 本用例只验编号回填：发起人列写回会在成功创建后额外写一次（见
+        // `write_extended`），所以在夹具里关掉它，让 `bodies[0]` 仍是编号。
         let cells = cells(&[]);
-        let input = input(&cells, &[]);
+        let mut request = input(&cells, &[]);
+        request.applicant = None;
         let tokens = fake_tokens();
         for (code, serial, response, write, success) in [
             (
@@ -1771,12 +1755,12 @@ mod tests {
                 transport: &transport,
                 sleeper: &NoSleep,
                 tokens: &tokens,
-                coordinates: input.coordinates,
+                coordinates: request.coordinates,
                 fields: &fields,
             };
             let result = finish_backfill(
                 &writer,
-                &input,
+                &request,
                 "source-uuid",
                 InstanceDetail {
                     instance_code: code.into(),
@@ -1834,7 +1818,12 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| panic!("应可读取记录: {error}"));
-        assert_eq!(transport.requests(), vec!["Post https://open.feishu.cn/open-apis/bitable/v1/apps/appTest/tables/tblTest/records/batch_get"]);
+        assert_eq!(
+            transport.requests(),
+            vec![
+                "Post https://open.feishu.cn/open-apis/bitable/v1/apps/appTest/tables/tblTest/records/batch_get"
+            ]
+        );
     }
 
     /// token provider 只会在缓存未命中时用它，而 `FakeCache` 恒命中，
@@ -1893,10 +1882,15 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        /// 写入调用折成文本（`{"text": …}` 取 text，其余原样 `as_str`）。
+        /// 回填写入折成文本（`{"text": …}` 取 text，其余原样 `as_str`）。
+        ///
+        /// **不含 `fld_applicant`**：发起人列写回是每次成功创建都会发生的固定动作
+        /// （见 [`write_extended`]），把它算进来会让每条「编号回填了一次」的断言都
+        /// 变成 2。发起人写回单独用 [`Self::raw_writes`] 断言。
         fn writes(&self) -> Vec<(String, String, String)> {
             self.raw_writes()
                 .into_iter()
+                .filter(|(_, field, _)| field != "fld_applicant")
                 .map(|(record_id, field, value)| {
                     (
                         record_id,
@@ -2006,7 +2000,9 @@ mod tests {
             record_id: "rec001",
             cells,
             applicant_field: "fld_applicant",
-            applicant: None,
+            // 发起人只来自请求（点击人）。夹具统一给一个，用 `ou_abc` 与各用例里
+            // 「申请人列」的值区分开——两者相同会让「到底读了谁」验不出来。
+            applicant: Some("ou_abc".to_string()),
             backfill_field_name: "审批编号",
             status_field: None,
             flow_field: None,
@@ -2899,29 +2895,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_applicant_waits_without_writing_anything() {
-        // 用户先填业务字段、后填申请人的那一轮：不能写字段，否则该行被永久钉死。
+    async fn missing_initiator_waits_without_any_outbound() {
+        // 没有发起人身份的任务（上线前的存量行 / 受理与落库之间的窄窗口）：
+        // 等待、**零出站**，且不写任何字段。表格申请人列填着人也不再被读——
+        // 读它就等于允许替别人发起。
         let transport = ScriptedTransport::new(vec![]);
         let backfill = RecordingBackfill::default();
         let widgets = [widget("w1", "input")];
-        let cells = cells(&[("fld_title", json!("报销"))]);
+        let cells = cells(&[
+            ("fld_applicant", json!([{"id": "ou_someone_else"}])),
+            ("fld_title", json!("报销")),
+        ]);
+        let mut request = input(&cells, &widgets);
+        request.applicant = None;
 
-        let tokens = fake_tokens();
-        let result = dispatch_one(
-            &transport,
-            &NoSleep,
-            &tokens,
-            &backfill,
-            &input(&cells, &widgets),
-        )
-        .await;
+        let result = dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
 
         assert!(
-            matches!(result, DispatchResult::Waiting { .. }),
+            matches!(&result, DispatchResult::Waiting { reason } if reason.contains("发起人身份")),
             "{result:?}"
         );
+        assert!(transport.requests().is_empty(), "等待态不得发出站请求");
         assert!(backfill.writes().is_empty(), "等待态不得写字段");
-        assert!(transport.requests().is_empty(), "等待态不应打任何飞书接口");
     }
 
     #[tokio::test]
@@ -3244,23 +3239,6 @@ mod tests {
     }
 
     #[test]
-    fn applicant_accepts_object_array_and_plain_string() {
-        assert_eq!(
-            applicant_open_id(&cells(&[("f", json!([{"id": "ou_x"}]))]), "f").as_deref(),
-            Some("ou_x")
-        );
-        // 历史数据可能是裸字符串。
-        assert_eq!(
-            applicant_open_id(&cells(&[("f", json!("ou_y"))]), "f").as_deref(),
-            Some("ou_y")
-        );
-        // 空格串等同缺失。
-        assert_eq!(applicant_open_id(&cells(&[("f", json!("  "))]), "f"), None);
-        assert_eq!(applicant_open_id(&cells(&[("f", json!([]))]), "f"), None);
-        assert_eq!(applicant_open_id(&cells(&[]), "f"), None);
-    }
-
-    #[test]
     fn sanitize_keeps_the_code_and_drops_the_raw_body() {
         // 多维表格的读者范围远大于运维，原样回灌可能泄漏 request_id / 租户信息。
         let raw = r#"{"code":1390001,"msg":"param is invalid","request_id":"req_secret"}"#;
@@ -3494,6 +3472,8 @@ mod tests {
                 "fld_status",
                 "fld_handler",
                 "fld_flow",
+                // 发起人列由系统覆盖成点击人（`input()` 夹具的 `ou_abc`）。
+                "fld_applicant",
                 "fld_department",
             ],
             "完成时间 \"0\" 必须跳过：{writes:?}"
@@ -3502,7 +3482,12 @@ mod tests {
         assert_eq!(writes[2].2, json!("审批中(已撤销)"));
         assert_eq!(writes[3].2, json!([{"id":"ou_b"}]));
         assert_eq!(writes[4].2, json!("部门审批✓ → 财务审批⏳ → 法务⏳"));
-        assert_eq!(writes[5].2, json!("db59a45c851464gf"));
+        assert_eq!(
+            writes[5].2,
+            json!([{"id":"ou_abc"}]),
+            "发起人列被点击人覆盖"
+        );
+        assert_eq!(writes[6].2, json!("db59a45c851464gf"));
         // 扩展字段必须**合并为一次**批量写（2026-10-15 优化：逐条 N 次串行
         // API 调用 → 1 次，实测 6 个字段省约 5s）；一次覆盖全部已收集字段。
         assert_eq!(
@@ -3514,6 +3499,7 @@ mod tests {
                     "fld_status".to_string(),
                     "fld_handler".to_string(),
                     "fld_flow".to_string(),
+                    "fld_applicant".to_string(),
                     "fld_department".to_string(),
                 ],
             )],
@@ -3542,6 +3528,12 @@ mod tests {
                     json!({"text":"SERIAL","link":super::super::approval::instance_applink("INST-A").unwrap_or_else(|e| panic!("{e}"))})
                 ),
                 ("rec001".to_string(), "fld_handler".to_string(), json!([])),
+                // 发起人列随成功创建一起被覆盖成点击人（`input()` 夹具的 `ou_abc`）。
+                (
+                    "rec001".to_string(),
+                    "fld_applicant".to_string(),
+                    json!([{"id":"ou_abc"}])
+                ),
             ]
         );
     }
@@ -3615,12 +3607,12 @@ mod tests {
         );
     }
 
-    /// 传参路径：`applicant` 替代表格列读取（D2），空白串回退读列。
+    /// 发起人只来自请求参数：空白/缺失时等待（**不**回读表格申请人列）。
     #[tokio::test]
-    async fn applicant_param_replaces_the_cell_read_and_blank_falls_back() {
+    async fn applicant_param_drives_the_create_request_and_is_written_back() {
         let widgets = [widget("w1", "input")];
-        // 传参：cells 里**没有**申请人也能创建，create 请求体的 open_id 是传参值
-        // （trim 后）。上层已把姓名解析成 open_id，这里不该再做任何解析。
+        // cells 里**没有**申请人也能创建，create 请求体的 open_id 是传参值（trim 后）。
+        // 上层已把姓名解析成 open_id，这里不该再做任何解析。
         let transport = ScriptedTransport::new(vec![
             (200, &ok_create("INST-P")),
             (200, &ok_detail("INST-P", "SERIAL-P")),
@@ -3643,7 +3635,7 @@ mod tests {
                 Some(json!("ou_from_param"))
             );
         }
-        // §6.4：传参路径把发起人写回 applicant_field 列（回退路径不写）。
+        // §6.4：发起人列被**覆盖**成点击人。
         {
             let writes = backfill.raw_writes();
             assert_eq!(
@@ -3652,49 +3644,26 @@ mod tests {
                     .find(|(_, field, _)| field == "fld_applicant")
                     .map(|(_, _, value)| value.clone()),
                 Some(json!([{"id": "ou_from_param"}])),
-                "传参路径必须回写发起人列"
+                "创建成功后必须覆盖发起人列"
             );
         }
 
-        // 空白串等同未传参 → 回退读表格列；表格也缺 → Waiting（不写字段、不打接口）。
+        // 空白串等同缺失 → 等待、零出站；表格列的 `ou_cell` **不被采纳**。
         let transport = ScriptedTransport::new(vec![]);
         let backfill = RecordingBackfill::default();
-        let empty = cells(&[]);
-        let mut request = input(&empty, &widgets);
+        let cell_map = cells(&[("fld_applicant", json!([{"id":"ou_cell"}]))]);
+        let mut request = input(&cell_map, &widgets);
         request.applicant = Some("   ".to_string());
         assert!(matches!(
             dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await,
             DispatchResult::Waiting { .. }
         ));
-        assert!(transport.requests().is_empty());
-        assert!(backfill.writes().is_empty());
-
-        // 空白串 + 表格列有值 → 回退读列成功（存量工作流行为零变化）。
-        let transport = ScriptedTransport::new(vec![
-            (200, &ok_create("INST-F")),
-            (200, &ok_detail("INST-F", "SERIAL-F")),
-        ]);
-        let cell_map = cells(&[("fld_applicant", json!([{"id":"ou_cell"}]))]);
-        let mut request = input(&cell_map, &widgets);
-        request.applicant = Some(String::new());
-        let recording = RecordingBackfill::default();
-        assert!(matches!(
-            dispatch_one(&transport, &NoSleep, &fake_tokens(), &recording, &request).await,
-            DispatchResult::Backfilled { .. }
-        ));
-        let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(
-            bodies[0].as_ref().map(|body| body["open_id"].clone()),
-            Some(json!("ou_cell"))
-        );
-        // 回退路径不回写发起人列（该列本就有值，D2 行为零变化）。
         assert!(
-            !recording
-                .raw_writes()
-                .iter()
-                .any(|(_, field, _)| field == "fld_applicant"),
-            "回退路径不得回写发起人列"
+            transport.requests().is_empty(),
+            "没传发起人不得读表/建单：{:#?}",
+            transport.requests()
         );
+        assert!(backfill.writes().is_empty());
     }
 
     /// 最小可用详情；扩展字段按需用结构体更新语法覆盖。

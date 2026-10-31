@@ -49,8 +49,8 @@ use crate::addon::feishu::domain::approval_convert::{
     amount_currency, format_local, is_empty, FixedOffset,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
-    applicant_open_id, dispatch_one, widget_maps_from_rows, BitableBackfill,
-    DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
+    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
+    DispatchResult as OrchestrationResult,
 };
 use crate::addon::feishu::domain::approval_execution::{self, DispatchSnapshot, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
@@ -83,6 +83,12 @@ use crate::addon::feishu::domain::approval_provision::{
 ///
 /// 与 `option/actions/approval_options.rs` 的 `codes` 模块同域不重号。
 const APPLICANT_UNRESOLVED: i32 = 40005;
+
+/// 请求没带发起人（`applicant` 与兼容别名 `requested_by` 都为空；40006）。
+///
+/// 发起人只能是**点击人**：系统不再读多维表格的申请人列（那等于替别人发起）。
+/// 所以缺发起人是工作流模板的问题，必须当场拒并说清怎么改。
+const INITIATOR_MISSING: i32 = 40006;
 
 /// 配置不存在：`config_key` 没有对应的已启用配置行（40401）。
 ///
@@ -125,7 +131,7 @@ const CODE_CONTACT_SCOPE_MISSING: i32 = 99991672;
 /// # 为什么没有 `base_token` / `table_id` / `approval_code` 等配置字段
 ///
 /// 配置只在控制台建（`create_config` 向导）。请求体只带运行时参数：`token`（鉴权）、
-/// `record_id`（可选）、`applicant`（可选）、`requested_by`（可选）。工作流不再
+/// `record_id`（可选）、`applicant`（**必填**，兼容别名 `requested_by`）。工作流不再
 /// 携带任何配置数据——那是本次契约改形的核心（见模块文档）。
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -133,17 +139,21 @@ pub(super) struct DispatchInput {
     /// 访问 Token：与 URL 里 `config_key` 那行配置的 `token_hash` 摘要比对。
     /// 由控制台「签发/轮换 Token」产出，工作流 `raw_body` 里填。
     pub(super) token: String,
-    /// 单条处理时的记录 id；省略表示处理全表待处理记录。
+    /// 单条处理时的记录 id；省略表示处理本配置的全部待处理记录。
     #[serde(default)]
     pub(super) record_id: Option<String>,
-    /// 请求人（工作流触发人）。工作流模板在 `raw_body` 里带 `$.step_btn.user`；
-    /// 未带或 trim 后为空时落库统一记 `feishu-workflow`。仅记录用，不影响派发。
+    /// `applicant` 的**兼容别名**（旧模板两个字段都填 `$.step_btn.user`，值相同）。
+    ///
+    /// 派发仍以 `applicant` 为准，这里只在 `applicant` 缺失时顶上（见
+    /// [`Self::initiator`]）。保留它是因为存量飞书工作流模板还在发这个字段，而
+    /// `deny_unknown_fields` 会让它们直接 400——那不是这次要改的东西。
     #[serde(default)]
     pub(super) requested_by: Option<String>,
-    /// 发起人（工作流触发人）。真机 `$.step_btn.user` 渲染成**姓名**（设计 M11 定论），
-    /// 所以这里是**姓名**，由本端点经 contact 搜索解析成 open_id 后使用（§6.2）；
-    /// 解析失败一律 fail（可行动文案），不落等待态。传了才走新路径并回写
-    /// applicant_field 列（D2 缺省回退旧行为）。
+    /// 发起人（工作流触发人）**姓名**。真机 `$.step_btn.user` 渲染成 name（设计 M11）。
+    ///
+    /// 这是审批发起人的**唯一**来源：系统不再读多维表格的申请人列（那等于允许
+    /// 替别人发起），表中该列只在创建成功后被覆盖成点击人。`None`/空白且别名也为空
+    /// 时在鉴权后直接拒绝（`INITIATOR_MISSING`），不落等待态。
     #[serde(default)]
     pub(super) applicant: Option<String>,
     /// 明确指定通知接收人的 ID 类型与 ID/邮箱；不从姓名或申请人推断。
@@ -160,8 +170,9 @@ impl ParamInput for DispatchInput {
 impl DispatchInput {
     /// 进入处理前的入参校验。
     ///
-    /// 只剩三件运行时参数：`token` 必填（鉴权），`record_id` 传了必须非空，
-    /// `requested_by` 长度受控（列上限 128 字符）。
+    /// 三件运行时参数：`token` 必填（鉴权），`record_id` 传了必须非空，
+    /// `requested_by` 长度受控（列上限 128 字符）。发起人缺失**不在这里**判——
+    /// 鉴权前拒绝会把「Token 错」伪装成「缺发起人」。
     fn validate(&self) -> Result<(), BaseError> {
         if self.token.trim().is_empty() {
             return Err(BaseError::ParamInvalid(
@@ -173,12 +184,12 @@ impl DispatchInput {
             if record_id.trim().is_empty() {
                 return Err(BaseError::ParamInvalid(
                     "record_id".to_string(),
-                    "传了就必须非空；处理全表请整个省略该字段".to_string(),
+                    "传了就必须非空；处理整个队列请整个省略该字段".to_string(),
                 ));
             }
         }
-        // 请求人只记录不参与派发：trim 后空串按缺失处理（落 `feishu-workflow`），
-        // 非空则长度受控——列上限 varchar(128) 按字符数计。
+        // 兼容别名会被原样落进请求记录的 `request_body`；列上限 varchar(128)
+        // 按字符数计，超长只截断 `message` 不拦请求，但显式拒更清楚。
         if let Some(requested_by) = &self.requested_by {
             if requested_by.trim().chars().count() > 128 {
                 return Err(BaseError::ParamInvalid(
@@ -189,6 +200,20 @@ impl DispatchInput {
         }
         Ok(())
     }
+
+    /// 发起人姓名：`applicant` 优先，`requested_by` 兜底（旧模板的兼容别名）。
+    ///
+    /// 两者都是 `$.step_btn.user` 渲染出的**姓名**；trim 后为空的按缺失处理。
+    /// 调用方必须在鉴权之后用它，`None` 即拒绝派发。
+    fn initiator(&self) -> Option<&str> {
+        trimmed_request_value(self.applicant.as_deref())
+            .or_else(|| trimmed_request_value(self.requested_by.as_deref()))
+    }
+}
+
+/// trim 后非空才算有值——空白串与缺省同义。
+fn trimmed_request_value(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// URL 路径参数 `config_key` 的校验：进 `where_eq` 前 trim；空值直接拒。
@@ -377,25 +402,17 @@ struct DispatchOutcome {
     /// 必填列的取值来源。旧形态从请求体拿，改形后请求体不再携带配置数据。
     base_token: Option<String>,
     table_id: Option<String>,
-    /// 通知的兜底接收人：派发时解析出的申请人 open_id（传参优先、回退表格列，
-    /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
-    /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
+    /// 发起人 open_id（请求参数解析出的点击人，必有值——缺失在入口就被拒了）。
+    ///
+    /// 两个用途同源：`complete_feedback` 在请求未显式指定 `notification_recipient`
+    /// 时用它当下发接收人；单条点击随后把它交给 worker（落 `feishu_approval_task_applicant`），
+    /// 让重试路径用的也是点击时的那个人。**永远不是表格申请人列的值**——那列是
+    /// 系统回写的产物，拿它当身份就是「替别人发起」。
     applicant_open_id: Option<String>,
-    /// **仅来自请求参数**的发起人 open_id（不含表格申请人列的回退）。
-    ///
-    /// 与 [`Self::applicant_open_id`] 的分工：那个是「通知该发给谁」（传参优先、
-    /// 回退表格列），这个是「worker 看不到的那一半」——单条点击解析出的发起人只
-    /// 活在那一次同步派发里，worker 重试读的是表格列，于是报出与点击时不同的原因、
-    /// 通知退回记录创建人。`handle` 把它落进 `feishu_approval_task_applicant`
-    /// （与全表受理同一张表），重试路径才有点击时的那个人。
-    ///
-    /// 只落参数来源、不落表格列：表格列 worker 自己读得到，落下去反而会把列上的
-    /// 后续修正钉死。
-    requested_applicant_open_id: Option<String>,
     /// 通知的**最后兜底**接收人：记录创建人 open_id（`automatic_fields` 取回）。
     ///
-    /// 申请人列空着时（waiting 的主因）它是唯一还能定位到的触发人——
-    /// 「用户发起过请求就必须收到反馈」这条原则不能因为申请人没填而断掉。
+    /// 发起人不可达时它是唯一还能定位到的触发人——「用户发起过请求就必须收到
+    /// 反馈」这条原则不能因为身份缺失而断掉。
     creator_open_id: Option<String>,
     /// 通知结果（默认 `{"status":"not_requested"}`）。
     notification: serde_json::Value,
@@ -419,7 +436,6 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             applicant_open_id: None,
-            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
@@ -439,7 +455,6 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             applicant_open_id: None,
-            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
@@ -472,7 +487,6 @@ impl DispatchOutcome {
             base_token,
             table_id,
             applicant_open_id: None,
-            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
@@ -614,6 +628,20 @@ async fn handle_dispatch(
         Err(outcome) => return Ok(outcome),
     };
     tracing::debug!(stage = "config", config_id, "审批派发已匹配启用配置");
+    // 鉴权之后第一件事：发起人必须来自请求（`applicant` 优先、`requested_by` 兼容）。
+    //
+    // 放在鉴权之后是刻意的——Token 错时该返回 40301 而不是「缺发起人」。这里是
+    // 「替别人发起」的唯一堵口：系统不再读多维表格的申请人列，所以请求里没有
+    // 点击人就没有任何身份可用；退回读列等于把「谁填的列」当成「谁点的按钮」。
+    let Some(initiator) = input.initiator() else {
+        tracing::warn!(stage = "initiator", config_id, "审批派发请求缺少发起人");
+        return Ok(DispatchOutcome::fail(
+            INITIATOR_MISSING,
+            Some(config_id),
+            "请求缺少发起人（applicant）：请在工作流请求体里把 applicant 设为触发人变量（$.step_btn.user）。\
+             系统按点击人发起审批，不再读取表格的申请人列。",
+        ));
+    };
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
@@ -625,6 +653,7 @@ async fn handle_dispatch(
                 &base_token,
                 &table_id,
                 record_id,
+                initiator,
                 input,
             )
             .await
@@ -639,7 +668,7 @@ async fn handle_dispatch(
             if let Ok(handle) = ctx.tools().extension::<ApprovalDispatchHandle>() {
                 if let Err(error) = handle.request_dispatch(
                     config_id,
-                    outcome.requested_applicant_open_id.clone(),
+                    outcome.applicant_open_id.clone(),
                     // 单条点击：发起人只落到被点的那一行，不能广播给同配置的
                     // 其它跨轮待处理任务。
                     Some(record_id.to_string()),
@@ -653,45 +682,28 @@ async fn handle_dispatch(
         //
         // 受理**必须在鉴权通过之后**：Token 校验失败一律不出站、不入队。
         None => {
-            // 受理前先解析发起人（若有）：值形态是**姓名**（M11），要解析成 open_id
-            // 才能随信号交给 worker 落库（设计 §6.3）。未传/空白 → 现状，不建出站栈。
-            let resolved = if input
-                .applicant
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .is_some()
-            {
-                let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+            // 值形态是**姓名**（M11），解析成 open_id 才能随信号交给 worker 落库
+            // （设计 §6.3）。发起人缺失上面已经拒过了，这里必有值。
+            let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+                return Ok(DispatchOutcome::fail(
+                    50301,
+                    Some(config_id),
+                    "飞书出站凭证未配置",
+                ));
+            };
+            let outbound = match outbound_setup::build(ctx, settings) {
+                Ok(outbound) => outbound,
+                Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
+            };
+            let resolved = match resolve_initiator(context, settings, &outbound, initiator).await {
+                Ok(open_id) => open_id,
+                Err(message) => {
                     return Ok(DispatchOutcome::fail(
-                        50301,
+                        APPLICANT_UNRESOLVED,
                         Some(config_id),
-                        "飞书出站凭证未配置",
+                        message,
                     ));
-                };
-                let outbound = match outbound_setup::build(ctx, settings) {
-                    Ok(outbound) => outbound,
-                    Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
-                };
-                match resolve_optional_applicant(
-                    context,
-                    settings,
-                    &outbound,
-                    input.applicant.as_deref(),
-                )
-                .await
-                {
-                    Ok(open_id) => open_id,
-                    Err(message) => {
-                        return Ok(DispatchOutcome::fail(
-                            APPLICANT_UNRESOLVED,
-                            Some(config_id),
-                            message,
-                        ))
-                    }
                 }
-            } else {
-                None
             };
 
             // 拿不到句柄说明 worker 没起（凭证缺失）。**不返回 accepted**——
@@ -703,23 +715,20 @@ async fn handle_dispatch(
             // 批量受理：`record_id = None`，发起人落到本轮播种/重开的所有行。
             // `resolved` 另留一份给 outcome：受理回执要发给点击人（见
             // `fallback_recipient_of` 对 `Accepted` 的放行）。
-            let clicker = resolved.clone();
-            if let Err(error) = handle.request_dispatch(config_id, resolved, None) {
+            let clicker = Some(resolved.clone());
+            if let Err(error) = handle.request_dispatch(config_id, Some(resolved), None) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
             tracing::debug!(
                 stage = "enqueue",
                 config_id,
-                scope = "all_enabled_configs",
+                scope = "clicked_config",
                 "审批派发已发送 Worker 唤醒信号"
             );
 
-            // 语义是「跑一轮全队列」，**不是**只跑本表。
-            //
-            // 用方原意就是「处理所有没有审批编号的数据」，而这三张表是按
-            // `config_key` 定位的；按表分流会让同一队列出现「点了 A 的
-            // 按钮却不处理 B 的数据」这种反直觉行为。多表并发时谁先点谁先跑整批，
-            // 结果仍是一致的（uuid 幂等兜底）。
+            // 只处理**被点配置**：播种范围收窄到 `Manual(config_id)`（见 worker 的
+            // `seed_tasks`）。发起人来自点击人，跨配置的其它表没有可用的身份；
+            // 顺带收掉「用 A 表的 Token 触发 B 表建单」的越权面。
             let mut outcome = DispatchOutcome::success(
                 Outcome::Accepted,
                 Some(config_id),
@@ -770,7 +779,10 @@ async fn write_request_log(
         }
     };
     let log = RequestLog {
-        requested_by: normalized_requested_by(input.requested_by.as_deref()),
+        requested_by: normalized_requested_by(
+            input.applicant.as_deref(),
+            input.requested_by.as_deref(),
+        ),
         // 坐标来自配置行（`config_key` 定位），不再取自请求体。取不到（鉴权前的
         // 失败出口）落空串——`base_token`/`table_id` 是日志表的必填列，不能 NULL。
         base_token: outcome
@@ -816,26 +828,20 @@ async fn write_request_log(
     }
 }
 
-/// 请求里的 `applicant`（**姓名**）→ 供编排使用的 open_id。
+/// 请求里的发起人（**姓名**，已由调用方归一非空）→ 供编排使用的 open_id。
 ///
-/// 返回 `Ok(Some(open_id))`（唯一命中）/ `Ok(None)`（未传或 trim 后为空——完全走
-/// 现状读表格列）/ `Err(可行动文案)`（未命中、重名多命中、或通讯录出站失败）。
+/// 返回 `Ok(open_id)`（唯一命中）/ `Err(可行动文案)`（未命中、重名多命中、或通讯录
+/// 出站失败）。没有「未传」出口：发起人缺失在 [`handle_dispatch`] 鉴权之后就被拒了。
 ///
 /// 抽成独立函数是为了能被单测直接驱动：`dispatch_single` 本身要 `ActionContext`
-/// 才能读配置行，而这条解析链路的三个出口（命中/未命中/空白回退）正是本期新增、
-/// 最需要钉住的部分。两条路径（单条同步、全表受理）共用它，口径不会漂。
-async fn resolve_optional_applicant(
+/// 才能读配置行，而这条解析链路的两个出口（命中/失败）最需要钉住。两条路径
+/// （单条同步、全表受理）共用它，口径不会漂。
+async fn resolve_initiator(
     context: &FeishuContext,
     settings: &FeishuSettings,
     outbound: &outbound_setup::Outbound,
-    applicant: Option<&str>,
-) -> Result<Option<String>, String> {
-    // 未传 / trim 后为空 → 返回 None（编排层回退读表格列），且**不打任何请求**：
-    // 这是「不传 applicant 就零行为变化」那条承诺的落点，也顺带避免了为一次
-    // 用不上的解析去取用户凭证（未授权时那会变成一条莫名其妙的失败）。
-    let Some(name) = trimmed_applicant(applicant) else {
-        return Ok(None);
-    };
+    name: &str,
+) -> Result<String, String> {
     let credentials = FeishuCredentials {
         app_id: settings.app_id.clone().unwrap_or_default(),
         app_secret: settings.app_secret.clone().unwrap_or_default(),
@@ -848,16 +854,7 @@ async fn resolve_optional_applicant(
     )
     .await
     .map_err(|error| format!("发起人姓名解析失败：{}", error.message()))?;
-    resolve_applicant_param(outbound.transport(), outbound.sleeper(), &bearer, name)
-        .await
-        .map(Some)
-}
-
-/// 归一姓名：未传 / trim 后为空 → `None`。
-///
-/// 单独成函数是为了让「空白姓名不打任何请求」这条承诺可离线钉住（见测试）。
-fn trimmed_applicant(applicant: Option<&str>) -> Option<&str> {
-    applicant.map(str::trim).filter(|name| !name.is_empty())
+    resolve_applicant_param(outbound.transport(), outbound.sleeper(), &bearer, name).await
 }
 
 /// 姓名 → open_id（凭证已取好）。可行动文案的**唯一**落点。
@@ -895,7 +892,9 @@ fn applicant_failure_message(failure: &OutboundFailure) -> String {
             )
         }
         FailureKind::Fatal { code } if CODES_USER_TOKEN_MALFORMED.contains(&code) => {
-            format!("发起人姓名解析失败：飞书用户凭证无效，请在「飞书审批配置」页重新授权（错误码 {code}）")
+            format!(
+                "发起人姓名解析失败：飞书用户凭证无效，请在「飞书审批配置」页重新授权（错误码 {code}）"
+            )
         }
         FailureKind::Fatal { code } => {
             format!("发起人姓名解析失败（错误码 {code}）：{}", failure.message)
@@ -926,6 +925,7 @@ fn click_reopen_plan(prior_state: &str, backfill_empty: bool) -> (bool, bool) {
 ///
 /// 业务失败出口折成 [`DispatchOutcome::fail`]；`?` 冒泡的内部错误由调用点
 /// （已知 `config_id`）统一折算成失败记录。
+#[allow(clippy::too_many_arguments)] // 8 个参数：鉴权产物与请求参数逐个平铺，与 `handle_dispatch` 的调用点一一对应。
 async fn dispatch_single(
     ctx: &ActionContext,
     context: &FeishuContext,
@@ -933,6 +933,7 @@ async fn dispatch_single(
     base_token: &str,
     table_id: &str,
     record_id: &str,
+    initiator: &str,
     request: &DispatchInput,
 ) -> Result<DispatchOutcome, BaseError> {
     tracing::debug!(
@@ -1019,16 +1020,10 @@ async fn dispatch_single(
     // ---- 发起人姓名解析（§6.2）----
     //
     // 请求里的 applicant 是**姓名**（真机 M11：`$.step_btn.user` 渲染成 name），
-    // 要经通讯录搜索解析成 open_id 才能提单。未传/空白 → 完全走现状（读表格列），
-    // 零行为变化；解析失败一律 fail 并可行动文案——**不落等待态**，因为要改的是
+    // 要经通讯录搜索解析成 open_id 才能提单。发起人缺失在 `handle_dispatch` 就拒了，
+    // 这里必有值；解析失败一律 fail 并可行动文案——**不落等待态**，因为要改的是
     // 工作流变量，而不是等用户往表格里补数据。
-    let resolved_applicant = match resolve_optional_applicant(
-        context,
-        settings,
-        &outbound,
-        request.applicant.as_deref(),
-    )
-    .await
+    let resolved_applicant = match resolve_initiator(context, settings, &outbound, initiator).await
     {
         Ok(open_id) => open_id,
         Err(message) => {
@@ -1036,7 +1031,7 @@ async fn dispatch_single(
                 APPLICANT_UNRESOLVED,
                 Some(config_id),
                 message,
-            ))
+            ));
         }
     };
 
@@ -1167,7 +1162,7 @@ async fn dispatch_single(
     let snapshot = DispatchSnapshot::new(
         &config_row,
         map_maps,
-        resolved_applicant.clone(),
+        Some(resolved_applicant.clone()),
         request.notification_recipient.clone(),
     );
     let task_id = approval_execution::admit(context, &snapshot, record_id)
@@ -1244,12 +1239,11 @@ async fn dispatch_single(
                 ),
                 None,
             );
-            // 与成功路径同源的兜底接收人（请求传参优先、回退表格列，再退创建人）：
-            // 这条失败结论必须能发出去，否则用户点了按钮仍然什么都收不到。
-            outcome.applicant_open_id = resolved_applicant
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| applicant_open_id(&cells, &applicant_field));
+            // 兜底接收人：请求参数解析出的发起人，再退记录创建人。**不再回退读
+            // 表格申请人列**——那列是系统回写的产物，不是「谁点了按钮」的证据；
+            // 用它当接收人正是「替别人发起」的旧路径。这条失败结论必须能发出去，
+            // 否则用户点了按钮仍然什么都收不到。
+            outcome.applicant_open_id = Some(resolved_applicant.clone());
             outcome.creator_open_id = creator_open_id.clone();
             return Ok(outcome);
         }
@@ -1271,6 +1265,10 @@ async fn dispatch_single(
         .optional()
         .await?
         .ok_or_else(|| BaseError::ConfigError("任务受理后不可见".into()))?;
+    // 存下来的快照与本次不一致（上一次受理的申请人/接收人不同，或快照来自旧版本）：
+    // 按**首次快照**继续，本轮的点击人只用来补身份（若无）。身份缺席的行因此能
+    // 自愈——否则它会永远停在「没有发起人」的等待态，再点也改不了（`admit` 的
+    // `COALESCE` 保留旧快照）。
     if persisted.optional::<String>("dispatch_payload")?.as_deref()
         != Some(
             serde_json::to_string(&snapshot)
@@ -1278,6 +1276,9 @@ async fn dispatch_single(
                 .as_str(),
         )
     {
+        approval_execution::attach_initiator(context, task_id, &snapshot)
+            .await
+            .map_err(|e| BaseError::ConfigError(e.to_string()))?;
         let mut row = Record::new();
         row.insert("state", serde_json::json!("pending"));
         approval_execution::finish(context, &claim, &row, false)
@@ -1307,20 +1308,9 @@ async fn dispatch_single(
         coordinates: &coordinates,
         fields: &fields,
     };
-    // 通知兜底接收人：与 `dispatch_one` 内部同一判定（传参优先、回退表格列，
-    // 两处必须同源，否则会出现「派发用了 A 的 open_id、通知却发给 B」）。
-    // 在 cells / resolved_applicant 还在手的这里算好，随 outcome 带到
-    // complete_feedback——请求未显式指定 notification_recipient 时用它兜底。
-    // 参数来源的那一份单独留出来：`notify_open_id` 里可能掺了表格列的回退值，
-    // 而落库只该落 worker 读不到的那一半（见 `requested_applicant_open_id` 文档）。
-    let requested_applicant_open_id = resolved_applicant
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let notify_open_id = requested_applicant_open_id
-        .clone()
-        .or_else(|| applicant_open_id(&cells, &applicant_field));
+    // 发起人只认请求里的这一次解析结果（已解析成 open_id）：通知接收人用它，
+    // 唤醒 worker 也用它。`complete_feedback` 在请求未显式指定接收人时拿它兜底。
+    let notify_open_id = Some(resolved_applicant.clone());
 
     let result = dispatch_one(
         &guarded,
@@ -1335,8 +1325,8 @@ async fn dispatch_single(
             record_id,
             cells: &cells,
             applicant_field: &applicant_field,
-            // 已在上面解析成 open_id（空/未传时为 None → 编排层回退读表格列）。
-            applicant: resolved_applicant,
+            // 已在上面解析成 open_id，必为 Some（发起人缺失在入口就拒了）。
+            applicant: Some(resolved_applicant),
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
@@ -1403,7 +1393,6 @@ async fn dispatch_single(
     outcome.claim = Some(claim);
     outcome.instance_code = instance_code;
     outcome.applicant_open_id = notify_open_id;
-    outcome.requested_applicant_open_id = requested_applicant_open_id;
     outcome.creator_open_id = creator_open_id;
     Ok(outcome)
 }
@@ -1494,9 +1483,8 @@ fn deferred_notification(outcome: &DispatchOutcome) -> bool {
 /// 用户收到重复或超量消息（#32）。终态才允许发送：显式接收人优先，其次申请人
 /// open_id，最后记录创建人。
 ///
-/// `Accepted` 单独一条：受理回执只发给**点击人**（解析出的 applicant），不认
+/// `Accepted` 单独一条：受理回执只发给**点击人**（解析出的申请人 open_id），不认
 /// `notification_recipient`——那条字段是「终态结论发给谁」，不是「受理回执给谁」。
-/// 没传 applicant 时维持原行为（不发，由 worker 逐条通知）。
 fn http_notification_recipient(
     input: &DispatchInput,
     outcome: &DispatchOutcome,
@@ -1517,9 +1505,9 @@ fn http_notification_recipient(
 /// 终态 → 「未指定接收人」。抽成纯函数是为了让**接线**本身可测——只钉谓词和
 /// 构造器，把 `None => not_requested()` 改回来测试依然全绿，这层接线就没人守。
 ///
-/// `Accepted` 在这里**仍算交给 worker**：批量受理的逐条结果确实由 worker 发，
-/// 而走到这个函数就说明受理回执没能发给点击人（未传 applicant），文案不能
-/// 反过来说成「未指定接收人」。
+/// `Accepted` 在这里**仍算交给 worker**：批量受理的逐条结果确实由 worker 发；
+/// 走到这个函数说明受理回执没发出去（例如点击人在飞书侧不可达），文案不能反过来
+/// 说成「未指定接收人」。
 fn notification_for_missing_recipient(outcome: &DispatchOutcome) -> NotificationResult {
     if deferred_notification(outcome) || outcome.status == FeedbackStatus::Accepted {
         NotificationResult::deferred_to_worker()
@@ -1533,7 +1521,7 @@ fn notification_for_missing_recipient(outcome: &DispatchOutcome) -> Notification
 /// 判据与 worker 的 `http_path_notified` 逐字一致：两边必须同口径，否则会出现
 /// 「HTTP 说发了、worker 说没发」这种同一行先写 `terminal` 再被改写的错配。
 /// 注意 `succeeded` 不等于已通知——工作流没传 `notification_recipient`、
-/// 申请人列空着、读配置展示名超时都会让通知停在 `not_requested` / `skipped`。
+/// 发起人不可达、读配置展示名超时都会让通知停在 `not_requested` / `skipped`。
 fn notification_sent(outcome: &DispatchOutcome) -> bool {
     outcome
         .notification
@@ -1845,13 +1833,13 @@ mod tests {
         row
     }
 
-    /// 正常请求：`token` 必填（鉴权），其余可选。
+    /// 正常请求：`token` 必填（鉴权），`applicant` 为发起人姓名。
     fn valid_input() -> DispatchInput {
         DispatchInput {
             token: "issued-access-token".to_string(),
             record_id: Some("rec001".to_string()),
-            requested_by: Some("测试触发人".to_string()),
-            applicant: None,
+            requested_by: None,
+            applicant: Some("测试发起人".to_string()),
             notification_recipient: None,
         }
     }
@@ -2114,7 +2102,7 @@ mod tests {
     fn request_body_is_redacted_before_persistence() {
         let mut input = valid_input();
         input.token = "super-secret-dispatch-token".to_string();
-        input.applicant = Some("杨佳俊".to_string());
+        input.requested_by = Some("旧模板触发人".to_string());
         input.notification_recipient = Some(NotificationRecipient {
             receive_id_type: ReceiveIdType::OpenId,
             receive_id: "ou_recipient".to_string(),
@@ -2132,8 +2120,8 @@ mod tests {
         assert_eq!(value["token"], json!("<redacted>"));
         // 非敏感字段必须保留（排障与审计要用）。
         assert_eq!(value["record_id"], json!("rec001"));
-        assert_eq!(value["requested_by"], json!("测试触发人"));
-        assert_eq!(value["applicant"], json!("杨佳俊"));
+        assert_eq!(value["requested_by"], json!("旧模板触发人"));
+        assert_eq!(value["applicant"], json!("测试发起人"));
         assert_eq!(
             value["notification_recipient"]["receive_id"],
             json!("ou_recipient")
@@ -2502,13 +2490,32 @@ mod tests {
     }
 
     #[test]
-    fn blank_or_absent_applicant_is_normalized_away() {
-        // 未传 / trim 后为空 → None（编排层回退读表格列）。这是「空白姓名不打任何
-        // 请求」的落点：`resolve_optional_applicant` 在这一步就返回，取凭证与出站
-        // 都到不了。
-        assert_eq!(trimmed_applicant(None), None);
-        assert_eq!(trimmed_applicant(Some("   ")), None);
-        assert_eq!(trimmed_applicant(Some(" 杨佳俊 ")), Some("杨佳俊"));
+    fn initiator_prefers_applicant_and_falls_back_to_the_compat_alias() {
+        // 新模板只发 applicant；旧模板只发 requested_by（两者真机同值）。
+        let mut input = valid_input();
+        input.requested_by = Some("旧模板触发人".to_string());
+        assert_eq!(input.initiator(), Some("测试发起人"));
+
+        // applicant 为空时兼容别名顶上，不是「缺失」。
+        input.applicant = Some("   ".to_string());
+        assert_eq!(input.initiator(), Some("旧模板触发人"));
+
+        // 两者都空 → 缺失（入口据此拒绝，不读表格列）。
+        input.requested_by = None;
+        assert_eq!(input.initiator(), None);
+
+        input.requested_by = Some("  ".to_string());
+        assert_eq!(input.initiator(), None, "空白别名等同缺失");
+    }
+
+    #[test]
+    fn missing_initiator_is_rejected_after_auth_not_before() {
+        // 顺序不变量：Token 错必须报 40301，而不是被「缺发起人」掩盖。
+        // `validate()` 因此**不管**发起人——缺失只在鉴权通过后由 `handle_dispatch` 拒。
+        let mut input = valid_input();
+        input.applicant = None;
+        assert!(input.validate().is_ok(), "发起人缺失不属入参校验");
+        assert_eq!(input.initiator(), None);
     }
 
     // -----------------------------------------------------------------------
@@ -2979,7 +2986,7 @@ mod tests {
                 ] } else { vec![] });
                 let tokens = e2e_tokens();
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
-                let input = DispatchInput { fields: &fields, context: Some(&context), execution: None, coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let input = DispatchInput { fields: &fields, context: Some(&context), execution: None, coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: Some(E2E_APPLICANT_OPEN_ID.to_string()), backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
                 if dispatchable {
                     assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
@@ -3154,6 +3161,8 @@ mod tests {
                     "status": "PENDING"
                 })),
             ),
+            // 扩展回写：编号（`write_many`）+ 发起人列覆盖（`write_fields`）。
+            (200, e2e_ok_body(json!({}))),
             (200, e2e_ok_body(json!({}))),
         ]));
         let tokens = e2e_tokens();
@@ -3279,7 +3288,8 @@ mod tests {
                 record_id: E2E_RECORD_ID,
                 cells: &cells,
                 applicant_field: &plan.applicant_field_id,
-                applicant: None,
+                // 发起人只来自请求（点击人），与表格「申请人」列里填的是谁无关。
+                applicant: Some(E2E_APPLICANT_OPEN_ID.to_string()),
                 backfill_field_name: &backfill_field_name,
                 approval_code: E2E_APPROVAL_CODE,
                 widgets: &plan.widgets,
@@ -3317,7 +3327,7 @@ mod tests {
         assert_eq!(
             body["open_id"],
             json!(E2E_APPLICANT_OPEN_ID),
-            "发起人取的是申请人列里的第一个 open_id"
+            "发起人取请求传入的点击人 open_id，不读表格申请人列"
         );
         assert_eq!(
             body["uuid"],
@@ -3383,6 +3393,22 @@ mod tests {
                 }]
             }),
             "回写的是编号文本，键是回填列的**列名**（batch_update 按名作键）"
+        );
+        // 发起人列被覆盖成点击人：同一次扩展回写的另一次 batch_update。
+        let applicant_update = transport
+            .seen()
+            .into_iter()
+            .rfind(|request| {
+                request.url
+                    == bitable::batch_update_records_url(E2E_BASE_TOKEN, E2E_TABLE_ID)
+                        .unwrap_or_default()
+            })
+            .and_then(|request| request.body)
+            .unwrap_or_else(|| panic!("发起人列回写必须发出 batch_update"));
+        assert_eq!(
+            applicant_update["records"][0]["fields"]["申请人"],
+            json!([{"id": E2E_APPLICANT_OPEN_ID}]),
+            "发起人列必须被覆盖成点击人：{applicant_update}"
         );
     }
 

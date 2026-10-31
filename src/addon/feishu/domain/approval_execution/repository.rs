@@ -56,7 +56,8 @@ pub(crate) async fn admit(
     .bind(id)
     .execute(&mut *transaction)
     .await?;
-    // 后来的请求不能为首次未提供身份的任务补入另一个申请人。
+    // 身份跟着**存下来的**快照走，不是跟着本次请求：`COALESCE` 让首份快照胜出，
+    // 后来的点击不能替别人的任务改发起人。撞唯一索引即「已有身份」，不再写。
     let stored_payload: Option<String> =
         // tenant-boundary: raw-sql feishu-approval-admit-identity-snapshot
         sqlx::query_scalar("SELECT dispatch_payload FROM feishu_approval_task WHERE id=?")
@@ -77,6 +78,69 @@ pub(crate) async fn admit(
     }
     transaction.commit().await?;
     Ok(id)
+}
+
+/// 任务行存在但**没有身份**：把本次点击人补进去（有身份时什么都不动）。
+///
+/// # 为什么需要它
+///
+/// 发起人只能来自点击人。`admit` 的快照是「首次受理胜出」，而早于身份落库机制的
+/// 存量任务行存着一份 `applicant: null` 的快照——它们认领后会被判「没有发起人」、
+/// 零出站地空转，再点一次也救不回来（`COALESCE` 永远保留旧快照）。本函数在
+/// **身份缺席**时补写，这条行就自愈了。
+///
+/// 已有身份时一列都不动：后来的请求不能替别人的任务改发起人，即使点击人是同事
+/// ——与 `admit` 的首次快照语义同一条不变量。
+pub(crate) async fn attach_initiator(
+    context: &FeishuContext,
+    task_id: i64,
+    snapshot: &DispatchSnapshot,
+) -> anyhow::Result<()> {
+    let Some(applicant) = snapshot.applicant.as_deref() else {
+        return Ok(());
+    };
+    let payload = serde_json::to_string(snapshot)?;
+    let pool = context.approval_tasks().pool();
+    let mut transaction = pool.begin().await?;
+    // tenant-boundary: raw-sql feishu-approval-attach-initiator-read
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT dispatch_payload FROM feishu_approval_task WHERE id=? FOR UPDATE",
+    )
+    .bind(task_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let existing: Option<String> =
+        // tenant-boundary: raw-sql feishu-approval-attach-initiator-existing
+        sqlx::query_scalar("SELECT open_id FROM feishu_approval_task_applicant WHERE task_id=?")
+            .bind(task_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let from_snapshot = stored
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<DispatchSnapshot>(payload).ok())
+        .and_then(|snapshot| snapshot.applicant)
+        .filter(|applicant| !applicant.trim().is_empty());
+    let from_table = existing.filter(|open_id| !open_id.trim().is_empty());
+    if from_snapshot.is_some() || from_table.is_some() {
+        transaction.commit().await?;
+        return Ok(());
+    }
+    // tenant-boundary: raw-sql feishu-approval-attach-initiator-write
+    sqlx::query(
+        "UPDATE feishu_approval_task SET dispatch_payload=?, updated_at=UNIX_TIMESTAMP() WHERE id=?",
+    )
+    .bind(&payload)
+    .bind(task_id)
+    .execute(&mut *transaction)
+    .await?;
+    // tenant-boundary: raw-sql feishu-approval-attach-initiator-row
+    sqlx::query("INSERT INTO feishu_approval_task_applicant (task_id,open_id) VALUES (?,?) ON DUPLICATE KEY UPDATE open_id=VALUES(open_id)")
+        .bind(task_id)
+        .bind(applicant)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 /// 把「重新点击」变成一次人工重试：任务不在执行中、又停在可重试状态时，

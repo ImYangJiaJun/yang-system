@@ -55,8 +55,8 @@ use crate::addon::feishu::domain::approval_convert::{
     amount_currency, format_local, FixedOffset, WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
-    applicant_open_id as extract_applicant_open_id, backfill_in_chunks, dispatch_one,
-    widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
+    backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
+    DispatchInput as OrchestrationInput, DispatchResult,
 };
 use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback;
@@ -905,6 +905,15 @@ fn note_seed_success(failures: &Mutex<HashMap<i64, String>>, config_id: i64) -> 
 /// 首次运行时库里一条任务都没有——不扫表就永远不会有第一条。
 /// （这里说的是**多维表格侧**的扫描；任务行侧已改为按本轮记录定向查询，
 /// 见 [`load_tasks_by_record`]。）
+///
+/// # 只处理被点击的配置与记录
+///
+/// 发起人只能是点击人，而一次点击只代表**那一个配置里被点的那一条**（Token 按配置
+/// 签发，申请人列又由系统回写）。所以手动轮只扫被点配置：单条点击只建/重开被点
+/// 那一条，批量点击建/重开该配置下全部待处理记录；其它配置一律不动。这顺带收掉了
+/// 「用 A 表的 Token 触发 B 表建单」的越权面。
+///
+/// 轮询轮（`Poll`）照旧扫全部启用配置，但只服务**已有**任务行，不建新行。
 async fn seed_tasks(
     runner: &RoundRunner,
     trigger: RoundTrigger,
@@ -937,6 +946,13 @@ async fn seed_tasks(
     let mut report = SeedReport::default();
     for config in configs {
         let config_id: i64 = config.require("id").unwrap_or_default();
+        // 手动轮只看被点的配置：其它配置既不该因这次点击建行，也不该被 reopen
+        // （发起人身份只属于点击人，落到别的配置就是把别人的表当成自己的）。
+        if let Some(clicked) = trigger.manual_config() {
+            if clicked != config_id {
+                continue;
+            }
+        }
         match seed_config(runner, &config, trigger, applicant, clicked_record_id).await {
             Ok(outcome) => {
                 if note_seed_success(&runner.seed_failures, config_id) {
@@ -1135,6 +1151,13 @@ async fn seed_config(
     .await
     .map_err(|failure| anyhow::anyhow!("筛选待处理记录失败：{}", failure.message))?;
     tracing::debug!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
+    // 单条点击只处理**被点的那一条**：发起人是点击人，他那次点击只针对这一行。
+    // （批量点击 `clicked_record_id = None`，仍处理本配置全部待处理记录。）
+    // 先筛再判空——单条点击时「表里还有别的待处理行」不代表本次没命中。
+    let pending_records: Vec<&bitable::RecordItem> = pending_records
+        .iter()
+        .filter(|record| clicked_record_id.map_or(true, |id| id == record.record_id))
+        .collect();
     if pending_records.is_empty() {
         // 点击受理却命中 0 条：给点击人一条 IM 说明，别让「没勾选就点」完全静默。
         // 但**单条点击**不通知：`dispatch_single` 已经处理了那条记录并给了用户反馈，
@@ -1175,7 +1198,7 @@ async fn seed_config(
     let mut reopened = 0usize;
     let mut skipped = 0usize;
     let mut touched: Vec<String> = Vec::new();
-    for record in &pending_records {
+    for record in pending_records {
         if record.record_id.is_empty() {
             continue;
         }
@@ -1690,8 +1713,8 @@ async fn insert_seeded_task(
 /// # 为什么在播种之后
 ///
 /// 按钮受理的语义是「本轮把这些行按受理发起人提单」。新行的任务行由 [`seed_tasks`]
-/// 在本轮播种出来，播种前写会**漏掉本轮新行**——首点会静默回退到表格列（可能是错的
-/// 或空的），要再点一次才对。所以写在播种之后、认领之前。
+/// 在本轮播种出来，播种前写会**漏掉本轮新行**——首点就缺身份，要再点一次才对。
+/// 所以写在播种之后、认领之前。
 ///
 /// # touched 为空直接返回
 ///
@@ -1700,8 +1723,8 @@ async fn insert_seeded_task(
 ///
 /// # 失败只 warn
 ///
-/// 落库失败不该中断整轮：受理发起人只是**增强**，任务照旧处理（回退表格列），
-/// 下一轮按钮或轮询还会再写。
+/// 落库失败不该中断整轮：那一行本轮会以「没有发起人」进等待态（零出站），
+/// 下次有人点它即可自愈——不会静默地用错身份建单。
 async fn persist_applicant(
     runner: &RoundRunner,
     config_id: i64,
@@ -1840,21 +1863,24 @@ async fn load_task(
         Some(snapshot) => Record::from(snapshot.config.clone()),
         None => config,
     };
-    // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id/last_error）：
-    // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
-    let applicant = runner
-        .context
-        .approval_task_applicants()
-        .query()
-        .where_eq("task_id", serde_json::json!(task_id))?
-        .optional()
-        .await?;
-    let applicant_open_id = match snapshot.as_ref() {
-        Some(snapshot) => snapshot.applicant.clone(),
-        None => match applicant {
-            Some(applicant) => applicant.optional::<String>("open_id")?,
-            None => None,
-        },
+    // 发起人：首次受理快照优先（`admit` 与任务行同事务写入），缺失时读属性扩展表
+    // （全表受理的批量行没有快照，身份由 Action/worker 落这张表）。
+    //
+    // 两个来源**都只来自点击人**；表格的申请人列不参与——它是系统回写的产物。
+    // 快照与表都要看：旧版本建的快照可能是 `None`，而之后的一次点击已经把它补进表里。
+    let applicant_open_id = match snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.applicant.clone())
+    {
+        Some(applicant) => Some(applicant),
+        None => runner
+            .context
+            .approval_task_applicants()
+            .query()
+            .where_eq("task_id", serde_json::json!(task_id))?
+            .optional()
+            .await?
+            .and_then(|applicant| applicant.optional::<String>("open_id").ok().flatten()),
     };
     let maps = match snapshot.as_ref().filter(|_| snapshot_is_fresh) {
         Some(snapshot) => snapshot.maps.clone(),
@@ -1955,16 +1981,14 @@ async fn load_task(
     }))
 }
 
-/// 一条任务的处理产物。
-///
-/// 三个字段一起返回而不是拆成多次调用：它们都来自**同一次**记录读取，
-/// 分开取会让「读记录」发生两遍。
+/// 一条任务的处理产物：结论 + 兜底通知接收人。
 struct TaskOutcome {
     result: DispatchResult,
-    /// 申请人 open_id（任务表或表格列）——通知的首选接收人。
-    applicant_open_id: Option<String>,
-    /// 记录创建人 open_id（`automatic_fields` 取回）——申请人缺失时的兜底
+    /// 记录创建人 open_id（`automatic_fields` 取回）——发起人不可用时的兜底
     /// 接收人，保证「用户发起过请求」这件事在任何结论下都有反馈出口。
+    ///
+    /// 发起人本身不在这里：它是任务的属性（`task.applicant_open_id`），只来自
+    /// 点击人，**不再回退读表格申请人列**。
     creator_open_id: Option<String>,
 }
 
@@ -1973,7 +1997,6 @@ impl TaskOutcome {
     fn early(result: DispatchResult) -> Self {
         Self {
             result,
-            applicant_open_id: None,
             creator_open_id: None,
         }
     }
@@ -2007,6 +2030,23 @@ fn record_read_failure(
 
 /// 处理一条记录。
 async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
+    // 没有发起人身份就不该出站：不读表结构、不读记录、不碰飞书。
+    // 来源只有两种——上线前的存量任务行，以及受理与落库之间的窄窗口。
+    // 落 `Waiting`（`outcome_record` 映射成 `pending`）是为了让「有人再点一次
+    // 这条记录」能自愈；不落终态是因为回填列若是链接类型，写原因根本写不进去。
+    if task.applicant_open_id.is_none() {
+        tracing::info!(
+            stage = "initiator",
+            task_id = task.id,
+            record_id = %task.record_id,
+            outcome = "waiting",
+            "审批任务没有发起人身份，等待人工重新点击"
+        );
+        return TaskOutcome::early(DispatchResult::Waiting {
+            reason: crate::addon::feishu::domain::approval_dispatch::MISSING_INITIATOR_REASON
+                .to_string(),
+        });
+    }
     let coordinates = BitableCoordinates {
         app_token: task.base_token.clone(),
         table_id: task.table_id.clone(),
@@ -2150,15 +2190,8 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
     )
     .await;
 
-    // 从表格 cells 提取申请人 open_id（poll 触发时 task.applicant_open_id 为空，回退到表格）
-    let open_id = task
-        .applicant_open_id
-        .clone()
-        .or_else(|| extract_applicant_open_id(&cells, &task.applicant_field));
-
     TaskOutcome {
         result,
-        applicant_open_id: open_id,
         creator_open_id,
     }
 }
@@ -2289,10 +2322,10 @@ async fn record_outcome(
     // 「结论是否变化」去重。
     let mut edit = None;
     let notified = if should_notify(task, outcome) {
-        // 接收人链：任务表申请人 → 表格申请人列 → **记录创建人**（兜底）。前两者
-        // 空着正是 waiting 的主因，而「谁建了这条记录」是那时唯一还能定位到的触发人。
-        // 三者都取不到才放弃——那时「发给谁」在事实上无解，但**不能静默**：状态会落成
-        // `unnotified`，与 `terminal` 区分得开。
+        // 接收人链：任务表申请人 → **记录创建人**（兜底）。发起人只来自点击人，
+        // 所以这里不再读表格的申请人列（那是系统回写的产物）；创建人兜底保证
+        // 「用户发起过请求」这件事在任何结论下都有反馈出口。两者都取不到才放弃——
+        // 那时「发给谁」在事实上无解，但**不能静默**：状态会落成 `unnotified`。
         //
         // 注意「可查」的边界：`list_tasks` 的 `where` 树支持按 `state` 过滤，但控制台
         // 的任务下钻视图目前**只按 config_id 查、没有状态筛选**，所以这些行现在只能
@@ -2300,7 +2333,6 @@ async fn record_outcome(
         let open_id = task
             .applicant_open_id
             .as_deref()
-            .or(processed.applicant_open_id.as_deref())
             .or(processed.creator_open_id.as_deref());
         match open_id {
             Some(open_id) => {
@@ -2314,7 +2346,7 @@ async fn record_outcome(
                 tracing::warn!(
                     task_id = task.id,
                     config_id = task.config_id,
-                    "Worker 通知：申请人 open_id 与记录创建人均不可用，本轮结论未送达"
+                    "Worker 通知：任务发起人与记录创建人均不可用，本轮结论未送达"
                 );
                 false
             }

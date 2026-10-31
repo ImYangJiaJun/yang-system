@@ -32,16 +32,28 @@ impl Outcome {
     }
 }
 
-/// 请求体未带 `requested_by`（或 trim 后为空）时落库的请求人。
+/// 两者都没带时落库的请求人。
+///
+/// 正常情况下不会走到这里：发起人缺失在鉴权后就被拒（业务码 40006），而那条失败的
+/// 记录同样要落库——所以这个兜底只服务「被拒的那次请求」本身，不是给正常派发用的。
 pub(crate) const DEFAULT_REQUESTED_BY: &str = "feishu-workflow";
 
-/// 请求人归一：trim 后空串按缺失处理，缺省记 `feishu-workflow`。
-pub(crate) fn normalized_requested_by(input: Option<&str>) -> String {
-    input
+/// 请求人归一：`applicant`（发起人）优先，`requested_by`（旧模板的兼容别名）兜底；
+/// 两者都空则记 [`DEFAULT_REQUESTED_BY`]。
+///
+/// 两个字段在真机上是同一个 `$.step_btn.user`，所以「请求人」就是实际发起人——
+/// 不再是一句与派发无关的展示字段。
+pub(crate) fn normalized_requested_by(
+    applicant: Option<&str>,
+    requested_by: Option<&str>,
+) -> String {
+    [applicant, requested_by]
+        .into_iter()
+        .flatten()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| DEFAULT_REQUESTED_BY.to_string())
+        .find(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_REQUESTED_BY)
+        .to_string()
 }
 
 /// 单条处理结果 → 结果四桶（设计 §4.2）。
@@ -190,14 +202,24 @@ mod tests {
         assert_eq!(row["response_body"], message);
     }
 
-    /// 空 requested_by（未带 / 空白 / trim 后空）一律落 `feishu-workflow`。
+    /// 空请求人（两者都未带 / 空白 / trim 后空）一律落 `feishu-workflow`。
     #[test]
     fn empty_requested_by_falls_back_to_feishu_workflow() {
-        assert_eq!(normalized_requested_by(None), DEFAULT_REQUESTED_BY);
-        assert_eq!(normalized_requested_by(Some("")), DEFAULT_REQUESTED_BY);
-        assert_eq!(normalized_requested_by(Some("   ")), DEFAULT_REQUESTED_BY);
+        assert_eq!(normalized_requested_by(None, None), DEFAULT_REQUESTED_BY);
+        assert_eq!(
+            normalized_requested_by(Some(""), None),
+            DEFAULT_REQUESTED_BY
+        );
+        assert_eq!(
+            normalized_requested_by(Some("   "), Some("")),
+            DEFAULT_REQUESTED_BY
+        );
         // 非空则 trim 后原样保留（列上限已在校验层挡住）。
-        assert_eq!(normalized_requested_by(Some("  张三  ")), "张三");
+        assert_eq!(normalized_requested_by(Some("  张三  "), None), "张三");
+        // `requested_by` 是兼容别名：`applicant` 缺席时顶上。
+        assert_eq!(normalized_requested_by(None, Some(" 李四 ")), "李四");
+        // 两者都给时以 `applicant` 为准（它才是派发实际用的那个）。
+        assert_eq!(normalized_requested_by(Some("张三"), Some("李四")), "张三");
     }
 
     /// 全部可弃字段都满时的组装：每个键都在，值与原样一致。

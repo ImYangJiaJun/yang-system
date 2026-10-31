@@ -665,10 +665,15 @@ async fn dispatch_without_config_reports_40401_and_writes_a_failed_log() {
     finish(outcome, "未配置出口落记录").await;
 }
 
-/// 批量受理：Token 校验通过后落 `accepted` 行，config_id 关联、请求人归一保留。
+/// 缺发起人的批量受理：鉴权后直接拒（业务码 40006），落 `failed` 行、关联配置，
+/// 且**不唤醒 worker**。
+///
+/// 这条路径以前会「读表格申请人列」兜底，于是任何人填一列别人的名字就能替别人
+/// 提单；现在请求里没有点击人就没有身份可用。用例也钉住兼容别名的边界：判缺失是
+/// 「`applicant` 与 `requested_by` 都空」。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
+async fn dispatch_without_initiator_is_rejected_and_logged() {
     let outcome = async {
         let database = connect_database().await?;
         reset_database(&database).await?;
@@ -680,8 +685,8 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
         let (config_id, config_key) =
             seed_config(&database, "appAccTest", "tblAccTest", true).await?;
 
-        // 注入派发句柄：接收端保持存活（worker 没起也没关系，信号进了通道即可）。
-        let (handle, _receiver) = ApprovalDispatchHandle::new();
+        // 注入派发句柄：接收端保持存活，用来断言「拒绝时一次信号都没发」。
+        let (handle, mut receiver) = ApprovalDispatchHandle::new();
         let app = build_feishu_app(
             &database,
             &redis,
@@ -693,53 +698,50 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
         let response = dispatch_as_workflow(
             &app,
             &config_key,
-            json!({ "token": seed_token(&config_key), "requested_by": "批量按钮" }),
+            json!({ "token": seed_token(&config_key) }),
         )
         .await
-        .context("批量受理不应返回 Err")?;
-        ensure!(response.code == 0, "批量受理必须成功: {response:?}");
-        let data = response_data(&response)?;
+        .context("缺发起人不应冒泡为 Err")?;
         ensure!(
-            data["accepted"] == json!(true),
-            "批量受理的 accepted 必须为 true: {data}"
+            response.code == 40006,
+            "缺发起人必须给 40006，实际: {response:?}"
+        );
+        let data = response_data(&response);
+        ensure!(
+            data.is_err(),
+            "拒绝出口不得携带 data（工作流按 code 分流）: {response:?}"
+        );
+        ensure!(
+            receiver.try_recv().is_err(),
+            "缺发起人的请求不得唤醒 worker"
         );
 
-        let (outcome, row_config_id, message) = latest_request_log(&database, "appAccTest").await?;
-        ensure!(
-            outcome == "accepted",
-            "批量受理必须落 accepted 桶，实际 {outcome}"
-        );
+        // 拒绝出口不带坐标（`DispatchOutcome::fail` 的 base_token 为空），按空串取行；
+        // 归因靠 config_id 关联。
+        let (outcome, row_config_id, message) = latest_request_log(&database, "").await?;
+        ensure!(outcome == "failed", "实际 outcome: {outcome}");
         ensure!(
             row_config_id == Some(config_id),
-            "受理行的 config_id 必须关联到 Token 命中的配置，实际 {row_config_id:?}"
+            "失败行的 config_id 必须关联到 Token 命中的配置，实际 {row_config_id:?}"
         );
         ensure!(
-            message.contains("已受理"),
-            "受理行的消息要可行动，实际 {message}"
-        );
-
-        let requested_by: Option<String> =
-            sqlx::query_scalar("SELECT `requested_by` FROM `feishu_approval_request_log` LIMIT 1")
-                .fetch_one(database.pool())
-                .await
-                .context("读取请求人失败")?;
-        ensure!(
-            requested_by.as_deref() == Some("批量按钮"),
-            "请求人必须原样落库，实际 {requested_by:?}"
+            message.contains("applicant"),
+            "文案要点名要改的是 applicant: {message}"
         );
 
         Ok(())
     }
     .await;
 
-    finish(outcome, "批量受理落记录").await;
+    finish(outcome, "缺发起人直接拒").await;
 }
 
-/// 单条点击的唤醒信号必须携带被点记录 id：worker 据此把受理发起人限定到那一行，
-/// 而不是广播给同配置下所有跨轮 pending 任务（见 `persist_applicant`）。
+/// 单条点击**带着发起人**时：出站失败（夹具没有通讯录解析所需的凭证），但唤醒
+/// 信号必须携带被点记录 id 与请求参数解析出的发起人。
 ///
-/// 单条路径必然尝试出站；夹具不装 HTTP 客户端，结论会失败——但信号在结果映射之后
-/// 发送，与出站成败无关，正好用来钉参数。
+/// 夹具走 dummy 凭证，姓名解析必然失败 →结论 `failed`，信号里的发起人为空
+/// （只有解析成功才有 open_id 可带）。所以这里钉的是**信号形状**：被点记录 id
+/// 必须精确到那一行，不能是 `None`（那是批量语义，会把发起人广播给整批）。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn single_dispatch_signal_carries_the_clicked_record_id() {
@@ -764,13 +766,18 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         )
         .await?;
 
-        // 单条点击：出站必失败，但唤醒信号必须已经投递。
-        let _ = dispatch_as_workflow(
+        // 带发起人（请求参数，姓名）：出站建栈/解析会失败，但信号必须已经投递。
+        let response = dispatch_as_workflow(
             &app,
             &config_key,
-            json!({ "token": seed_token(&config_key), "record_id": "recSignal" }),
+            json!({
+                "token": seed_token(&config_key),
+                "record_id": "recSignal",
+                "applicant": "夹具发起人",
+            }),
         )
-        .await;
+        .await
+        .context("单条派发不应冒泡为 Err")?;
 
         let (got_config, applicant, record_id) = receiver
             .try_recv()
@@ -785,7 +792,7 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         );
         ensure!(
             applicant.is_none(),
-            "未传 applicant 时信号里的发起人必须为空: {applicant:?}"
+            "dummy 凭证下姓名解析不可能成功，信号里的发起人必须为空: {applicant:?} / {response:?}"
         );
 
         Ok(())
@@ -1249,12 +1256,13 @@ async fn list_requests_and_list_tasks_return_rows_with_filters() {
     finish(outcome, "记录与任务列表").await;
 }
 
-/// #32 + #30：全表受理即便显式传了 `notification_recipient` 也不由 HTTP 同步
-/// 路径发通知（交给 worker 逐条发），且请求记录里的 Token 必须已脱敏。
+/// #30：请求记录里的 Token 必须脱敏；#32 的状态门由 crate 内的单测覆盖。
 ///
-/// 受理路径不建出站栈、不出网：结论是 `Accepted`（中间态），状态门把它挡在
-/// 本层之外；若回归成「显式接收人绕过状态门」，这里会尝试真实出站并因 dummy
-/// 凭证失败——断言会先看到 `notification.status != not_requested`。
+/// 夹具没有通讯录凭证，任何 `applicant` 都会让派发在「姓名 → open_id」那步失败，
+/// 所以这里只能走到 `DispatchOutcome::fail`——恰好是**拒绝出口也要脱敏落库**这条
+/// 不变量。真正走通的受理（`Accepted` + 中间态不发通知）在
+/// `dispatch.rs` 的 `deferred_notification_distinguishes_delegated_from_unresolvable`
+/// 与 `fallback_recipient_*` 用例里钉住。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log() {
@@ -1282,7 +1290,7 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
             &config_key,
             json!({
                 "token": seed_token(&config_key),
-                "requested_by": "脱敏用例",
+                "applicant": "脱敏用例",
                 "notification_recipient": {
                     "receive_id_type": "open_id",
                     "receive_id": "ou_explicit",
@@ -1290,35 +1298,24 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
             }),
         )
         .await
-        .context("受理不应返回 Err")?;
-        ensure!(response.code == 0, "受理必须成功: {response:?}");
-        let data = response_data(&response)?;
+        .context("派发不应冒泡为 Err")?;
         ensure!(
-            data["accepted"] == json!(true),
-            "受理 accepted 必须为 true: {data}"
-        );
-        ensure!(
-            data["notification"]["status"] == json!("not_requested"),
-            "中间态（受理）不得由 HTTP 发通知，实际: {data}"
-        );
-        ensure!(
-            data["notification"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("后台"),
-            "受理结论必须说明由后台通知: {data}"
+            response.code == 40005,
+            "夹具缺通讯录凭证：发起人解析必须失败（40005），实际: {response:?}"
         );
 
+        // 解析失败的出口不带坐标（`DispatchOutcome::fail` 的 base_token 为空），
+        // 按空串取行；归因靠请求体本身。
         let (request_body, outcome_text): (String, String) = sqlx::query_as(
             "SELECT `request_body`, `outcome` \
              FROM `feishu_approval_request_log` WHERE `base_token` = ? \
              ORDER BY `id` DESC LIMIT 1",
         )
-        .bind("appRedact")
+        .bind("")
         .fetch_one(database.pool())
         .await
         .context("读取请求记录失败")?;
-        ensure!(outcome_text == "accepted", "实际 outcome: {outcome_text}");
+        ensure!(outcome_text == "failed", "实际 outcome: {outcome_text}");
         ensure!(
             !request_body.contains(&seed_token(&config_key)),
             "请求记录不得含明文 Token: {request_body}"
@@ -1329,7 +1326,7 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
         );
         ensure!(
             request_body.contains("脱敏用例"),
-            "非敏感字段（requested_by）必须保留: {request_body}"
+            "非敏感字段（applicant）必须保留: {request_body}"
         );
         ensure!(
             request_body.contains("ou_explicit"),
@@ -1340,7 +1337,7 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
     }
     .await;
 
-    finish(outcome, "受理通知门与请求体脱敏").await;
+    finish(outcome, "拒绝出口脱敏落记录").await;
 }
 
 /// 失败终态事件可查询、可人工重试回队；成功事件拒绝重放。

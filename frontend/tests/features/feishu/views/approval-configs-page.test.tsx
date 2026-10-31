@@ -111,15 +111,13 @@ describe("审批派发配置页 · 列表", () => {
       token: "<访问 Token>",
       record_id: "<触发记录 ID>",
       applicant: "<发起人姓名>",
-      requested_by: "<触发人标识>",
     });
     expect(batch).toEqual({
       token: single.token,
       applicant: single.applicant,
-      requested_by: single.requested_by,
     });
     expect(content.getByText(/Content-Type/)).toBeInTheDocument();
-    expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();
+    expect(content.getByText(/当前配置的全部待处理记录/)).toBeInTheDocument();
 
     // jsdom 不实现 navigator.clipboard（见 @test/helpers/clipboard 的说明），
     // 不装桩就只会走到「无法自动复制」那条分支。

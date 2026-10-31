@@ -3,8 +3,8 @@
 mod repository;
 mod transport;
 pub(crate) use repository::{
-    admit, begin_effect, claim_ready, confirm_effect, facts, finish, is_owned, mark_unknown,
-    reopen, TaskClaim,
+    admit, attach_initiator, begin_effect, claim_ready, confirm_effect, facts, finish, is_owned,
+    mark_unknown, reopen, TaskClaim,
 };
 pub(crate) use transport::ExecutionTransport;
 

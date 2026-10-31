@@ -69,12 +69,10 @@ const SINGLE_TEMPLATE = {
   token: "<访问 Token>",
   record_id: "<触发记录 ID>",
   applicant: "<发起人姓名>",
-  requested_by: "<触发人标识>",
 } as const;
 const BATCH_TEMPLATE = {
   token: "<访问 Token>",
   applicant: "<发起人姓名>",
-  requested_by: "<触发人标识>",
 } as const;
 
 export function ApprovalConfigDetails({
@@ -339,10 +337,12 @@ export function ApprovalConfigDetails({
           <div>
             <p className="text-xs text-muted-foreground">谁发起审批</p>
             <p className="mt-2 text-sm font-medium">
-              取自「{nameOf(item.applicantFieldName, "列名称待补充")}」列
+              工作流触发人（点击按钮的人）
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              使用这条记录中的申请人。
+              审批创建后，系统把「
+              {nameOf(item.applicantFieldName, "列名称待补充")}
+              」列覆盖为申请人。
             </p>
           </div>
           <div>
@@ -602,32 +602,32 @@ export function ApprovalConfigDetails({
               </div>
             </div>
             <p className="rounded-md border border-border bg-muted/50 p-3 text-sm">
-              替换所有占位符。记录
-              ID、发起人与触发人请插入工作流动态变量，不要把占位
+              替换所有占位符。记录 ID 与发起人请插入工作流动态变量，不要把占位
               文字作为实际值发送。使用工作流 JSON 模板时，对应引用为
               $.step_btn.recordId、$.step_btn.user（step_btn 为触发节点 ID）。
-              <strong>applicant 与 requested_by 都要用 $.step_btn.user</strong>
-              ——该变量渲染出的是<strong>姓名</strong>（真机核实），正合
-              applicant 所需；两个字段都需要字符串，不要传对象。Content-Type
+              <strong>applicant 必须填 $.step_btn.user（触发人姓名）</strong>
+              ——该变量渲染出的是<strong>姓名</strong>（真机核实）； 不要删掉
+              applicant，也不要改成其它变量。requested_by
+              是旧模板的兼容别名，新模板不用再传。字段都需要字符串，不要传对象。Content-Type
               请求头填 application/json。
             </p>
             <p className="rounded-md border border-border bg-muted/50 p-3 text-sm">
               省略 record_id
-              会唤醒所有启用配置的待处理队列，并非只处理请求中指定的数据表；后台处理回填列为空的记录（配置了批量范围复选框列时，仅处理已勾选的记录）。批量按钮请仅在需要处理整个队列时使用。
+              只处理当前配置的全部待处理记录（配置了批量范围复选框列时，仅处理已勾选的记录），不会触发其它配置的派发。批量按钮请仅在需要处理这批待处理记录时使用。
             </p>
             <p className="text-xs text-muted-foreground">
               若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token
               无效」，说明轮换过 Token
               而工作流里还是旧值，回本页重新复制；若提示「尚未签发访问
               Token」，说明这条配置还没签发过凭据，点上方「轮换访问
-              Token」；若处于等待态，补齐申请人及审批必填字段后再查看处理结果。
+              Token」；若处于等待态，补齐审批必填字段后再查看处理结果。
             </p>
           </div>
         ) : tab === "usage" ? (
           <div className="space-y-5">
             <h2 className="font-semibold">在飞书多维表中使用</h2>
             <ol className="list-decimal space-y-3 pl-5 text-sm">
-              <li>填写记录中的申请人和审批必填内容。</li>
+              <li>填写审批必填内容（申请人由系统按点击人回填，无需手填）。</li>
               <li>
                 在飞书多维表中设置工作流（例如按钮触发），向派发接口发出请求。
               </li>
