@@ -69,6 +69,8 @@ git commit -m "refactor(feishu): worker 传输改为 trait 对象以支持注入
 - Modify: `src/addon/feishu/approval/mod.rs`（`build_group_module`）
 - Modify: `src/addon/feishu/mod.rs`（装配）
 - Modify: `src/addon/feishu/domain/context.rs`（`approval_groups()`，`new` 增加参数）
+- Modify: `src/addon/feishu/domain/schema_anchor.rs`（`tables()` 登记组表与 `approval_groups()` 锚）
+- Modify: `docs/architecture/raw-sql-boundaries.md`（组表仓储若写裸 SQL）
 - Modify: 构造点 `src/addon/feishu/mod.rs`、`src/addon/feishu/approval/actions/mod.rs`、`actions/dispatch.rs`、`actions/list_events.rs`、`src/addon/feishu/datasource/mod.rs`
 - Modify: `tests/feishu_approval_dispatch_integration.rs`（`reset_database` 加新表）
 
@@ -84,12 +86,18 @@ git commit -m "refactor(feishu): worker 传输改为 trait 对象以支持注入
 fn group_columns_and_paused_state_are_declared() {
     let definition = definition();
     assert!(definition.field("group_id").is_some());
-    let group_seq = definition.field("group_seq").unwrap();
+    let group_seq = definition
+        .field("group_seq")
+        .unwrap_or_else(|| panic!("group_seq 字段必须存在"));
     assert!(group_seq.is_required());
     assert!(group_seq.is_sortable(), "load_members 按 group_seq 排序依赖该位");
     assert_eq!(group_seq.default_value(), Some(&serde_json::json!(0)));
-    let spec = table_spec().unwrap();
-    let state = spec.fields.iter().find(|f| f.name.as_str() == "state").unwrap();
+    let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+    let state = spec
+        .fields
+        .iter()
+        .find(|f| f.name.as_str() == "state")
+        .unwrap_or_else(|| panic!("state 字段必须存在"));
     assert!(state.options.iter().any(|(value, _)| value == "paused"));
 }
 ```
@@ -104,6 +112,8 @@ Expected: FAIL。
 - [ ] **Step 3: 实现声明**
 
 - `task_table.rs` 加列；`state` options 追加 `("paused", "已暂停")`，同步既有精确断言列表。
+- `schema_anchor::tables()` 登记 `feishu_approval_group`（表名 + `approval_groups()` 锚）；漏登记会让 Task 4 的 `where_eq("group_key"/"config_id"/"uuid")` 站点解析不出归属，`the_weakly_checked_sites_are_exactly_the_recorded_ones` 与列归属门禁直接红。
+- `paused` 的手写重复事实源同步：`reopen` 白名单（Task 7）、`delete_config` 活跃白名单（Task 7）、`list_tasks.rs` 头注释状态枚举、前端 `ApprovalRequestsPage` 的标签（Task 11）。`pending_backlog` 只统计 `state='pending'`，不把 `paused` 计入积压。
 - `approval/table.rs` 加 `aggregate_batch`。
 - `group_table.rs` 按设计 §4.2 声明全部列与索引。
 - `approval/mod.rs`、`feishu/mod.rs` 装配；`context.rs` 新增字段与访问器，更新 5 处构造点。
@@ -155,7 +165,7 @@ fn accepts_aggregate_with_batch_scope() {
 }
 ```
 
-`update_config.rs`：只提交 `aggregate_batch=true` 而库内无范围列 → `ParamInvalid`；清空范围列且聚合仍 true → `ParamInvalid`；只关开关 → 成功且审计摘要含该键。`list_configs.rs`：投影含 `aggregate_batch`。
+`update_config.rs`：只提交 `aggregate_batch=true` 而库内无范围列 → `ParamInvalid`；清空范围列且聚合仍 true → `ParamInvalid`；只关开关 → 成功且审计摘要含该键。既有 `mapping_updates_have_valid_audit_summaries` 是整份 JSON 精确比对，必须同步加键，否则必红。`list_configs.rs`：投影含 `aggregate_batch`。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -166,7 +176,7 @@ Expected: FAIL。
 
 - `approval_provision.rs` 加纯校验函数。
 - `create_config.rs`：输入加字段；`build_plan` 后用 `plan.batch_scope_field_id` 校验；同事务 `update_in_tx` 写入开关。
-- `update_config.rs`：输入、至少一项清单、事务内合并库内值校验、写库与审计摘要。
+- `update_config.rs`：输入；`aggregate_batch` 只加入 `validate()` 的「至少一个更新字段」清单，**不要**加入 `has_column_updates()`（后者会触发真实 `list_all_fields` 出站）；事务内 `before` 投影（`update_config.rs:277-292`）补 `batch_scope_field` 与 `aggregate_batch`，用「本次修改 + 库内现值」合并后调用 `check_aggregate_batch`；写库与审计摘要同步，`config_audit_summary` 加参数与键，并改精确断言。
 - `list_configs.rs`：四处投影加字段。
 - worker 播种 `select_fields` 加 `"aggregate_batch"`。
 
@@ -243,7 +253,8 @@ git commit -m "feat(feishu): 聚合派发的一致性签名"
 ### Task 4: 组键、分组规划与组表仓储（含事务变体）
 
 **Files:**
-- Create: `src/addon/feishu/domain/approval_aggregation.rs`
+- Create: `src/addon/feishu/domain/approval_aggregation/mod.rs`（纯函数）
+- Create: `src/addon/feishu/domain/approval_aggregation/repository.rs`（裸 SQL；`//! raw-sql-boundary: domain-repository feishu-approval-group`）
 
 **Interfaces:**
 - Produces:
@@ -295,7 +306,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-纯函数按接口实现；仓储照 `approval_execution/repository.rs` 的裸 SQL 风格，每处裸 SQL 加 `// tenant-boundary: raw-sql feishu-approval-group-<id>`。`load_members` 用 `order_by("group_seq", Asc)`（依赖 Task 1 的 sortable）。
+纯函数按接口实现；仓储放 `repository.rs`（架构门禁要求 `domain-repository` 边界文件名恰为 `repository.rs`），每处裸 SQL 加全局唯一的 `// tenant-boundary: raw-sql feishu-approval-group-<具体id>`（占位符不行、重复 id 也不行）。`load_members` 用 `order_by("group_seq", Asc)`（依赖 Task 1 的 sortable）。
 
 - [ ] **Step 4: 跑测试**
 
@@ -357,9 +368,10 @@ Expected: FAIL。
 
 `seed_config` 改为：批量点击时依次执行
 1. `SELECT ... feishu_approval_config ... FOR UPDATE` 锁配置行；
-2. 非组任务行 `reopen`（现有 `reopens_on_click` 语义，含 `backfilled` 且回填列为空）；
+2. 非组任务行 `reopen`（现有 `reopens_on_click` 语义，含 `backfilled` 且回填列为空）；先把 `load_tasks_by_record` 的投影（`feishu_approval_worker.rs:1041-1046`）扩为 `id/record_id/state/group_id/group_seq/effect_phase`，并让该分支显式跳过 `group_id` 非空的行（组的重开只在 `maintain_groups` 里做，避免把已建实例/creating 组的 leader 无条件拉回 pending）；
 3. `maintain_groups`：已提交组补回填、review/lookup 组 reopen、可解散组（全组在本次勾选内、组行 `effect_phase=ready`、无租约）解散并删 applicant/成员/组行，摘除有自身实例或回填的成员；
-4. 仅当 `aggregate_batch=true` 时 `seed_aggregate_groups`：**解散之后**重新计算候选（勾选 + 回填空 + 无任务行），逐条 `rekey_cells_by_field_id` → `resolve_external_options` → `source_identities` → `build_signature`（映射装载用 `widget_maps_from_rows`），签名失败用 `error:{record_id}` 单独成组；`plan_groups`；一个事务插组行与 leader/member 行；给 `touched` 落发起人。
+4. 仅当 `aggregate_batch=true` 时 `seed_aggregate_groups`：**解散之后**重新计算候选（勾选 + 回填空 + 无任务行），逐条 `rekey_cells_by_field_id` → `resolve_external_options` → `source_identities` → `build_signature`（映射装载用 `widget_maps_from_rows`），签名失败用 `error:{record_id}` 单独成组；`plan_groups`；一个事务插组行与 leader/member 行；`touched` 必须包含组内**全部** member 的 record_id（否则漏掉的成员在 missing-initiator 守卫下永久 waiting），并给 `touched` 落发起人。
+5. `notify_round_summary` 的 `entries` 按被认领的 leader 收集，一组 N 条会显示成 1 条；汇总文案必须显式写「N 条合 1 单」或按成员展开，避免用户误以为漏处理。
 单条点击分支不改：不维护组、不新建组。
 
 - [ ] **Step 4: 跑测试**
@@ -479,7 +491,13 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-按接口实现；`delete_config` 活跃白名单加 `paused` 但区分组行是否有 `instance_code`：未提交的暂停组放行并随事务清理，已建实例的暂停组仍阻塞；删除事务内调用 `delete_groups_for_config_in_tx` 与 applicant 清理。`dispatch.rs` 的单条入口在任务属于组时先 `detach_from_group`，并把 `force_solo=true` 传下去。
+按接口实现：
+
+- `claim_ready`：批量（`only_id=None`）加 `AND group_seq=0`；单条（`Some`）不限；阶段条件允许组 leader 的 `lookup`。
+- **过期租约清扫 SQL 也要排除组 leader 的 `lookup`**（`repository.rs:243-247` 会把 `effect_phase NOT IN ('ready','created')` 的行先扫成 `review`）；用 `AND NOT (group_id IS NOT NULL AND group_seq=0 AND effect_phase='lookup')` 或等价的组阶段白名单，否则「按 uuid 回捞」永远等不到。
+- 组 reopen 只把 leader 复位为 `pending/ready`；组行 `effect_phase` 是唯一事实，不复位。
+- `delete_config` 活跃白名单加 `paused`，但必须在删除事务内查组行 `instance_code`：未提交的暂停组放行并随事务清理，已建实例的暂停组仍阻塞；删除事务内调用 `delete_groups_for_config_in_tx` 与 applicant 清理。
+- `dispatch.rs` 的单条入口在任务属于组时先 `detach_from_group`（锁配置行、检查租约、必要时提升 leader 或删除组行），并把 `force_solo=true` 传下去。
 
 - [ ] **Step 4: 跑测试**
 
@@ -533,7 +551,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-用同文件的 `ScriptedTransport`/`RecordingBackfill`（不要用 `actions/dispatch.rs` 私有测试模块里的 `ReplayTransport`）。`GroupExecutionTransport` 照 `ExecutionTransport` 改写：begin/confirm 调组专用函数；发生成时传组 uuid。
+用同文件的 `ScriptedTransport`/`RecordingBackfill`（不要用 `actions/dispatch.rs` 私有测试模块里的 `ReplayTransport`）。`GroupExecutionTransport` 照 `ExecutionTransport` 改写：begin/confirm 调组专用函数；发生成时传组 uuid。`write_extended` 现在无条件覆盖申请人列（000a1a3 起），组成功路径逐成员调用即把配置的 `applicant_field` 与点击人 open_id 写进每条成员记录。
 
 - [ ] **Step 4: 跑测试**
 
@@ -589,10 +607,12 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-- `process_one`：`task.group_id.is_some()` → `process_group`。
+- `process_one`：`task.group_id.is_some()` → `process_group`。组分支必须插在 000a1a3 新增的 missing-initiator 早退（`feishu_approval_worker.rs:2032-2051`）**之前**；组缺身份落组级 `paused`/可恢复态，而不是复用单条 `Waiting`。
+- 跳过通用 `record_outcome` 后，组路径必须自行完成：`is_owned` 执行权复核、`audit::succeeded_event` 成功审计、`feishu_approval_dispatch_total` 指标、`already_initiated` 判定（组编号来自组行，不是 leader `existing_serial`）。
 - 读组行/成员；恢复顺序与错误分类按设计 §4.6；签名复核仅 `group.effect_phase='ready'`；选项映射并集；空明细 → 暂停。
 - 成功/暂停都用 `finish_group`；暂停写 leader+成员 `state='paused'`，不写回填列。
-- 组通知：发送前解析成员行号，一次渲染；暂停消息含失败成员行号 + 原因 + 重新点击提醒；跳过请求日志去重。
+- 组通知：发送前解析成员行号，一次渲染；暂停消息含失败成员行号 + 原因 + 重新点击提醒；跳过请求日志去重，但必须把结论原因写进 leader `last_error`，靠 `should_notify` 的「原因变化」去重，否则每轮重发。
+- fan-out 构造 `DispatchInput` 时显式 `applicant: None`（事件不重写申请人列；`write_fields` 全有全无，申请人列缺失会让整条事件失败）。
 - `run_round` 对 `persisted=true` 的组结论跳过通用 `record_outcome`/`finish`。
 
 - [ ] **Step 4: 跑测试**
@@ -686,7 +706,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-对话框加复选框（未选范围列时禁用）；create/update 映射；类型与详情页；任务列表补 `paused` 标签；E2E 夹具补字段。
+对话框加复选框（未选范围列时禁用）；create/update 映射；类型与详情页；任务列表补 `paused` 标签；E2E 夹具补字段。000a1a3 已把 `approval-configs-page.test.tsx` 改成去掉 `requested_by` 的精确请求体断言；新增 `aggregate_batch` 时同步该 `expect(single).toEqual({...})` 与批量模板断言。
 
 - [ ] **Step 4: 生成契约并跑检查**
 
@@ -717,7 +737,7 @@ git commit -m "feat(feishu): 聚合开关与暂停态前端"
 - [ ] **Step 2: 核对 ignored 登记**
 
 Run: `python scripts/run_ci.py --self-test`
-Expected: PASS；逐个核对 Task 5/7/9/10 的测试名都已登记。
+Expected: PASS；以源码里实际新增的 `#[ignore]` 函数名为准逐个核对（Task 5 为 9 个、Task 7 为 10 个、Task 9 为 6 个、Task 10 为 3 个；以最终函数名为准，不多不少）。
 
 - [ ] **Step 3: 门禁**
 

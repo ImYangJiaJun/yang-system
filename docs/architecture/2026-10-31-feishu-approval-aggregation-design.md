@@ -105,6 +105,7 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 
 - 组表必须接入 `FeishuContext`（新增 `approval_groups()` 访问器），并同步全部构造点。
 - 任务状态枚举新增 `paused`（Radio 物理列是 VARCHAR，应用层白名单，纯增量）；同步 `reopen`、`delete_config` 活跃状态与前端标签。
+- 新表必须在 `schema_anchor::tables()` 登记（表名 + `approval_groups()` 锚）；漏登记会让新仓储的 `where_eq` 站点解析不出归属，架构门禁直接红。
 
 ### 4.3 一致性签名与组键
 
@@ -156,7 +157,9 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 7. 成功：组专用确认写入 `group.instance_code`、`group.effect_phase='created'`，leader 阶段 `created` 但 **`instance_code` 保持 NULL**；`60012` 按组 uuid 回捞。
 8. 取编号 → `backfill_in_chunks` 给全部成员写同一编号；**检查 `BackfillReport.failed`**：非空返回 `CreatedPendingBackfill` 整组重试，全量成功才 `Backfilled`。
 9. 编号落库成功后，逐成员调用 `write_extended`（六个扩展字段 + 发起人列 = 批量点击人），与单条路径行为一致。
-10. 收尾走**组专用 finish**：一个事务内更新 leader（state/last_error/attempts/available_at/清租约，允许 `ready/creating/lookup/created` 阶段）、成员行 state、组行 `serial_number/effect_phase`。**不再经过通用 `outcome_record`**，避免 `Waiting→pending` 把暂停组重新拉回轮询。
+10. 收尾走**组专用 finish**：一个事务内更新 leader（state/last_error/attempts/available_at/清租约，允许 `ready/creating/lookup/created` 阶段）、成员行 state、组行 `serial_number/effect_phase`。**不再经过通用 `outcome_record`**，避免 `Waiting→pending` 把暂停组重新拉回轮询；组路径自行完成 `is_owned` 复核、成功审计、派发指标与 `already_initiated` 判定。
+11. 组分支位于 missing-initiator 早退之前；组缺失发起人时落组级 `paused`，不走单条 `Waiting`。
+12. 认领前的过期租约清扫必须排除组 leader 的 `lookup` 阶段，否则会在认领前先被扫成 `review`。
 
 组失败分类独立于单条 `classify_failure`：
 
