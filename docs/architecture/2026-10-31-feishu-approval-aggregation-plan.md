@@ -255,6 +255,7 @@ git commit -m "feat(feishu): 聚合派发的一致性签名"
 **Files:**
 - Create: `src/addon/feishu/domain/approval_aggregation/mod.rs`（纯函数）
 - Create: `src/addon/feishu/domain/approval_aggregation/repository.rs`（裸 SQL；`//! raw-sql-boundary: domain-repository feishu-approval-group`）
+- Modify: `src/addon/feishu/domain/mod.rs`（声明子模块）
 
 **Interfaces:**
 - Produces:
@@ -316,7 +317,7 @@ Expected: PASS。
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/addon/feishu/domain/approval_aggregation.rs
+git add src/addon/feishu/domain/approval_aggregation src/addon/feishu/domain/mod.rs
 git commit -m "feat(feishu): 聚合组键与组表仓储"
 ```
 
