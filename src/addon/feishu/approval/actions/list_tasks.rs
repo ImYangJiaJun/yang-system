@@ -1,7 +1,8 @@
 //! 审批派发任务列表（前端控制台「批量受理下钻」视图）。
 //!
 //! 按 `config_id` / `state` 过滤（state 枚举：pending / creating / created /
-//! backfilled / terminal / unnotified / review），由通用 `ListInput` 的 `where` 树承载。
+//! backfilled / terminal / unnotified / review / paused），由通用 `ListInput` 的
+//! `where` 树承载。
 
 use std::sync::Arc;
 
@@ -39,8 +40,9 @@ pub(super) struct TaskItem {
     config_id: i64,
     /// 多维表格记录 id。
     record_id: String,
-    /// 状态：pending / creating / created / backfilled / terminal / unnotified / review。
-    /// `unnotified` 表示未送达通知；`review` 表示外部结果未知或重试已耗尽，须人工核查。
+    /// 状态：pending / creating / created / backfilled / terminal / unnotified / review / paused。
+    /// `unnotified` 表示未送达通知；`review` 表示外部结果未知或重试已耗尽，须人工核查；
+    /// `paused` 表示聚合组整组暂停，等人工重新批量点击。
     state: String,
     /// 创建成功后的审批实例 code。
     instance_code: Option<String>,

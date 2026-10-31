@@ -32,6 +32,9 @@ pub(crate) struct FeishuContext {
     /// 审批认领队列表。
     #[allow(dead_code)]
     approval_task: Repository,
+    /// 审批聚合组表（组实例身份：uuid / instance_code / effect_phase）。
+    #[allow(dead_code)]
+    approval_group: Repository,
     /// 审批派发请求记录表。
     #[allow(dead_code)]
     approval_request_log: Repository,
@@ -68,6 +71,7 @@ impl FeishuContext {
         approval_config: Repository,
         approval_field_map: Repository,
         approval_task: Repository,
+        approval_group: Repository,
         approval_request_log: Repository,
         approval_task_applicant: Repository,
         user_token: Repository,
@@ -84,6 +88,7 @@ impl FeishuContext {
             approval_config,
             approval_field_map,
             approval_task,
+            approval_group,
             approval_request_log,
             approval_task_applicant,
             user_token,
@@ -135,6 +140,14 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn approval_tasks(&self) -> &Repository {
         &self.approval_task
+    }
+
+    /// 审批聚合组表（组实例身份的唯一落点）。
+    ///
+    /// 消费者（组维护、组处理、事件 fan-out）在后续任务接入。
+    #[allow(dead_code)]
+    pub(crate) fn approval_groups(&self) -> &Repository {
+        &self.approval_group
     }
 
     /// 审批派发请求记录表。消费者（dispatch 落记录）在后续任务接入。
@@ -222,5 +235,69 @@ impl FeishuContext {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 组表仓储必须经上下文可访问，且绑定的确实是组表声明。
+    ///
+    /// 新增表最常漏的是「构造点没跟上」——那样会直接编译不过；这里再确认
+    /// 上下文实际接到的是 `feishu_approval_group` 的字段集（用一个不存在的列
+    /// 验证声明边界），而不是别的表。
+    #[tokio::test]
+    async fn approval_groups_repository_is_reachable_from_the_context() {
+        let pool = Arc::new(
+            sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
+                .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
+        );
+        let definition = |spec: yang_base::definition::TableSpec| {
+            spec.table_definition()
+                .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"))
+        };
+        let repository = |spec: Result<yang_base::definition::TableSpec, _>| {
+            Repository::new(
+                definition(spec.unwrap_or_else(|error| panic!("{error}"))),
+                Arc::clone(&pool),
+            )
+        };
+        let context = FeishuContext::new(
+            repository(crate::addon::feishu::datasource::table::table_spec()),
+            repository(crate::addon::feishu::datasource::domain::field_table::table_spec()),
+            repository(crate::addon::feishu::option::table::table_spec()),
+            repository(crate::addon::feishu::approval::table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::field_map_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::group_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
+            repository(crate::addon::feishu::portal::table::table_spec()),
+            repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::event_table::table_spec()),
+            Arc::new(
+                PasswordEngine::new(1)
+                    .unwrap_or_else(|error| panic!("PasswordEngine 应可构造: {error}")),
+            ),
+            None,
+        );
+        assert!(
+            context
+                .approval_groups()
+                .query()
+                .select_fields(&["uuid"])
+                .is_ok(),
+            "组表仓储应可发起查询"
+        );
+        assert!(
+            context
+                .approval_groups()
+                .query()
+                .select_fields(&["no_such_column"])
+                .is_err(),
+            "未知列必须被组表声明拒绝（确认绑定的确实是组表）"
+        );
     }
 }

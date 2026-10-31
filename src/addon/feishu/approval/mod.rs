@@ -104,6 +104,14 @@ pub(crate) fn build_task_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(task_module_name()?).table(domain::task_table::table_spec()?))
 }
 
+/// 聚合组表所在的 Module：同上，只有表。
+///
+/// 组实例身份（uuid / instance_code / effect_phase）只落这张表，读写由组维护、
+/// 组处理与事件 fan-out 经 `FeishuContext` 跨表完成。
+pub(crate) fn build_group_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(group_module_name()?).table(domain::group_table::table_spec()?))
+}
+
 /// 派发请求记录表所在的 Module：同上，只有表。
 pub(crate) fn build_request_log_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(request_log_module_name()?).table(domain::request_log_table::table_spec()?))
@@ -140,6 +148,10 @@ fn field_map_module_name() -> Result<ModuleName, BaseError> {
 
 fn task_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_task").map_err(config_error)
+}
+
+fn group_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_group").map_err(config_error)
 }
 
 fn request_log_module_name() -> Result<ModuleName, BaseError> {

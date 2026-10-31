@@ -111,6 +111,7 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "feishu_approval_request_log",
         "feishu_approval_task_applicant",
         "feishu_approval_task",
+        "feishu_approval_group",
         "feishu_approval_field_map",
         "feishu_approval_config",
         "users",

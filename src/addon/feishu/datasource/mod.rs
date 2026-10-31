@@ -159,6 +159,13 @@ mod tests {
             ),
             Repository::new(
                 definition(
+                    crate::addon::feishu::approval::domain::group_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
                     crate::addon::feishu::approval::domain::request_log_table::table_spec()
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),

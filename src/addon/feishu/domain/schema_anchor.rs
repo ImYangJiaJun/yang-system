@@ -97,6 +97,14 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             "approval_tasks()",
         ),
         (
+            "feishu_approval_group",
+            spec(
+                crate::addon::feishu::approval::domain::group_table::table_spec(),
+                "审批聚合组",
+            ),
+            "approval_groups()",
+        ),
+        (
             "feishu_approval_request_log",
             spec(
                 crate::addon::feishu::approval::domain::request_log_table::table_spec(),

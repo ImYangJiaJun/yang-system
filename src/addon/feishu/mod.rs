@@ -55,6 +55,7 @@ pub(crate) fn build_addon(
     )?)
     .module(approval::build_field_map_module()?)
     .module(approval::build_task_module()?)
+    .module(approval::build_group_module()?)
     .module(approval::build_request_log_module()?)
     .module(approval::build_task_applicant_module()?)
     // 审批事件落地表（store-then-process 缓冲）。
@@ -118,6 +119,10 @@ pub(crate) fn build_context(
         ),
         Repository::new(
             approval::domain::task_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::group_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         Repository::new(

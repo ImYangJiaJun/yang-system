@@ -93,6 +93,15 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             batch_scope_field => Str::new()
                 .title("批量范围复选框列 ID")
                 .max_length(128),
+            // --- 同批聚合派发开关（设计 §4.2）---
+            //
+            // 默认关闭：关闭时行为与逐条派发逐字节一致。打开后同一次批量勾选内
+            // 「除明细控件外转换值完全一致」的记录合成一个审批实例；保存时还要求
+            // 已配置批量范围复选框列（校验在 Action 层，见实施计划 Task 2）。
+            aggregate_batch => Switch::new()
+                .title("同批聚合派发")
+                .require(true)
+                .default(false),
             // --- 可选回填扩展（设计 §5.1）---
             //
             // 下面 6 列存**目标列 field_id**，与 `backfill_field` 同一形态，但全部可空：
@@ -284,6 +293,22 @@ mod tests {
         assert!(
             enabled.is_filterable(),
             "扫描时要按 enabled 过滤掉停用的配置"
+        );
+    }
+
+    /// 聚合开关必须显式落库且默认关闭：存量配置的行不含该列时由数据库默认值补齐，
+    /// 开关关闭即保持逐条派发现状。
+    #[test]
+    fn aggregate_batch_is_required_and_defaults_to_false() {
+        let definition = definition();
+        let field = definition
+            .field("aggregate_batch")
+            .unwrap_or_else(|| panic!("aggregate_batch 字段必须存在"));
+        assert!(field.is_required(), "聚合开关必须显式落库");
+        assert_eq!(
+            field.default_value(),
+            Some(&serde_json::json!(false)),
+            "聚合开关默认关闭"
         );
     }
 

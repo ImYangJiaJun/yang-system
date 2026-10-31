@@ -73,6 +73,18 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .max_length(128)
                 .filterable(true),
+            // 聚合组键（设计 §4.2）：`group_seq=0` 且非空 = leader，`>=1` = 成员，
+            // 空 = 普通单条任务。组维护按它定位成员行，filterable 是硬依赖。
+            group_id => Str::new()
+                .title("聚合组键")
+                .max_length(64)
+                .filterable(true),
+            // 组内序号：`load_members` 按它升序取成员，`sortable` 是 fail-closed 的。
+            group_seq => Int::new()
+                .title("组内序号")
+                .require(true)
+                .default(0)
+                .sortable(true),
             // 派生的幂等键。**必须持久化**：响应丢失时 instance_code 根本不存在，
             // 它是唯一还能拿回来的对账键。
             // filterable 必开：事件 worker 在 instance_code 未命中时按事件 uuid
@@ -95,6 +107,9 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     ("terminal", "终止"),
                     ("unnotified", "未通知"),
                     ("review", "待人工核查"),
+                    // 聚合组整组暂停（转换/必填/选项冲突/飞书明确拒绝）：
+                    // 不参与认领，等人工重新批量点击。
+                    ("paused", "已暂停"),
                 ])
                 .default("pending")
                 .filterable(true),
@@ -231,7 +246,8 @@ mod tests {
                 "backfilled",
                 "terminal",
                 "unnotified",
-                "review"
+                "review",
+                "paused"
             ]
         );
         // 每个候选值都要有中文标签：控制台按状态扫列表，英文原值读不出来。
@@ -301,6 +317,30 @@ mod tests {
                 && index.fields[0].field().as_str() == "record_id"),
             "record_id 不能保留全局唯一索引"
         );
+    }
+
+    /// 聚合组的两列与 `paused` 状态必须落在声明里：`group_seq` 的 `sortable`
+    /// 是 `load_members` 升序读取的硬依赖，`paused` 不进候选值会让组暂停写不进去。
+    #[test]
+    fn group_columns_and_paused_state_are_declared() {
+        let definition = definition();
+        assert!(definition.field("group_id").is_some());
+        let group_seq = definition
+            .field("group_seq")
+            .unwrap_or_else(|| panic!("group_seq 字段必须存在"));
+        assert!(group_seq.is_required());
+        assert!(
+            group_seq.is_sortable(),
+            "load_members 按 group_seq 排序依赖该位"
+        );
+        assert_eq!(group_seq.default_value(), Some(&serde_json::json!(0)));
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let state = spec
+            .fields
+            .iter()
+            .find(|f| f.name.as_str() == "state")
+            .unwrap_or_else(|| panic!("state 字段必须存在"));
+        assert!(state.options.iter().any(|(value, _)| value == "paused"));
     }
 
     #[test]
