@@ -249,11 +249,16 @@ impl FixedOffset {
     }
 }
 
-/// 把一条多维表格记录组装成创建实例接口要求的 `form` 字符串。
+/// 解析审批定义快照并校验映射表，返回定义树与「控件 id → 映射」。
 ///
-/// 返回的是**压缩后的 JSON 数组字符串**（`instance/create.md:30`）。
-pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> {
-    let definition: Vec<FormWidget> = serde_json::from_str(input.form_snapshot)
+/// `build_form` 与 `build_signature` 共用这一段：两边的结构校验、控件组父级
+/// 忽略、重复映射判定必须是同一份规则，否则「能提交但算不出签名」这类漂移
+/// 会在聚合开启后才暴露。
+pub(crate) fn prepare_definition<'a>(
+    form_snapshot: &str,
+    widgets: &'a [WidgetMap],
+) -> Result<(Vec<FormWidget>, BTreeMap<&'a str, &'a WidgetMap>), ConvertError> {
+    let definition: Vec<FormWidget> = serde_json::from_str(form_snapshot)
         .map_err(|_| ConvertError::InvalidDefinition("表单快照不是有效的控件数组".to_string()))?;
     if definition.is_empty() {
         return Err(ConvertError::InvalidDefinition("表单快照为空".to_string()));
@@ -272,7 +277,7 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
         }
     }
     let mut mappings = BTreeMap::new();
-    for mapping in input.widgets {
+    for mapping in widgets {
         let node = nodes.get(&mapping.widget_id).ok_or_else(|| {
             ConvertError::InvalidDefinition(format!(
                 "映射控件「{}」已不在定义中",
@@ -297,12 +302,110 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
             )));
         }
     }
+    Ok((definition, mappings))
+}
+
+/// 把一条多维表格记录组装成创建实例接口要求的 `form` 字符串。
+///
+/// 返回的是**压缩后的 JSON 数组字符串**（`instance/create.md:30`）。
+pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> {
+    let (definition, mappings) = prepare_definition(input.form_snapshot, input.widgets)?;
     let widgets = assemble_definition(&definition, &mappings, input)?;
 
     serde_json::to_string(&Value::Array(widgets)).map_err(|error| ConvertError::BadValue {
         widget_id: String::new(),
         reason: format!("form 序列化失败：{error}"),
     })
+}
+
+/// 一致性签名：把「提交时会产生差异的部分」规范化成确定性的 JSON 字符串。
+///
+/// 聚合派发用它判断同批记录能否合成一个实例，所以规则必须与表单侧对齐：
+///
+/// - **任意深度**的 `fieldList` 整棵跳过（明细值不进顶层表单，也不该拆组）；
+/// - 控件组递归，只收已映射的子控件；
+/// - 空值（含必填缺失）统一编码 `null`，**不抛** `MissingRequired`——签名阶段
+///   只回答「两条记录像不像」，必填是否满足由处理期的真实校验决定；
+/// - 数值归一：`100` 与 `"100"` 转换后同为 `100`，序列化前统一成规范十进制；
+/// - 附件走 `source_identities` 填进 `FormInput.attachment_codes`（不调用
+///   `transfer`，签名阶段禁止网络副作用）；
+/// - 不支持的控件类型、转换器不匹配等配置错误仍然返回 `Err`，该记录单独成组。
+pub(crate) fn build_signature(input: &FormInput<'_>) -> Result<String, ConvertError> {
+    let (definition, mappings) = prepare_definition(input.form_snapshot, input.widgets)?;
+    let mut values = Map::new();
+    collect_signature(&definition, &mappings, input, &mut values)?;
+    serde_json::to_string(&Value::Object(values)).map_err(|error| ConvertError::BadValue {
+        widget_id: String::new(),
+        reason: format!("签名序列化失败：{error}"),
+    })
+}
+
+/// 按定义顺序遍历定义树，把已映射控件的规范值写进签名。
+fn collect_signature(
+    nodes: &[FormWidget],
+    mappings: &BTreeMap<&str, &WidgetMap>,
+    input: &FormInput<'_>,
+    values: &mut Map<String, Value>,
+) -> Result<(), ConvertError> {
+    for node in nodes {
+        // 明细子树在任意深度都整棵跳过（含 workGroup 内嵌的 fieldList）。
+        if node.r#type == "fieldList" {
+            continue;
+        }
+        if is_container(&node.r#type) {
+            collect_signature(&node.children, mappings, input, values)?;
+            continue;
+        }
+        let Some(mapping) = mappings.get(node.id.as_str()) else {
+            continue;
+        };
+        let mut mapping = (*mapping).clone();
+        mapping.required |= node.required;
+        let value = match assemble_widget(&mapping, input) {
+            Ok(Some(value)) => value,
+            Ok(None) | Err(ConvertError::MissingRequired { .. }) => Value::Null,
+            Err(error) => return Err(error),
+        };
+        let value = canonical_signature_value(value);
+        if values.insert(node.id.clone(), value).is_some() {
+            return Err(ConvertError::InvalidDefinition(format!(
+                "控件「{}」在签名里重复",
+                node.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 签名值归一：数值统一成规范十进制字符串（`100` 与 `100.0` 同形），
+/// 数组/对象递归，其余原样。签名只用于相等性比较，不改提交值本身。
+fn canonical_signature_value(value: Value) -> Value {
+    match value {
+        Value::Number(number) => Value::String(canonical_number(&number)),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(canonical_signature_value).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, canonical_signature_value(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// 规范十进制：整数原样，浮点取最短表示（`100.0` → `100`）。
+fn canonical_number(number: &serde_json::Number) -> String {
+    if let Some(value) = number.as_i64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_u64() {
+        return value.to_string();
+    }
+    match number.as_f64() {
+        Some(value) => value.to_string(),
+        None => number.to_string(),
+    }
 }
 
 /// 一条记录在每个明细控件中形成一行，子控件保持定义中的原始 id。
@@ -2166,5 +2269,141 @@ mod tests {
                 "{empty} 应被判为空"
             );
         }
+    }
+
+    /// 组装签名的测试入口：与 `render` 同一套输入，只是换成一致性签名。
+    fn signature(
+        snapshot: &str,
+        widgets: &[WidgetMap],
+        cell_map: &Map<String, Value>,
+        attachment_codes: &BTreeMap<String, Vec<String>>,
+    ) -> Result<String, ConvertError> {
+        build_signature(&FormInput {
+            widgets,
+            form_snapshot: snapshot,
+            cells: cell_map,
+            attachment_codes,
+            timezone_offset: shanghai(),
+        })
+    }
+
+    #[test]
+    fn signature_excludes_nested_field_list_anywhere() {
+        // workGroup 内嵌的 fieldList、顶层明细都必须整棵跳过：明细值不进顶层
+        // 表单，也不该把同批记录拆成不同组。
+        let snapshot = r#"[
+            {"id":"top","type":"input"},
+            {"id":"work","type":"workGroup","required":true,"value":[
+                {"id":"widgetWorkGroupType","type":"radioV2"},
+                {"id":"widgetWorkGroupTimeRangeFieldList","type":"fieldList","required":true,"children":[
+                    {"id":"start","type":"date"},{"id":"end","type":"date"}
+                ]}
+            ]},
+            {"id":"detail","type":"fieldList","required":true,"children":[
+                {"id":"desc","type":"textarea"}
+            ]}
+        ]"#;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        // 假勤/加班类型子控件允许直取。
+        let mut kind = widget("widgetWorkGroupType", "radioV2");
+        kind.converter = Converter::Direct;
+        kind.bitable_field = "fld_kind".to_string();
+        let mut start = widget("start", "date");
+        start.bitable_field = "fld_start".to_string();
+        let mut end = widget("end", "date");
+        end.bitable_field = "fld_end".to_string();
+        let mut desc = widget("desc", "textarea");
+        desc.bitable_field = "fld_desc".to_string();
+        let widgets = [top, kind, start, end, desc];
+        let base = cells(&[
+            ("fld_top", json!("A")),
+            ("fld_kind", json!("annual")),
+            ("fld_start", json!(1)),
+            ("fld_end", json!(2)),
+            ("fld_desc", json!("明细 A")),
+        ]);
+        let mut other_detail = base.clone();
+        other_detail.insert("fld_start".to_string(), json!(999));
+        other_detail.insert("fld_desc".to_string(), json!("明细 B"));
+        let codes = BTreeMap::new();
+        let left = signature(snapshot, &widgets, &base, &codes).unwrap_or_else(|e| panic!("{e}"));
+        let right =
+            signature(snapshot, &widgets, &other_detail, &codes).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(left, right, "明细子树的差异不能进入签名");
+
+        let mut changed_top = base;
+        changed_top.insert("fld_top".to_string(), json!("B"));
+        let changed =
+            signature(snapshot, &widgets, &changed_top, &codes).unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(changed, left, "非明细控件的差异必须改变签名");
+    }
+
+    #[test]
+    fn signature_normalizes_number_forms_and_encodes_missing_as_null() {
+        let snapshot =
+            r#"[{"id":"num","type":"number"},{"id":"req","type":"input","required":true}]"#;
+        let mut num = widget("num", "number");
+        num.bitable_field = "fld_num".to_string();
+        let mut req = widget("req", "input");
+        req.bitable_field = "fld_req".to_string();
+        req.required = true;
+        let widgets = [num, req];
+        let codes = BTreeMap::new();
+
+        let number_form = signature(
+            snapshot,
+            &widgets,
+            &cells(&[("fld_num", json!(100)), ("fld_req", json!("x"))]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let text_form = signature(
+            snapshot,
+            &widgets,
+            &cells(&[("fld_num", json!("100")), ("fld_req", json!("x"))]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(number_form, text_form, "100 与 \"100\" 必须是同一签名");
+
+        // 必填缺失：签名不报错，编码 null（处理期再按组暂停）。
+        let missing = signature(
+            snapshot,
+            &widgets,
+            &cells(&[("fld_num", json!(100))]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(missing.contains("\"req\":null"), "{missing}");
+        assert_ne!(missing, number_form);
+    }
+
+    #[test]
+    fn signature_separates_attachment_source_identity() {
+        let widgets = [widget("file", "attachmentV2")];
+        let snapshot = flat_snapshot(&widgets);
+        let sign = |cell: Value| {
+            let cell_map = cells(&[("fld_src", cell)]);
+            let identities =
+                super::super::approval_attachment::source_identities(&widgets, &cell_map)
+                    .unwrap_or_else(|e| panic!("{e}"));
+            signature(&snapshot, &widgets, &cell_map, &identities).unwrap_or_else(|e| panic!("{e}"))
+        };
+        let base = sign(json!([{"file_token":"Token1","name":"a.pdf","size":10}]));
+        assert_eq!(
+            base,
+            sign(json!([{"file_token":"Token1","name":"a.pdf","size":10}]))
+        );
+        assert_ne!(
+            base,
+            sign(json!([{"file_token":"Token2","name":"a.pdf","size":10}])),
+            "不同 file_token 必须不同签名"
+        );
+        assert_ne!(
+            base,
+            sign(json!([{"file_token":"Token1","name":"a.pdf","size":11}])),
+            "不同 size 必须不同签名"
+        );
     }
 }

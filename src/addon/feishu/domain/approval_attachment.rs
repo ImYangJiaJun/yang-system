@@ -85,6 +85,34 @@ pub(crate) fn preflight(
     Ok(codes)
 }
 
+/// 附件源标识：`<file_token>|<name>|<size>`，按单元格里的源顺序。
+///
+/// 聚合签名用它代替真实上传得到的 file code——签名阶段禁止任何网络副作用
+/// （不能调 `transfer`），而源文件三元组足以区分「两条记录是不是同一份附件」。
+///
+/// 消费者（聚合播种）在后续任务接入，先按文件级 `dead_code` 惯例标注。
+#[allow(dead_code)]
+pub(crate) fn source_identities(
+    widgets: &[WidgetMap],
+    cells: &Map<String, Value>,
+) -> Result<BTreeMap<String, Vec<String>>, ConvertError> {
+    let mut identities = BTreeMap::new();
+    for widget in widgets.iter().filter(|w| is_media(&w.widget_type)) {
+        // 与上传链路共用同一套校验：非法附件在签名阶段就要拦住。
+        let files = attachments(widget, cells)?;
+        if !files.is_empty() {
+            identities.insert(
+                widget.widget_id.clone(),
+                files
+                    .iter()
+                    .map(|file| format!("{}|{}|{}", file.file_token, file.name, file.size))
+                    .collect(),
+            );
+        }
+    }
+    Ok(identities)
+}
+
 fn multipart(name: &str, bytes: &[u8], file_type: &str) -> (String, Vec<u8>) {
     let content_type = if file_type == "image" {
         image_content_type(name)
@@ -378,5 +406,42 @@ mod tests {
             body.contains("Content-Type: application/octet-stream"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn source_identities_keep_source_order_and_include_token_name_size() {
+        let attachment = widget_map("att", "attachmentV2");
+        let cells = Map::from_iter([(
+            "f".to_string(),
+            json!([
+                {"file_token":"Token2","name":"b.pdf","size":20},
+                {"file_token":"Token1","name":"a.pdf","size":10}
+            ]),
+        )]);
+        let identities = source_identities(std::slice::from_ref(&attachment), &cells)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            identities.get("att"),
+            Some(&vec![
+                "Token2|b.pdf|20".to_string(),
+                "Token1|a.pdf|10".to_string()
+            ]),
+            "按源顺序，且三元组齐全"
+        );
+        assert_eq!(identities.len(), 1);
+
+        // 没有文件的媒体控件不落签名片段。
+        assert!(
+            source_identities(std::slice::from_ref(&attachment), &Map::new())
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_empty()
+        );
+
+        // 非法附件形态与上传链路同一套校验：签名阶段也不能放行。
+        let bad = Map::from_iter([(
+            "f".to_string(),
+            json!([{"file_token":"a/b","name":"a.pdf","size":1}]),
+        )]);
+        assert!(source_identities(std::slice::from_ref(&attachment), &bad).is_err());
     }
 }
