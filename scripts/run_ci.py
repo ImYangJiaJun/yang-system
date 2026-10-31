@@ -211,6 +211,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::session_cleanup::tests::real_mysql_cleanup_batches_and_drains_backlog", "--", "--ignored", "--test-threads=1"),
     ),
     Command(
+        "Session cleanup empty candidate integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::session_cleanup::tests::cleanup_with_no_candidates_is_ok", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Read-only smoke isolation integration",
         ("cargo", "test", "--lib", "--locked", "bootstrap::tests::smoke_mode_preserves_empty_schema_and_does_not_bind_http", "--", "--ignored", "--test-threads=1"),
     ),
@@ -231,6 +235,42 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_persist_applicant_scopes_to_touched_records", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合播种建组集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_seed_creates_one_group_with_two_members", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合播种仅批量点击集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_seed_only_runs_on_batch_click", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合关闭逐条播种集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_off_keeps_one_instance_per_record", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组全选解散集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_dissolves_only_fully_selected_ready_groups", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合 review 组复位集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_reopens_review_group_preserving_group_phase", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "已提交组补回填复位集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::submitted_group_with_cleared_member_serial_reopens_leader_for_backfill", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合开启仍重开单条 review 集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_on_still_reopens_plain_review_task", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合关闭解散未提交组集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_off_dissolves_unsubmitted_group_into_individual_tasks", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合解散清 applicant 集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::dissolve_removes_member_rows_and_applicant_rows", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Legacy task record index guard integration",
         ("cargo", "test", "--lib", "--locked", "infrastructure::schema::tests::real_mysql_legacy_task_record_index_guard_blocks_startup", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
@@ -240,7 +280,7 @@ INTEGRATION = (
     ),
     Command(
         "Approval reopen retryable tasks integration",
-        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_reopen_restarts_retryable_tasks_but_never_running_or_backfilled", "--", "--ignored", "--exact", "--test-threads=1"),
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_reopen_restarts_retryable_and_backfilled_tasks_but_never_running_ones", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "Approval unknown effects integration",

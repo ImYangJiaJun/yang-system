@@ -190,6 +190,10 @@ async fn build_feishu_app(
     redis: &RedisClient,
     settings: Arc<FeishuSettings>,
     dispatch_handle: Option<ApprovalDispatchHandle>,
+    // 出站 Action（发起人解析等）要先拿到 `Tools::http()`；但「出站栈建不起来」
+    // 本身也是被钉住的失败出口（`dispatch_provision_failure_writes_a_failed_request_log`
+    // 要求 Err 原文是「HTTP 客户端未初始化」），所以按用例选择是否装配。
+    with_http: bool,
 ) -> anyhow::Result<Arc<BuiltApp>> {
     let namespace = format!(
         "feishu-approval-{}",
@@ -204,6 +208,9 @@ async fn build_feishu_app(
         .extension(AuthorizationVersionCache::new(redis.clone(), namespace)?)
         .token(token_manager())
         .config(settings);
+    if with_http {
+        builder = builder.http(yang_base::http::HttpClient::new(30)?);
+    }
     if let Some(handle) = dispatch_handle {
         builder = builder.extension(handle);
     }
@@ -265,8 +272,14 @@ async fn prepare_app(
     let database = connect_database().await?;
     let redis = connect_redis().await?;
     let token = seed_operator(&database).await?;
-    let app =
-        build_feishu_app(&database, &redis, feishu_settings(app_id, app_secret), None).await?;
+    let app = build_feishu_app(
+        &database,
+        &redis,
+        feishu_settings(app_id, app_secret),
+        None,
+        false,
+    )
+    .await?;
     Ok((database, app, token))
 }
 
@@ -693,6 +706,7 @@ async fn dispatch_without_initiator_is_rejected_and_logged() {
             &redis,
             feishu_settings(Some("cli_test_app"), Some("test-app-secret")),
             Some(handle),
+            false,
         )
         .await?;
 
@@ -764,6 +778,7 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
             &redis,
             feishu_settings(Some("cli_dummy_app"), Some("dummy-secret")),
             Some(handle),
+            false,
         )
         .await?;
 
@@ -1283,6 +1298,8 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
             &redis,
             feishu_settings(Some("cli_test_app"), Some("test-app-secret")),
             Some(handle),
+            // 发起人解析要先建出站栈：这条用例钉的是拒绝出口的 40005 与脱敏落记录。
+            true,
         )
         .await?;
 
@@ -1487,7 +1504,7 @@ async fn shared_challenge_url_accepts_encrypted_event_callback() {
                 (*feishu_settings(Some("cli_test_app"), Some("cli_test_secret"))).clone();
             settings.event_verification_token = Some("test-event-token".to_string());
             settings.event_encrypt_key = Some("test-event-encrypt-key".to_string());
-            let app = build_feishu_app(&database, &redis, Arc::new(settings), None).await?;
+            let app = build_feishu_app(&database, &redis, Arc::new(settings), None, false).await?;
 
             // challenge 端点必须成功解密、委托事件 handler 并落库，而不是 401。
             let _ = dispatch(

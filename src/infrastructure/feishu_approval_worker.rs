@@ -51,8 +51,12 @@ use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
+use crate::addon::feishu::domain::approval_aggregation::{
+    self, group_uuid, members_all_selected, plan_groups, GroupCandidate,
+};
+use crate::addon::feishu::domain::approval_attachment::source_identities;
 use crate::addon::feishu::domain::approval_convert::{
-    amount_currency, format_local, FixedOffset, WidgetMap,
+    amount_currency, build_signature, format_local, FixedOffset, FormInput, WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
     backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
@@ -63,6 +67,7 @@ use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
     FeedbackReference, NotificationRecipient, ReceiveIdType,
 };
+use crate::addon::feishu::domain::approval_provision::resolve_external_options;
 use crate::addon::feishu::domain::approval_row_edit;
 use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
@@ -76,6 +81,7 @@ use crate::addon::feishu::domain::tenant_token::{
 };
 use crate::config::FeishuSettings;
 use crate::infrastructure::audit;
+use yang_db::Transaction;
 
 /// 一次认领最多取多少条。
 ///
@@ -935,6 +941,9 @@ async fn seed_tasks(
             "backfill_field",
             "batch_scope_field",
             "aggregate_batch",
+            // 聚合签名需要定义快照（控件结构与金额币种）与 Base 时区（日期控件）。
+            "form_snapshot",
+            "base_timezone",
         ])?
         .where_eq("enabled", serde_json::json!(true))?;
     let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;
@@ -999,7 +1008,7 @@ async fn seed_tasks(
     Ok(report)
 }
 
-/// 按 record_id 定向读取某配置下的任务行：`record_id → (task_id, state)`。
+/// 按 record_id 定向读取某配置下的任务行：`record_id → 任务行投影`。
 ///
 /// # 为什么不再读全表
 ///
@@ -1019,31 +1028,15 @@ async fn load_tasks_by_record(
     context: &FeishuContext,
     config_id: i64,
     record_ids: &[String],
-) -> anyhow::Result<BTreeMap<String, (i64, String)>> {
-    // 去重并跳过空串：分片大小按有效 id 算，重复 id 不该占份额。
-    let mut unique: Vec<&String> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    for record_id in record_ids {
-        if record_id.is_empty() {
-            continue;
-        }
-        if seen.insert(record_id.as_str()) {
-            unique.push(record_id);
-        }
-    }
-
+) -> anyhow::Result<BTreeMap<String, TaskRowState>> {
+    let unique = unique_record_ids(record_ids);
     let mut by_record = BTreeMap::new();
     for chunk in unique.chunks(TASK_LOOKUP_CHUNK) {
         let values: Vec<serde_json::Value> = chunk
             .iter()
             .map(|record_id| serde_json::json!(record_id))
             .collect();
-        let query = context
-            .approval_tasks()
-            .query()
-            .select_fields(&["id", "record_id", "state"])?
-            .where_eq("config_id", serde_json::json!(config_id))?
-            .where_in("record_id", values)?;
+        let query = task_lookup_query(context, config_id, values)?;
         let max_pages = chunk.len().div_ceil(PAGE_SIZE) + 1;
         let mut rows: Vec<Record> = Vec::with_capacity(chunk.len());
         for page in 1..=max_pages {
@@ -1061,13 +1054,120 @@ async fn load_tasks_by_record(
             );
         }
         for row in rows {
-            by_record.insert(
-                row.require("record_id")?,
-                (row.require("id")?, row.require("state")?),
-            );
+            by_record.insert(row.require("record_id")?, TaskRowState::from_record(&row)?);
         }
     }
     Ok(by_record)
+}
+
+/// 事务内的 [`load_tasks_by_record`]：解散/建组之后重算候选必须看得见本事务的写入。
+///
+/// 用连接池读会读到**事务开始前**的已提交快照，把刚被解散的组成员继续当成
+/// 「已有任务行」，于是本次点击永远重建不出这些记录。
+async fn load_tasks_by_record_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    config_id: i64,
+    record_ids: &[String],
+) -> anyhow::Result<BTreeMap<String, TaskRowState>> {
+    let unique = unique_record_ids(record_ids);
+    let mut by_record = BTreeMap::new();
+    for chunk in unique.chunks(TASK_LOOKUP_CHUNK) {
+        let values: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|record_id| serde_json::json!(record_id))
+            .collect();
+        let query = task_lookup_query(context, config_id, values)?;
+        let max_pages = chunk.len().div_ceil(PAGE_SIZE) + 1;
+        let mut rows: Vec<Record> = Vec::with_capacity(chunk.len());
+        for page in 1..=max_pages {
+            let batch = query
+                .clone()
+                .page(page, PAGE_SIZE)?
+                .all_in_tx(transaction)
+                .await?;
+            let got = batch.len();
+            rows.extend(batch);
+            if got < PAGE_SIZE {
+                break;
+            }
+            anyhow::ensure!(
+                page < max_pages,
+                "按 record_id 读取配置 {config_id} 的任务行超过预期页数：\
+                 片大小 {}，{max_pages} 页仍满页",
+                chunk.len()
+            );
+        }
+        for row in rows {
+            by_record.insert(row.require("record_id")?, TaskRowState::from_record(&row)?);
+        }
+    }
+    Ok(by_record)
+}
+
+/// 播种侧任务行投影：组维护需要 `group_id`/`group_seq` 判断「是不是组行」，
+/// 聚合处理期还需要 `effect_phase`（续跑与回捞）。
+#[derive(Debug, Clone)]
+struct TaskRowState {
+    id: i64,
+    state: String,
+    /// 非空 = 该行属于某个聚合组（`group_seq=0` 是 leader）。
+    group_id: Option<String>,
+    /// 组内序号与外部写入阶段：播种侧只需要 `group_id` 判断「是不是组行」，
+    /// 这两个字段供后续组处理与测试核对（Task 9 接入），先随投影一起读回。
+    #[allow(dead_code)]
+    group_seq: i64,
+    #[allow(dead_code)]
+    effect_phase: String,
+}
+
+impl TaskRowState {
+    fn from_record(row: &Record) -> anyhow::Result<Self> {
+        Ok(Self {
+            id: row.require("id")?,
+            state: row.require("state")?,
+            group_id: row
+                .optional::<String>("group_id")?
+                .filter(|value| !value.trim().is_empty()),
+            group_seq: row.require("group_seq")?,
+            effect_phase: row.require("effect_phase")?,
+        })
+    }
+}
+
+/// 去重并跳过空串：分片大小按有效 id 算，重复 id 不该占份额。
+fn unique_record_ids(record_ids: &[String]) -> Vec<&String> {
+    let mut unique: Vec<&String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for record_id in record_ids {
+        if record_id.is_empty() {
+            continue;
+        }
+        if seen.insert(record_id.as_str()) {
+            unique.push(record_id);
+        }
+    }
+    unique
+}
+
+fn task_lookup_query(
+    context: &FeishuContext,
+    config_id: i64,
+    values: Vec<serde_json::Value>,
+) -> anyhow::Result<yang_base::table::TableQuery> {
+    Ok(context
+        .approval_tasks()
+        .query()
+        .select_fields(&[
+            "id",
+            "record_id",
+            "state",
+            "group_id",
+            "group_seq",
+            "effect_phase",
+        ])?
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_in("record_id", values)?)
 }
 
 /// 解析批量范围复选框列的当前字段名；未配置返回 `None`。
@@ -1195,52 +1295,76 @@ async fn seed_config(
         .collect();
     let by_record = load_tasks_by_record(&runner.context, config_id, &record_ids).await?;
 
-    let mut seeded = 0usize;
-    let mut reopened = 0usize;
-    let mut skipped = 0usize;
-    let mut touched: Vec<String> = Vec::new();
-    for record in pending_records {
-        if record.record_id.is_empty() {
-            continue;
-        }
-        match by_record.get(&record.record_id) {
-            // 受理点击是**被点击配置**的显式人工重试：把不在执行中、停在可重试状态
-            // （review / terminal / unnotified / 退避中）的任务重置回 pending，本轮认领
-            // 时重跑。uuid 不变，飞书侧按 uuid 幂等，不会重复建单。
-            // 只重开本配置：点 A 表不能替 B 表重试，否则 B 的旧报错会随每次点击重发。
-            Some((id, _)) if reopens_on_click(trigger, config_id) => {
-                if approval_execution::reopen(&runner.context, *id).await? {
-                    reopened += 1;
-                    touched.push(record.record_id.clone());
+    // 批量点击（`clicked_record_id=None`）走组维护与聚合播种；单条点击与轮询保持
+    // 原语义（单条点击不维护组、不新建组，见设计 §4.4）。
+    let aggregate_batch: bool = config.optional("aggregate_batch")?.unwrap_or(false);
+    let batch_click = reopens_on_click(trigger, config_id) && clicked_record_id.is_none();
+    let outcome = if batch_click {
+        seed_batch_click(
+            runner,
+            config,
+            &pending_records,
+            &fields,
+            &by_record,
+            aggregate_batch,
+            applicant,
+        )
+        .await?
+    } else {
+        let mut seeded = 0usize;
+        let mut reopened = 0usize;
+        let mut skipped = 0usize;
+        let mut touched: Vec<String> = Vec::new();
+        for record in pending_records {
+            if record.record_id.is_empty() {
+                continue;
+            }
+            match by_record.get(&record.record_id) {
+                // 组行不在这里重开：组 leader 的复位只由 `maintain_groups` 在
+                // 批量点击分支做，否则会把已建实例/creating 组的 leader 无条件
+                // 拉回 pending（设计 §4.4 第 2 步）。
+                Some(task) if task.group_id.is_some() => {}
+                // 受理点击是**被点击配置**的显式人工重试：把不在执行中、停在可重试状态
+                // （review / terminal / unnotified / 退避中）的任务重置回 pending，本轮认领
+                // 时重跑。uuid 不变，飞书侧按 uuid 幂等，不会重复建单。
+                // 只重开本配置：点 A 表不能替 B 表重试，否则 B 的旧报错会随每次点击重发。
+                Some(task) if reopens_on_click(trigger, config_id) => {
+                    if approval_execution::reopen(&runner.context, task.id).await? {
+                        reopened += 1;
+                        touched.push(record.record_id.clone());
+                    }
+                }
+                // 轮询不拉起旧行：空单元格不能证明旧请求没有成功，也不能撤销
+                // 另一个实例的执行权。
+                Some(_) => {}
+                // 没有任务行 = 这条记录从没被受理过。轮询不建行（见
+                // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
+                None if !trigger.discovers_new_records() => skipped += 1,
+                None => {
+                    // 幂等键与派发路径**同源**：同一个 record 在同一配置下只有一条
+                    // 任务行，重复播种会撞 (config_id, record_id) 复合唯一键而不是
+                    // 建出第二条。跨配置复用 record_id 是合法情形（复制多维表格会
+                    // 保留 record_id），所以这里不能用全局唯一键判重。
+                    let uuid =
+                        derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
+                    if insert_seeded_task(&runner.context, config_id, &record.record_id, &uuid)
+                        .await?
+                    {
+                        seeded += 1;
+                        touched.push(record.record_id.clone());
+                    } else {
+                        skipped += 1;
+                    }
                 }
             }
-            // 轮询不拉起旧行：空单元格不能证明旧请求没有成功，也不能撤销
-            // 另一个实例的执行权。
-            Some(_) => {}
-            // 没有任务行 = 这条记录从没被受理过。轮询不建行（见
-            // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
-            None if !trigger.discovers_new_records() => skipped += 1,
-            None => {
-                // 幂等键与派发路径**同源**：同一个 record 在同一配置下只有一条
-                // 任务行，重复播种会撞 (config_id, record_id) 复合唯一键而不是
-                // 建出第二条。跨配置复用 record_id 是合法情形（复制多维表格会
-                // 保留 record_id），所以这里不能用全局唯一键判重。
-                let uuid = derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
-                if insert_seeded_task(&runner.context, config_id, &record.record_id, &uuid).await? {
-                    seeded += 1;
-                    touched.push(record.record_id.clone());
-                } else {
-                    skipped += 1;
-                }
-            }
         }
-    }
-    let outcome = SeedOutcome {
-        seeded,
-        reopened,
-        skipped,
-        touched,
-        empty_notified: false,
+        SeedOutcome {
+            seeded,
+            reopened,
+            skipped,
+            touched,
+            empty_notified: false,
+        }
     };
     tracing::debug!(
         stage = "seed",
@@ -1253,6 +1377,480 @@ async fn seed_config(
         "审批配置播种完成"
     );
     Ok(outcome)
+}
+
+/// 批量点击的播种：**锁配置行 → 单条任务 reopen → 组维护 → 按当前勾选建组/建行**。
+///
+/// # 顺序不能换
+///
+/// - 先锁配置行（与 `admit` / `delete_config` 同一把 `FOR UPDATE`），否则「播种判定
+///   可解散」与「受理插入任务行」会交错；
+/// - `reopen` 只碰 `group_id` 为空的行；组 leader 的复位只属于 [`maintain_groups`]；
+/// - 组维护之后**在事务内**重算「没有任务行」的记录：解散删掉的行对本事务可见，
+///   用连接池读会读到事务开始前的快照，把刚解散的成员继续当成「已有行」。
+async fn seed_batch_click(
+    runner: &RoundRunner,
+    config: &Record,
+    pending_records: &[&bitable::RecordItem],
+    fields: &[bitable::FieldItem],
+    by_record: &BTreeMap<String, TaskRowState>,
+    aggregate_batch: bool,
+    applicant: Option<&str>,
+) -> anyhow::Result<SeedOutcome> {
+    let config_id: i64 = config.require("id")?;
+    let base_token: String = config.require("base_token")?;
+    let table_id: String = config.require("table_id")?;
+    let approval_code: String = config.require("approval_code")?;
+
+    let mut transaction = runner.tools.mysql()?.transaction().await?;
+    let result: anyhow::Result<SeedOutcome> = async {
+        anyhow::ensure!(
+            approval_aggregation::repository::lock_config_in_tx(
+                &mut transaction,
+                &runner.context,
+                config_id,
+            )
+            .await?,
+            "审批配置已删除或停用，跳过本轮播种"
+        );
+
+        let mut outcome = SeedOutcome::default();
+        // 第 2 步：非组任务行按点击语义重开（组行留给 maintain_groups）。
+        for record in pending_records {
+            let Some(task) = by_record.get(&record.record_id) else {
+                continue;
+            };
+            if task.group_id.is_some() {
+                continue;
+            }
+            if approval_execution::reopen(&runner.context, task.id).await? {
+                outcome.reopened += 1;
+                outcome.touched.push(record.record_id.clone());
+            }
+        }
+
+        // 第 3 步：组维护与开关无关——关掉聚合也要让已存在的组收尾。
+        outcome.reopened +=
+            maintain_groups(&mut transaction, runner, config, pending_records, applicant).await?;
+
+        // 第 4 步：解散之后重算候选（事务内可见本事务的删除）。
+        let record_ids: Vec<String> = pending_records
+            .iter()
+            .map(|record| record.record_id.clone())
+            .collect();
+        let remaining =
+            load_tasks_by_record_in_tx(&mut transaction, &runner.context, config_id, &record_ids)
+                .await?;
+        let fresh: Vec<&bitable::RecordItem> = pending_records
+            .iter()
+            .copied()
+            .filter(|record| !record.record_id.is_empty())
+            .filter(|record| !remaining.contains_key(&record.record_id))
+            .collect();
+        if aggregate_batch {
+            let seeded =
+                seed_aggregate_groups(&mut transaction, runner, config, &fresh, fields).await?;
+            outcome.seeded += seeded.seeded;
+            outcome.touched.extend(seeded.touched);
+        } else {
+            for record in fresh {
+                let uuid = derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
+                let inserted = runner
+                    .context
+                    .approval_tasks()
+                    .query()
+                    .insert_in_tx(
+                        &mut transaction,
+                        Record::new()
+                            .set("config_id", config_id)
+                            .set("record_id", record.record_id.clone())
+                            .set("uuid", uuid)
+                            .set("state", "pending"),
+                    )
+                    .await;
+                match inserted {
+                    Ok(_) => {
+                        outcome.seeded += 1;
+                        outcome.touched.push(record.record_id.clone());
+                    }
+                    // 一条坏记录不能中止整轮：与单条播种同一口径。
+                    Err(error) => {
+                        tracing::warn!(
+                            config_id,
+                            record_id = %record.record_id,
+                            error = %error,
+                            "批量播种任务行失败，跳过该记录"
+                        );
+                        outcome.skipped += 1;
+                    }
+                }
+            }
+        }
+        Ok(outcome)
+    }
+    .await;
+
+    match result {
+        Ok(outcome) => {
+            transaction.commit().await?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback().await {
+                tracing::error!(error = %rollback, "审批派发播种事务回滚失败");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// 组维护：已提交组补回填、review/lookup 组复位 leader、可解散组解散。
+///
+/// 返回本轮**复位过 leader** 的组数（计入轮末汇总的「重试」）。解散不计数——
+/// 它删掉的记录会作为新记录重新播种，落在「新提交」里。
+///
+/// # 解散判据（三者同时成立）
+///
+/// 组行 `effect_phase='ready'`（从未尝试创建）、leader 无未过期租约、
+/// **全组成员都在本次勾选内**。只解散这三个条件同时满足的组：勾选外的组保持
+/// 不动，已尝试创建的组永不解散（设计 §4.4、§七.2/3）。
+///
+/// # 已提交组的阶段
+///
+/// 组行有实例码时 leader 复位到 `created`（实例已存在，处理期按实例码恢复）；
+/// 组行没有实例码时复位到 `ready`。**组行阶段一律不动**——它是外部副作用的
+/// 唯一事实，`reopen` 没有资格改写它。
+async fn maintain_groups(
+    transaction: &mut Transaction,
+    runner: &RoundRunner,
+    config: &Record,
+    pending_records: &[&bitable::RecordItem],
+    applicant: Option<&str>,
+) -> anyhow::Result<usize> {
+    let config_id: i64 = config.require("id")?;
+    let selected: HashSet<String> = pending_records
+        .iter()
+        .map(|record| record.record_id.clone())
+        .filter(|record_id| !record_id.is_empty())
+        .collect();
+    if selected.is_empty() {
+        return Ok(0);
+    }
+
+    let groups =
+        approval_aggregation::repository::list_groups_for_config(&runner.context, config_id)
+            .await?;
+    let now = unix_now_seconds();
+    let mut reopened = 0usize;
+    for group in groups {
+        let group_key: String = group.require("group_key")?;
+        let phase: String = group.require("effect_phase")?;
+        let instance_code = group
+            .optional::<String>("instance_code")?
+            .filter(|value| !value.trim().is_empty());
+        let members =
+            approval_aggregation::repository::load_members(&runner.context, config_id, &group_key)
+                .await?;
+        if members.is_empty() {
+            // 组行与成员行不一致（崩溃或手工清理）：删掉孤儿组行，别让它每轮空转。
+            approval_aggregation::repository::delete_group_in_tx(
+                transaction,
+                &runner.context,
+                config_id,
+                &group_key,
+            )
+            .await?;
+            continue;
+        }
+        let member_records: Vec<String> = members
+            .iter()
+            .map(|member| member.require::<String>("record_id"))
+            .collect::<Result<_, _>>()?;
+        let leader = members
+            .iter()
+            .find(|member| member.require::<i64>("group_seq").unwrap_or_default() == 0);
+        let leader_free = leader.map_or(true, |leader| !has_live_lease(leader, now));
+
+        if instance_code.is_none()
+            && phase == "ready"
+            && leader_free
+            && members_all_selected(&member_records, &selected)
+        {
+            dissolve_group(transaction, runner, config_id, &group_key, &members).await?;
+            continue;
+        }
+
+        let Some(leader) = leader else {
+            continue;
+        };
+        let leader_state: String = leader.require("state")?;
+        let reopen_needed = match (&instance_code, phase.as_str(), leader_state.as_str()) {
+            // 已提交组：任一成员在本轮勾选内 = 它的回填列为空，补回填。
+            (Some(_), _, _) => member_records
+                .iter()
+                .any(|record_id| selected.contains(record_id)),
+            // 组行阶段表明尝试过外部写入：按组 uuid 回捞，不重发 create。
+            (None, "creating" | "lookup", _) => true,
+            // leader 停在人工核查：点击就是重试（被 full 组解散的除外）。
+            (None, _, "review") => true,
+            _ => false,
+        };
+        if !reopen_needed || !leader_free || !reopenable(&leader_state) {
+            continue;
+        }
+        let leader_id: i64 = leader.require("id")?;
+        let leader_phase = if instance_code.is_some() {
+            "created"
+        } else {
+            "ready"
+        };
+        if approval_aggregation::repository::reopen_group_leader_in_tx(
+            transaction,
+            &runner.context,
+            leader_id,
+            leader_phase,
+        )
+        .await?
+        {
+            reopened += 1;
+            // 组 leader 不在 `SeedOutcome.touched` 里（它本来就有任务行），受理
+            // 发起人只能在这里落——否则组会以「没有发起人」进等待态。
+            if let Some(open_id) = applicant.map(str::trim).filter(|id| !id.is_empty()) {
+                if let Err(error) = upsert_task_applicant(&runner.context, leader_id, open_id).await
+                {
+                    tracing::warn!(error = %error, task_id = leader_id, "聚合组 leader 的受理发起人落库失败");
+                }
+            }
+        }
+    }
+    Ok(reopened)
+}
+
+/// 解散一个未提交的组：删 applicant 行 → 删/摘任务行 → 删组行。
+///
+/// 组内**已有自身实例码或回填编号**的行摘出组保留为单条任务：那些外部事实属于
+/// 该记录自己，不能随组一起删掉（设计 §4.4 第 3 步）。
+async fn dissolve_group(
+    transaction: &mut Transaction,
+    runner: &RoundRunner,
+    config_id: i64,
+    group_key: &str,
+    members: &[Record],
+) -> anyhow::Result<()> {
+    let mut delete_ids: Vec<i64> = Vec::new();
+    for member in members {
+        let task_id: i64 = member.require("id")?;
+        let own_instance = member
+            .optional::<String>("instance_code")?
+            .filter(|value| !value.trim().is_empty());
+        let own_serial = member
+            .optional::<String>("serial_number")?
+            .filter(|value| !value.trim().is_empty());
+        if own_instance.is_some() || own_serial.is_some() {
+            approval_aggregation::repository::detach_task_from_group_in_tx(
+                transaction,
+                &runner.context,
+                task_id,
+            )
+            .await?;
+        } else {
+            delete_ids.push(task_id);
+        }
+    }
+    approval_aggregation::repository::delete_task_rows_in_tx(
+        transaction,
+        &runner.context,
+        &delete_ids,
+    )
+    .await?;
+    approval_aggregation::repository::delete_group_in_tx(
+        transaction,
+        &runner.context,
+        config_id,
+        group_key,
+    )
+    .await?;
+    tracing::debug!(
+        config_id,
+        group_key,
+        detached_or_deleted = members.len(),
+        deleted = delete_ids.len(),
+        "聚合组已解散"
+    );
+    Ok(())
+}
+
+/// 组行 `effect_phase='ready'` 且无租约的组可以解散；已尝试创建的一律不动。
+fn has_live_lease(row: &Record, now: f64) -> bool {
+    let holder = row
+        .optional::<String>("worker_id")
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty());
+    let lease = row.optional::<i64>("lease_until").ok().flatten();
+    match (holder, lease) {
+        // 有持有者但没有到期时刻：按「仍持有」处理，宁可不解散。
+        (Some(_), None) => true,
+        (Some(_), Some(until)) => until as f64 > now,
+        _ => false,
+    }
+}
+
+/// 单条 `reopen` 的状态白名单（与 `approval_execution::reopen` 的 SQL 同口径）。
+///
+/// `paused` 是组级暂停状态：暂停组只能靠人工批量点击重试，组维护在这里以同一
+/// 白名单复位 leader（已提交组按实例码恢复、未提交组按组 uuid 回捞）。
+fn reopenable(state: &str) -> bool {
+    matches!(
+        state,
+        "pending" | "review" | "terminal" | "unnotified" | "backfilled" | "paused"
+    )
+}
+
+/// 聚合播种：对「本次勾选且没有任务行」的记录算一致性签名、分组并建组。
+///
+/// 组的成员行与组行在同一事务里插入；`touched` 返回**全部**成员的记录 id——
+/// 缺一个成员，它的受理发起人就不会落库，处理期会在 missing-initiator 守卫下
+/// 永久等待（设计 §4.4 第 4 步）。
+///
+/// 签名失败（非法值、外部选项解析失败、附件结构损坏等）的记录用
+/// `error:{record_id}` 单独成组：处理期照常暂停报错，而不是被静默合并进正常组。
+async fn seed_aggregate_groups(
+    transaction: &mut Transaction,
+    runner: &RoundRunner,
+    config: &Record,
+    pending_records: &[&bitable::RecordItem],
+    fields: &[bitable::FieldItem],
+) -> anyhow::Result<SeedOutcome> {
+    let mut outcome = SeedOutcome::default();
+    if pending_records.is_empty() {
+        return Ok(outcome);
+    }
+    let config_id: i64 = config.require("id")?;
+    let base_token: String = config.require("base_token")?;
+    let table_id: String = config.require("table_id")?;
+    let approval_code: String = config.require("approval_code")?;
+    let form_snapshot: String = config.optional("form_snapshot")?.unwrap_or_default();
+    let timezone_offset = config
+        .optional::<String>("base_timezone")?
+        .filter(|name| !name.trim().is_empty())
+        .and_then(|name| FixedOffset::from_iana(name.trim()).ok())
+        .unwrap_or(runner.timezone_offset);
+
+    let map_rows = runner
+        .context
+        .approval_field_maps()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .all()
+        .await?;
+    let maps: Vec<serde_json::Map<String, serde_json::Value>> =
+        map_rows.into_iter().map(Record::into_map).collect();
+    let base_widgets = widget_maps_from_rows(&maps, |widget_id| {
+        amount_currency(&form_snapshot, widget_id)
+    })
+    .ok_or_else(|| anyhow::anyhow!("字段映射配置损坏（转换器标识非法），无法计算聚合签名"))?;
+
+    let mut candidates: Vec<GroupCandidate> = Vec::with_capacity(pending_records.len());
+    for record in pending_records {
+        let signature = aggregate_signature(
+            runner,
+            record,
+            fields,
+            &base_widgets,
+            &form_snapshot,
+            timezone_offset,
+        )
+        .await;
+        candidates.push(GroupCandidate::new(record.record_id.clone(), signature));
+    }
+
+    for group in plan_groups(config_id, &candidates) {
+        let uuid = group_uuid(&base_token, &table_id, &approval_code, &group.group_key);
+        let inserted = approval_aggregation::repository::insert_group_in_tx(
+            transaction,
+            &runner.context,
+            config_id,
+            &group.group_key,
+            &group.signature_hash,
+            &uuid,
+        )
+        .await;
+        if let Err(error) = inserted {
+            tracing::warn!(
+                config_id,
+                group_key = %group.group_key,
+                error = %error,
+                "插入聚合组失败，跳过该组"
+            );
+            continue;
+        }
+        for (group_seq, record_id) in group.members.iter().enumerate() {
+            let uuid = derive_uuid(&base_token, &table_id, &approval_code, record_id);
+            approval_aggregation::repository::insert_group_task_in_tx(
+                transaction,
+                &runner.context,
+                config_id,
+                &group.group_key,
+                group_seq as i64,
+                record_id,
+                &uuid,
+            )
+            .await?;
+            outcome.seeded += 1;
+            outcome.touched.push(record_id.clone());
+        }
+    }
+    Ok(outcome)
+}
+
+/// 一条记录的一致性签名；任何失败都折成 `error:{record_id}`（单独成组）。
+///
+/// 签名阶段**不做任何网络副作用**：附件只取源文件三元组，不调 `transfer`。
+async fn aggregate_signature(
+    runner: &RoundRunner,
+    record: &bitable::RecordItem,
+    fields: &[bitable::FieldItem],
+    base_widgets: &[WidgetMap],
+    form_snapshot: &str,
+    timezone_offset: FixedOffset,
+) -> String {
+    let record_id = record.record_id.as_str();
+    let error_signature = || format!("error:{record_id}");
+    let cells = match bitable::rekey_cells_by_field_id(fields, &record.fields) {
+        Ok(cells) => cells,
+        Err(error) => {
+            tracing::warn!(record_id, error = %error, "聚合签名重映射字段失败，该记录单独成组");
+            return error_signature();
+        }
+    };
+    let mut widgets: Vec<WidgetMap> = base_widgets.to_vec();
+    if let Err(error) =
+        resolve_external_options(&runner.context, form_snapshot, &mut widgets, &cells, fields).await
+    {
+        tracing::warn!(record_id, error = %error, "聚合签名解析外部选项失败，该记录单独成组");
+        return error_signature();
+    }
+    let attachment_codes = match source_identities(&widgets, &cells) {
+        Ok(codes) => codes,
+        Err(error) => {
+            tracing::warn!(record_id, error = %error, "聚合签名读取附件源标识失败，该记录单独成组");
+            return error_signature();
+        }
+    };
+    match build_signature(&FormInput {
+        widgets: &widgets,
+        form_snapshot,
+        cells: &cells,
+        attachment_codes: &attachment_codes,
+        timezone_offset,
+    }) {
+        Ok(signature) => signature,
+        Err(error) => {
+            tracing::warn!(record_id, error = %error, "聚合签名转换失败，该记录单独成组");
+            error_signature()
+        }
+    }
 }
 
 /// 「点击受理、命中 0 条」反馈的接收人：只有被点击的配置、且拿得到点击人时才发。
@@ -1751,12 +2349,12 @@ async fn persist_applicant(
             return;
         }
     };
-    for (record_id, (task_id, state)) in tasks {
-        if state != "pending" {
+    for (record_id, task) in tasks {
+        if task.state != "pending" {
             continue;
         }
-        if let Err(error) = upsert_task_applicant(&runner.context, task_id, open_id).await {
-            tracing::warn!(error = %error, task_id, record_id, "受理发起人落库失败");
+        if let Err(error) = upsert_task_applicant(&runner.context, task.id, open_id).await {
+            tracing::warn!(error = %error, task_id = task.id, record_id, "受理发起人落库失败");
         }
     }
 }
@@ -3878,9 +4476,12 @@ mod tests {
             .bind(&target)
             .fetch_one(pool)
             .await?;
+            let hit = found
+                .get(&target)
+                .unwrap_or_else(|| panic!("{total} 行历史后仍应命中本轮记录"));
             assert_eq!(
-                found.get(&target),
-                Some(&(expected_id, "pending".to_string())),
+                (hit.id, hit.state.as_str()),
+                (expected_id, "pending"),
                 "{total} 行历史后仍应命中本轮记录（旧实现从 2000 行起整配置播种必败）"
             );
         }
@@ -3910,7 +4511,7 @@ mod tests {
             assert_eq!(found.len(), size, "片大小 {size} 必须全部命中");
             for record_id in ids {
                 assert_eq!(
-                    found.get(record_id).map(|(_, state)| state.as_str()),
+                    found.get(record_id).map(|task| task.state.as_str()),
                     Some("pending"),
                     "记录 {record_id} 的状态读错"
                 );
@@ -3944,13 +4545,16 @@ mod tests {
         .await?;
         let found =
             load_tasks_by_record(&context, config_id, std::slice::from_ref(&shared)).await?;
+        let hit = found
+            .get(&shared)
+            .unwrap_or_else(|| panic!("按 config_id 收窄后应命中本配置的任务行"));
         assert_eq!(
-            found.get(&shared),
-            Some(&(own_id, "pending".to_string())),
+            (hit.id, hit.state.as_str()),
+            (own_id, "pending"),
             "按 config_id 收窄后不应读到另一配置的同 record_id 行"
         );
         assert!(
-            found.values().all(|(id, _)| *id != foreign_id),
+            found.values().all(|task| task.id != foreign_id),
             "另一配置的任务行不得串进结果"
         );
 
@@ -4201,6 +4805,843 @@ mod tests {
             .bind(other_config_id)
             .execute(&pool)
             .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // 聚合播种：锁配置行 → 单条 reopen → 组维护 → 建组/建行（真实 MySQL）
+    // -----------------------------------------------------------------------
+
+    /// 聚合签名的审批定义快照：一个普通文本控件，足以覆盖「同值合并 / 异值拆组」。
+    const AGGREGATE_FORM_SNAPSHOT: &str =
+        r#"[{"id":"wName","name":"事由","type":"input","required":false}]"#;
+
+    /// 脚本化出站传输：按顺序回放预置响应并记录请求，播种测试不碰真实飞书。
+    struct SeedTransport {
+        responses: Mutex<
+            std::collections::VecDeque<crate::addon::feishu::domain::outbound::OutboundResponse>,
+        >,
+        requests: Mutex<Vec<crate::addon::feishu::domain::outbound::OutboundRequest>>,
+    }
+
+    impl SeedTransport {
+        fn new(bodies: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(
+                    bodies
+                        .into_iter()
+                        .map(
+                            |body| crate::addon::feishu::domain::outbound::OutboundResponse {
+                                status: 200,
+                                body,
+                                bytes: None,
+                                headers: BTreeMap::new(),
+                            },
+                        )
+                        .collect(),
+                ),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests
+                .lock()
+                .map(|guard| guard.len())
+                .unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for SeedTransport {
+        async fn send(
+            &self,
+            request: crate::addon::feishu::domain::outbound::OutboundRequest,
+        ) -> Result<crate::addon::feishu::domain::outbound::OutboundResponse, BaseError> {
+            self.requests
+                .lock()
+                .map_err(|error| BaseError::ConfigError(error.to_string()))?
+                .push(request);
+            self.responses
+                .lock()
+                .map_err(|error| BaseError::ConfigError(error.to_string()))?
+                .pop_front()
+                .ok_or_else(|| BaseError::ConfigError("播种测试的脚本响应已耗尽".to_string()))
+        }
+    }
+
+    /// 字段列表响应：回填列、批量范围复选框列、签名来源文本列。
+    fn fields_envelope() -> String {
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {
+                "has_more": false,
+                "total": 3,
+                "items": [
+                    {"field_id": "fldNumber", "field_name": "审批编号", "type": 2},
+                    {"field_id": "fldScope", "field_name": "纳入批量", "type": 7},
+                    {"field_id": "fldText", "field_name": "事由", "type": 1},
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    /// 查询记录响应：`(record_id, 事由文本)`，字段按**列名**作键（官方形态）。
+    fn records_envelope(items: &[(&str, &str)]) -> String {
+        let rows: Vec<serde_json::Value> = items
+            .iter()
+            .map(|(record_id, text)| {
+                serde_json::json!({
+                    "record_id": record_id,
+                    "fields": {"事由": text},
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {"has_more": false, "items": rows}
+        })
+        .to_string()
+    }
+
+    fn insert_aggregate_config_sql() -> &'static str {
+        "INSERT INTO feishu_approval_config \
+         (title,base_token,table_id,approval_code,applicant_field,backfill_field,\
+          batch_scope_field,base_timezone,aggregate_batch,form_snapshot,enabled,\
+          created_at,updated_at) \
+         VALUES ('聚合播种测试',?,?,'DEF-AGG','fldPerson','fldNumber',\
+                 'fldScope','Asia/Shanghai',?,?,true,NOW(),NOW())"
+    }
+
+    async fn insert_aggregate_config(
+        pool: &sqlx::MySqlPool,
+        namespace: &str,
+        suffix: &str,
+        aggregate: bool,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query(insert_aggregate_config_sql())
+            .bind(format!("appAgg{namespace}"))
+            .bind(format!("tbl{namespace}{suffix}"))
+            .bind(aggregate)
+            .bind(AGGREGATE_FORM_SNAPSHOT)
+            .execute(pool)
+            .await?
+            .last_insert_id() as i64)
+    }
+
+    async fn insert_aggregate_field_map(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO feishu_approval_field_map \
+             (config_id,widget_id,widget_type,required,bitable_field,bitable_field_name,\
+              converter,created_at,updated_at) \
+             VALUES (?,'wName','input',false,'fldText','事由','direct',NOW(),NOW())",
+        )
+        .bind(config_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_group_row(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+        group_key: &str,
+        phase: &str,
+        instance_code: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO feishu_approval_group \
+             (config_id,group_key,signature_hash,uuid,effect_phase,instance_code,\
+              created_at,updated_at) \
+             VALUES (?,?,?,?,?,?,NOW(),NOW())",
+        )
+        .bind(config_id)
+        .bind(group_key)
+        .bind(format!("sig-{group_key}"))
+        .bind(format!("uuid-{group_key}"))
+        .bind(phase)
+        .bind(instance_code)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_group_task_row(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+        group_key: &str,
+        group_seq: i64,
+        record_id: &str,
+        state: &str,
+        effect_phase: &str,
+        serial_number: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query(
+            "INSERT INTO feishu_approval_task \
+             (config_id,record_id,uuid,state,group_id,group_seq,effect_phase,\
+              serial_number,created_at,updated_at) \
+             VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())",
+        )
+        .bind(config_id)
+        .bind(record_id)
+        .bind(format!("uuid-{record_id}"))
+        .bind(state)
+        .bind(group_key)
+        .bind(group_seq)
+        .bind(effect_phase)
+        .bind(serial_number)
+        .execute(pool)
+        .await?
+        .last_insert_id() as i64)
+    }
+
+    async fn load_seed_config(context: &FeishuContext, config_id: i64) -> anyhow::Result<Record> {
+        context
+            .approval_configs()
+            .query()
+            .where_eq("id", serde_json::json!(config_id))?
+            .optional()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("测试配置不存在"))
+    }
+
+    /// 用真实 MySQL 连接池构造 RoundRunner（事务需要 `tools.mysql()`）。
+    async fn build_seed_runner(
+        database: yang_db::Database,
+        context: Arc<FeishuContext>,
+        transport: Arc<SeedTransport>,
+    ) -> anyhow::Result<RoundRunner> {
+        let transport: Arc<dyn OutboundTransport> = transport;
+        let tokens = Arc::new(TenantTokenProvider::new(
+            Arc::new(FakeTokenCache),
+            Arc::clone(&transport),
+            Arc::new(TokioSleeper),
+            FeishuCredentials {
+                app_id: "test".into(),
+                app_secret: "test".into(),
+            },
+            "aggregate-seed-test",
+        )?);
+        Ok(RoundRunner {
+            tools: Arc::new(
+                yang_base::tools::ToolsBuilder::new()
+                    .mysql(database)
+                    .build()?,
+            ),
+            context,
+            tokens,
+            transport,
+            sleeper: Arc::new(TokioSleeper),
+            timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+            heartbeat: ProgressHeartbeat::default(),
+            seed_failures: Arc::default(),
+        })
+    }
+
+    async fn cleanup_aggregate_fixture(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "DELETE FROM feishu_approval_task_applicant WHERE task_id IN \
+             (SELECT id FROM feishu_approval_task WHERE config_id=?)",
+        )
+        .bind(config_id)
+        .execute(pool)
+        .await?;
+        sqlx::query("DELETE FROM feishu_approval_task WHERE config_id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_group WHERE config_id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_field_map WHERE config_id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_config WHERE id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 同签名的两条记录合成为一个组：一行组行 + 两条任务行（`group_seq` 0/1）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_seed_creates_one_group_with_two_members() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", true).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 2, "两条记录都成为组成员");
+        assert!(outcome.touched.contains(&r1) && outcome.touched.contains(&r2));
+        assert_eq!(transport.request_count(), 2, "播种只应读取字段与记录各一次");
+
+        let groups: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT group_key,uuid,effect_phase FROM feishu_approval_group WHERE config_id=?",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(groups.len(), 1, "同签名必须合成一个组");
+        let (group_key, group_uuid_value, phase) = &groups[0];
+        assert_eq!(phase, "ready");
+        assert_eq!(group_uuid_value.len(), 36, "组 uuid 必须是规范 UUID 形态");
+
+        let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT record_id,group_id,group_seq FROM feishu_approval_task \
+             WHERE config_id=? ORDER BY group_seq",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (r1.clone(), Some(group_key.clone()), 0));
+        assert_eq!(rows[1], (r2.clone(), Some(group_key.clone()), 1));
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 单条点击不建组：聚合开关打开时，被点记录仍按单条任务入队。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_seed_only_runs_on_batch_click() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", true).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            Some(&r1),
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 1);
+        assert_eq!(outcome.touched, vec![r1.clone()], "单条点击只碰被点记录");
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 0, "单条点击不得建组");
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT record_id,group_id FROM feishu_approval_task WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(row, (r1, None), "单条任务不得带组键");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 开关关闭时逐条建任务行，不建组。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_off_keeps_one_instance_per_record() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 2);
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 0, "开关关闭不得建组");
+        let rows: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT group_id FROM feishu_approval_task WHERE config_id=? ORDER BY record_id",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(rows, vec![None, None], "每条记录各自一条单条任务");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 只解散「全组成员都在本次勾选内、阶段 ready、无租约」的组；勾选外的组不动。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn batch_click_dissolves_only_fully_selected_ready_groups() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_a = format!("ga{namespace}");
+        let group_b = format!("gb{namespace}");
+        let a1 = format!("{namespace}-a1");
+        let a2 = format!("{namespace}-a2");
+        let b1 = format!("{namespace}-b1");
+        let b2 = format!("{namespace}-b2");
+        insert_group_row(&pool, config_id, &group_a, "ready", None).await?;
+        insert_group_row(&pool, config_id, &group_b, "ready", None).await?;
+        insert_group_task_row(&pool, config_id, &group_a, 0, &a1, "pending", "ready", None).await?;
+        insert_group_task_row(&pool, config_id, &group_a, 1, &a2, "pending", "ready", None).await?;
+        insert_group_task_row(&pool, config_id, &group_b, 0, &b1, "pending", "ready", None).await?;
+        insert_group_task_row(&pool, config_id, &group_b, 1, &b2, "pending", "ready", None).await?;
+        // 勾选 a1/a2/b1（b2 未被重新勾选）。
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&a1, "报销"), (&a2, "报销"), (&b1, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        let groups: Vec<String> =
+            sqlx::query_scalar("SELECT group_key FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            groups,
+            vec![group_b.clone()],
+            "未全选的组必须保留，全选的组被解散"
+        );
+
+        let a1_group: Option<String> =
+            sqlx::query_scalar("SELECT group_id FROM feishu_approval_task WHERE record_id=?")
+                .bind(&a1)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(a1_group, None, "解散后的成员重建为单条任务");
+        let b1_group: Option<String> =
+            sqlx::query_scalar("SELECT group_id FROM feishu_approval_task WHERE record_id=?")
+                .bind(&b1)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            b1_group.as_deref(),
+            Some(group_b.as_str()),
+            "勾选外的组成员不动"
+        );
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// review/lookup 组点击后复位 leader，**组行阶段保留**（外部副作用事实）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn batch_click_reopens_review_group_preserving_group_phase() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_key = format!("gr{namespace}");
+        let leader_record = format!("{namespace}-r1");
+        let member_record = format!("{namespace}-r2");
+        insert_group_row(&pool, config_id, &group_key, "lookup", None).await?;
+        let leader_id = insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            0,
+            &leader_record,
+            "review",
+            "ready",
+            None,
+        )
+        .await?;
+        insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            1,
+            &member_record,
+            "review",
+            "ready",
+            None,
+        )
+        .await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&leader_record, "报销"), (&member_record, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.reopened, 1, "review leader 应被复位一次");
+        let leader: (String, String) =
+            sqlx::query_as("SELECT state,effect_phase FROM feishu_approval_task WHERE id=?")
+                .bind(leader_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(leader, ("pending".to_string(), "ready".to_string()));
+        let phase: String =
+            sqlx::query_scalar("SELECT effect_phase FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(phase, "lookup", "组行阶段不得被 reopen 改写");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 已提交组的成员编号被清空：复位 leader 重新回填，组行实例码与阶段保留。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn submitted_group_with_cleared_member_serial_reopens_leader_for_backfill(
+    ) -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_key = format!("gs{namespace}");
+        let leader_record = format!("{namespace}-r1");
+        let member_record = format!("{namespace}-r2");
+        insert_group_row(&pool, config_id, &group_key, "created", Some("INST-SEED")).await?;
+        let leader_id = insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            0,
+            &leader_record,
+            "backfilled",
+            "ready",
+            None,
+        )
+        .await?;
+        insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            1,
+            &member_record,
+            "backfilled",
+            "ready",
+            None,
+        )
+        .await?;
+        // 只勾选成员记录：它的回填列被用户清空（leader 的编号还在，不在扫描结果里）。
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&member_record, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.reopened, 1);
+        let leader: (String, String) =
+            sqlx::query_as("SELECT state,effect_phase FROM feishu_approval_task WHERE id=?")
+                .bind(leader_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            leader,
+            ("pending".to_string(), "created".to_string()),
+            "已提交组复位到 created（实例已存在，处理期按实例码恢复）"
+        );
+        let group: (String, Option<String>) = sqlx::query_as(
+            "SELECT effect_phase,instance_code FROM feishu_approval_group WHERE config_id=?",
+        )
+        .bind(config_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            group,
+            ("created".to_string(), Some("INST-SEED".to_string()))
+        );
+        // 组 leader 不在 touched 里，受理发起人必须由组维护自己落库。
+        assert_eq!(
+            applicant_of(&pool, leader_id).await?,
+            Some("ou_click".to_string()),
+            "复位后的组 leader 必须带上本轮点击人"
+        );
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 聚合开启不影响单条任务的人工重试：review 行照常复位。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_on_still_reopens_plain_review_task() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", true).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let record_id = format!("{namespace}-r1");
+        let task_id = insert_single_task(
+            &pool,
+            config_id,
+            &record_id,
+            &format!("{namespace}-plain"),
+            "review",
+        )
+        .await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&record_id, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.reopened, 1);
+        let state: String = sqlx::query_scalar("SELECT state FROM feishu_approval_task WHERE id=?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(state, "pending", "单条 review 行照常被点击重开");
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 0, "已有的单条任务不参与聚合，也不新建组");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 开关关闭时，未提交组被解散后按逐条任务重建（回滚路径）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_off_dissolves_unsubmitted_group_into_individual_tasks() -> anyhow::Result<()>
+    {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_key = format!("gd{namespace}");
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        insert_group_row(&pool, config_id, &group_key, "ready", None).await?;
+        insert_group_task_row(
+            &pool, config_id, &group_key, 0, &r1, "pending", "ready", None,
+        )
+        .await?;
+        insert_group_task_row(
+            &pool, config_id, &group_key, 1, &r2, "pending", "ready", None,
+        )
+        .await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 2, "解散后两条记录各自重建单条任务");
+        assert!(outcome.touched.contains(&r1) && outcome.touched.contains(&r2));
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 0, "未提交组应被解散");
+        let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT record_id,group_id,group_seq FROM feishu_approval_task \
+             WHERE config_id=? ORDER BY record_id",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            rows,
+            vec![(r1, None, 0), (r2, None, 0),],
+            "解散后的成员必须摘掉组键"
+        );
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 解散同时清掉 applicant 行：任务行删了而属性扩展留着，就是孤儿 PII。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn dissolve_removes_member_rows_and_applicant_rows() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_key = format!("ge{namespace}");
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        insert_group_row(&pool, config_id, &group_key, "ready", None).await?;
+        let leader_id = insert_group_task_row(
+            &pool, config_id, &group_key, 0, &r1, "pending", "ready", None,
+        )
+        .await?;
+        let member_id = insert_group_task_row(
+            &pool, config_id, &group_key, 1, &r2, "pending", "ready", None,
+        )
+        .await?;
+        sqlx::query("INSERT INTO feishu_approval_task_applicant (task_id,open_id) VALUES (?,?)")
+            .bind(leader_id)
+            .bind("ou_old_leader")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO feishu_approval_task_applicant (task_id,open_id) VALUES (?,?)")
+            .bind(member_id)
+            .bind("ou_old_member")
+            .execute(&pool)
+            .await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+        )
+        .await?;
+
+        let old_applicants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_task_applicant WHERE task_id IN (?,?)",
+        )
+        .bind(leader_id)
+        .bind(member_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(old_applicants, 0, "被删除任务行的 applicant 行必须一并清掉");
+        let old_tasks: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE id IN (?,?)")
+                .bind(leader_id)
+                .bind(member_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(old_tasks, 0, "解散删除的是旧任务行");
+        let rebuilt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=? AND group_id IS NULL",
+        )
+        .bind(config_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(rebuilt, 2, "两条记录重建为单条任务");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
         Ok(())
     }
 }

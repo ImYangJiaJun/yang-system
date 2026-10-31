@@ -22,6 +22,119 @@ use yang_db::Transaction;
 
 use super::super::context::FeishuContext;
 
+/// 锁住配置行（与 `admit` / `delete_config` 同一把 `FOR UPDATE` 行锁），返回配置是
+/// 否仍然启用。
+///
+/// # 为什么要锁配置行
+///
+/// 播种的解散/建组必须与「受理插任务行」「删除配置清任务行」互斥，否则会出现
+/// 「播种刚判定组可解散，受理同时给该组插了一行」这类交错。三处按同一顺序
+/// （先配置行、后任务行）加锁，不会成环。
+///
+/// 用 `yang_db::QueryBuilder` 的行锁入口而不是裸 SQL：这里只有一行按主键取锁，
+/// 不需要方言逃生口（见模块文档对裸 SQL 的取舍）。
+pub(crate) async fn lock_config_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    config_id: i64,
+) -> anyhow::Result<bool> {
+    let rows = transaction
+        .select_for_update::<Record>(
+            yang_db::QueryBuilder::from_pool(
+                context.approval_configs().pool(),
+                yang_db::table!("feishu_approval_config"),
+            )
+            .fields(&[yang_db::field!("id"), yang_db::field!("enabled")])
+            .where_and(yang_db::field!("id"), yang_db::CompareOp::Eq, config_id)
+            .map_err(anyhow::Error::from)?,
+        )
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+/// 把组 leader 复位为 `pending`，并把任务行阶段设成 `leader_phase`。
+///
+/// **组行阶段不动**：组 `effect_phase` 是外部副作用的唯一事实，`reopen` 只负责把
+/// leader 送回可认领集合（设计 §4.1、§4.6）。
+///
+/// 与单条 [`super::super::approval_execution::reopen`] 的差别只有两点：不按
+/// `instance_code` 派生阶段（leader 永远不持有组实例码），以及不改
+/// `last_error`（通知去重依赖它）。租约与退避的检查由调用方在持有配置行锁、
+/// 读取组行后判定。
+pub(crate) async fn reopen_group_leader_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    task_id: i64,
+    leader_phase: &str,
+) -> anyhow::Result<bool> {
+    let row = Record::new()
+        .set("state", "pending")
+        .set("effect_phase", leader_phase)
+        .set("worker_id", Value::Null)
+        .set("lease_until", Value::Null)
+        .set("attempts", 0)
+        .set("available_at", Value::Null);
+    let updated = context
+        .approval_tasks()
+        .query()
+        .where_eq("id", serde_json::json!(task_id))?
+        .update_in_tx(transaction, row)
+        .await?;
+    Ok(updated == 1)
+}
+
+/// 插入一行组内任务行：`group_seq=0` 是 leader，`>=1` 是成员。
+///
+/// `uuid` 仍按成员自己的 `record_id` 派生（服务单条点击的幂等），组 uuid 只落组行。
+pub(crate) async fn insert_group_task_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+    group_seq: i64,
+    record_id: &str,
+    uuid: &str,
+) -> anyhow::Result<()> {
+    let row = Record::new()
+        .set("config_id", config_id)
+        .set("record_id", record_id)
+        .set("uuid", uuid)
+        .set("state", "pending")
+        .set("group_id", group_key)
+        .set("group_seq", group_seq);
+    context
+        .approval_tasks()
+        .query()
+        .insert_in_tx(transaction, row)
+        .await?;
+    Ok(())
+}
+
+/// 把一行任务摘出组，保留为单条任务（`group_id=NULL`、`group_seq=0`）。
+///
+/// 解散时用于「组内已有自身实例码或回填」的行：那些行的外部事实属于它自己，
+/// 不能随组一起删掉。
+pub(crate) async fn detach_task_from_group_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    task_id: i64,
+) -> anyhow::Result<()> {
+    let row = Record::new()
+        .set("group_id", Value::Null)
+        .set("group_seq", 0);
+    context
+        .approval_tasks()
+        .query()
+        .where_eq("id", serde_json::json!(task_id))?
+        .update_in_tx(transaction, row)
+        .await?;
+    Ok(())
+}
+
 /// `where_in` 的单次元素上限（与框架 `MAX_IN_LIST_SIZE` 同值）。
 ///
 /// 框架对超限是**拒绝**而不是截断，所以批量删除必须自己按批切分。

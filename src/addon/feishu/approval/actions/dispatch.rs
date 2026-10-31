@@ -2983,6 +2983,8 @@ mod tests {
                 let transport = ReplayTransport::new(if dispatchable { vec![
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL"}))),
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL","serial_number":"MANUAL-001","status":"PENDING"}))),
+                    // 扩展回写：编号（`write_many`）+ 发起人列覆盖（`write_fields`）。
+                    (200, e2e_ok_body(json!({}))),
                     (200, e2e_ok_body(json!({}))),
                 ] } else { vec![] });
                 let tokens = e2e_tokens();
