@@ -927,6 +927,51 @@ fn click_reopen_plan(prior_state: &str, backfill_empty: bool, force_solo: bool) 
     )
 }
 
+/// 单条点击的认领：摘组后的 `force_solo` **先复位执行阶段再认领**，认领不到时
+/// 才退回「人工重试」的 reopen 分支。
+///
+/// # 为什么必须先复位
+///
+/// 组 leader 的 `effect_phase` 只是组行阶段的镜像：组提交后它是 `created`，而本行
+/// `instance_code` 恒为 NULL（组实例码只落组行）。`claim_ready` 接受这种行，认领
+/// 会**成功**，可 `dispatch_one` 却按「无实例码的 created」返回可重试失败——记录
+/// 已被摘组却得不到第二实例，用户只看到一次失败，且该行不再参与组回填（设计 §4.9、
+/// 计划 Review Focus 2）。摘组后这行要建的是**自己的**实例，所以认领前无条件重开：
+/// `reopen` 按本行 `instance_code` 复位阶段（NULL → `ready`），并清 attempts 与退避。
+///
+/// 返回 `(claim, reinitiated)`；`reinitiated` 只影响「清空编号后的重发」文案。
+async fn claim_single_click(
+    context: &FeishuContext,
+    task_id: i64,
+    prior_state: &str,
+    backfill_empty: bool,
+    force_solo: bool,
+    was_group_member: bool,
+) -> anyhow::Result<(Option<TaskClaim>, bool)> {
+    let detached_force_solo = force_solo && was_group_member;
+    let (should_reopen, reinitiated) =
+        click_reopen_plan(prior_state, backfill_empty, detached_force_solo);
+    if detached_force_solo {
+        approval_execution::reopen(context, task_id).await?;
+    }
+    if let Some(claim) = approval_execution::claim_ready(context, 0, Some(task_id), 1)
+        .await?
+        .into_iter()
+        .next()
+    {
+        return Ok((Some(claim), reinitiated));
+    }
+    let claim = if should_reopen && approval_execution::reopen(context, task_id).await? {
+        approval_execution::claim_ready(context, 0, Some(task_id), 1)
+            .await?
+            .into_iter()
+            .next()
+    } else {
+        None
+    };
+    Ok((claim, reinitiated))
+}
+
 /// 同步处理一条记录。
 ///
 /// 编排逻辑在 `domain::approval_dispatch`；这里负责取配置、读记录、装配出站栈、
@@ -1218,13 +1263,6 @@ async fn dispatch_single(
         }
     }
     let backfill_empty = cells.get(&backfill_field).map_or(true, is_empty);
-    let (should_reopen, reinitiated) =
-        click_reopen_plan(&prior_state, backfill_empty, force_solo && was_group_member);
-    let claim = approval_execution::claim_ready(context, 0, Some(task_id), 1)
-        .await
-        .map_err(|e| BaseError::ConfigError(e.to_string()))?
-        .into_iter()
-        .next();
     // 点击是**显式的人工重试**：任务没在跑、又停在可重试状态（review / terminal /
     // unnotified / 退避中的 pending）时，先把执行状态重置回 pending 再认领一次，
     // 而不是直接回「已转人工核查 / 已被受理」。任务行与 uuid 都不变——uuid 是
@@ -1232,25 +1270,18 @@ async fn dispatch_single(
     // 走按 uuid 回捞）。
     //
     // `backfilled` 只在回填列**为空**（用户清空后重发）时重开；编号还在表里时
-    // 维持原有「已在队列/已处理」的语义，不把任务拉回队列。
-    let claim = match claim {
-        Some(claim) => Some(claim),
-        None if should_reopen => {
-            if approval_execution::reopen(context, task_id)
-                .await
-                .map_err(|e| BaseError::ConfigError(e.to_string()))?
-            {
-                approval_execution::claim_ready(context, 0, Some(task_id), 1)
-                    .await
-                    .map_err(|e| BaseError::ConfigError(e.to_string()))?
-                    .into_iter()
-                    .next()
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
+    // 维持原有「已在队列/已处理」的语义，不把任务拉回队列。摘组后的 `force_solo`
+    // 例外：必须先复位执行阶段，见 [`claim_single_click`]。
+    let (claim, reinitiated) = claim_single_click(
+        context,
+        task_id,
+        &prior_state,
+        backfill_empty,
+        force_solo,
+        was_group_member,
+    )
+    .await
+    .map_err(|e| BaseError::ConfigError(e.to_string()))?;
     let Some(claim) = claim else {
         // 任务存在但不可认领。`review` 是「外部写入结果未知，禁止自动重放」的
         // 隔离态——没有任何 worker 会再处理它，报「已受理/正在处理」会让用户
@@ -3676,6 +3707,89 @@ mod tests {
         .fetch_one(context.approval_tasks().pool())
         .await?;
         assert_eq!(remaining, 1, "原组由 leader 继续收尾");
+        let group_instance_stored: Option<String> = sqlx::query_scalar(
+            "SELECT instance_code FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(group_instance_stored.as_deref(), Some(group_instance));
+        Ok(())
+    }
+
+    /// 组 leader 被单条点击（组已提交）：批量维护会把 leader 复位成 `pending`，
+    /// 但 `effect_phase` 镜像仍是 `created`（组实例码只落组行，leader 本行
+    /// `instance_code` 恒为 NULL）。摘组后若不复位阶段，`claim_ready` 会认领成功，
+    /// `dispatch_one` 却按「无实例码的 created」拒绝创建——记录被摘组却拿不到
+    /// 第二实例（设计 §4.9）。`claim_single_click` 必须在认领前无条件重开。
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn force_solo_reopens_created_group_leader_before_claim() -> anyhow::Result<()> {
+        let (_database, context) = real_mysql_context().await?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id: i64 = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('leader 摘组测试','appSoloLeader',?,'DEF-SOLO-LEADER','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}"))
+            .execute(context.approval_configs().pool())
+            .await?
+            .last_insert_id() as i64;
+        let group_key = format!("gk{namespace}");
+        let group_instance = "INST-SUBMITTED";
+        sqlx::query("INSERT INTO feishu_approval_group (config_id,group_key,uuid,signature_hash,effect_phase,instance_code,created_at,updated_at) VALUES (?,?,?,'sig','created',?,NOW(),NOW())")
+            .bind(config_id)
+            .bind(&group_key)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(group_instance)
+            .execute(context.approval_groups().pool())
+            .await?;
+        let leader_uuid = uuid::Uuid::new_v4().to_string();
+        // 批量维护后的 leader 形态：state=pending、阶段是组行的镜像 created、
+        // 本行没有实例码；保留上一轮的重试计数，用来钉住重开会清零。
+        let leader_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,effect_phase,group_id,group_seq,attempts,created_at,updated_at) VALUES (?,?,?,'pending','created',?,0,4,NOW(),NOW())")
+            .bind(config_id)
+            .bind(format!("{namespace}-leader"))
+            .bind(&leader_uuid)
+            .bind(&group_key)
+            .execute(context.approval_tasks().pool())
+            .await?
+            .last_insert_id() as i64;
+        let member_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) VALUES (?,?,?,'pending',?,1,NOW(),NOW())")
+            .bind(config_id)
+            .bind(format!("{namespace}-member"))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&group_key)
+            .execute(context.approval_tasks().pool())
+            .await?
+            .last_insert_id() as i64;
+
+        // 单条点击 leader：先摘组，剩余成员提升为 leader，组实例继续由新 leader 收尾。
+        assert_eq!(
+            approval_execution::detach_from_group(&context, leader_id).await?,
+            approval_execution::DetachOutcome::Detached {
+                promoted: Some(member_id)
+            },
+            "摘出 leader 必须把剩余最小序号的成员提升为 leader"
+        );
+        // 摘组后的认领必须先复位执行阶段；否则这里拿到 facts=('created', None)，
+        // dispatch_one 会拒绝创建，记录被摘组却得不到第二实例。
+        let (claim, reinitiated) =
+            claim_single_click(&context, leader_id, "pending", false, true, true).await?;
+        let claim = claim.ok_or_else(|| anyhow::anyhow!("摘组后的 leader 应可认领"))?;
+        let (phase, instance) = approval_execution::facts(&context, &claim).await?;
+        assert_eq!(
+            (phase.as_str(), instance.as_deref()),
+            ("ready", None),
+            "认领前必须把组阶段的镜像复位成 ready，才允许建自己的第二个实例"
+        );
+        assert_eq!(claim.attempts, 0, "点击重开后应清空重试计数");
+        assert!(!reinitiated, "编号还在表里、不是清空后的重发");
+        // 第二个实例用 leader 行自己的幂等键，不复用组 uuid（否则 60012 回捞到组实例）。
+        let uuid: String = sqlx::query_scalar("SELECT uuid FROM feishu_approval_task WHERE id=?")
+            .bind(leader_id)
+            .fetch_one(context.approval_tasks().pool())
+            .await?;
+        assert_eq!(uuid, leader_uuid, "第二个实例用 leader 行自己的幂等键");
+        // 原组行保持提交态，供提升后的 leader 继续收尾。
         let group_instance_stored: Option<String> = sqlx::query_scalar(
             "SELECT instance_code FROM feishu_approval_group WHERE config_id=? AND group_key=?",
         )

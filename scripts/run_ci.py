@@ -315,6 +315,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::dispatch::tests::force_solo_creates_second_instance_for_submitted_group_member", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合 leader 摘组后强制独立建单集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::dispatch::tests::force_solo_reopens_created_group_leader_before_claim", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Legacy task record index guard integration",
         ("cargo", "test", "--lib", "--locked", "infrastructure::schema::tests::real_mysql_legacy_task_record_index_guard_blocks_startup", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
