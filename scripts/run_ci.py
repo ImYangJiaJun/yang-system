@@ -143,6 +143,18 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_event_worker::tests::terminal_task_still_syncs_later_reverted_and_deleted_events", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合组事件按实例码 fan-out 集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_event_worker::tests::event_by_instance_code_updates_all_member_records", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组事件 uuid 兜底集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_event_worker::tests::event_before_instance_code_uses_group_uuid_fallback", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组任务行命中仍 fan-out 集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_event_worker::tests::task_row_hit_with_group_id_still_fans_out_to_members", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "审批配置名称刷新与保旧审计集成测试",
         ("cargo", "test", "--lib", "--locked", "real_mysql_refresh_names_saves_deduplicates_preserves_and_audits", "--", "--ignored", "--test-threads=1"),
     ),

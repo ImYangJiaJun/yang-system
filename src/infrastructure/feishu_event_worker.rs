@@ -16,7 +16,10 @@ use yang_base::tools::Tools;
 use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::event_table::MAX_EVENT_RETRY_COUNT;
-use crate::addon::feishu::domain::approval::{get_instance, subscribe_approval, GetOutcome};
+use crate::addon::feishu::domain::approval::{
+    get_instance, subscribe_approval, GetOutcome, InstanceDetail,
+};
+use crate::addon::feishu::domain::approval_aggregation;
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     fill_department_name, write_extended, BitableBackfill, DispatchInput,
@@ -427,6 +430,9 @@ fn event_instance_uuid(raw_payload: &str) -> Option<String> {
 enum MissingTaskResolution {
     /// 按实例 uuid 反查到了本系统的 task 行（instance_code 尚未落库的竞态窗口）。
     Found(Record),
+    /// 按实例 uuid 反查到了聚合组行：组实例的 `instance_code` 只落组行，且可能
+    /// 尚未落库（设计 §4.7）。
+    FoundGroup { config_id: i64, group_key: String },
     /// 可以确定永远不会出现 task 行：外部实例或任务行已被删除。
     Absent,
     /// 暂时无法判定（报文/网络/数据库异常），保持可重试。
@@ -461,7 +467,8 @@ async fn load_event_uuid(runner: &RoundRunner, event_id: i64) -> Result<Option<S
 /// 1. `approval_instance` 事件的 `event.uuid` 直接可用；
 /// 2. `approval_task` 事件从实例详情回显取 uuid；
 /// 3. 实例详情暂时查不到（1390003）或网络失败 → Transient，绝不据此跳过；
-/// 4. uuid 为空（非本系统 API 创建的外部实例）或 task 表无此 uuid → Absent。
+/// 4. uuid 先查组表（组实例的幂等键只落组行），未命中再查 task 表；
+/// 5. uuid 为空（非本系统 API 创建的外部实例）或两表都无此 uuid → Absent。
 async fn resolve_missing_task(runner: &RoundRunner, event: &PendingEvent) -> MissingTaskResolution {
     let uuid = match load_event_uuid(runner, event.id).await {
         Ok(uuid) => uuid,
@@ -501,6 +508,32 @@ async fn resolve_missing_task(runner: &RoundRunner, event: &PendingEvent) -> Mis
         // 没有创建时传入的 uuid：不可能是本系统通过 API 创建的实例。
         return MissingTaskResolution::Absent;
     };
+    // 先查组表：组 uuid 是创建时传入的幂等键，命中即为组事件；leader 任务行
+    // 可能存过入组前的单条实例码，后查任务表才不会把它误认成单条任务。
+    match approval_aggregation::repository::load_group_by_uuid(&runner.context, &uuid).await {
+        Ok(Some(group)) => {
+            let config_id = group.optional::<i64>("config_id").ok().flatten();
+            let group_key = group
+                .optional::<String>("group_key")
+                .ok()
+                .flatten()
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty());
+            return match (config_id, group_key) {
+                (Some(config_id), Some(group_key)) => MissingTaskResolution::FoundGroup {
+                    config_id,
+                    group_key,
+                },
+                _ => MissingTaskResolution::Transient(
+                    "组行缺少 config_id 或 group_key，无法 fan-out".to_string(),
+                ),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return MissingTaskResolution::Transient(format!("按 uuid 反查组表失败: {error}"))
+        }
+    }
     let query = match runner
         .context
         .approval_tasks()
@@ -527,6 +560,417 @@ async fn resolve_missing_task(runner: &RoundRunner, event: &PendingEvent) -> Mis
             MissingTaskResolution::Transient(format!("按 uuid 反查 task 表失败: {error}"))
         }
     }
+}
+
+/// 一条事件处理所需的配置事实（单条回写与组 fan-out 共用）。
+struct EventConfig {
+    base_token: String,
+    table_id: String,
+    approval_code: String,
+    applicant_field: String,
+    backfill_field: String,
+    status_field: Option<String>,
+    flow_field: Option<String>,
+    start_time_field: Option<String>,
+    end_time_field: Option<String>,
+    department_field: Option<String>,
+    handler_field: Option<String>,
+}
+
+impl EventConfig {
+    fn coordinates(&self) -> BitableCoordinates {
+        BitableCoordinates {
+            app_token: self.base_token.clone(),
+            table_id: self.table_id.clone(),
+            view_id: None,
+        }
+    }
+}
+
+/// 读取事件相关的配置投影；错误直接落成事件结论。
+async fn load_event_config(
+    runner: &RoundRunner,
+    config_id: i64,
+) -> Result<EventConfig, EventOutcome> {
+    let config = match runner
+        .context
+        .approval_configs()
+        .query()
+        .where_eq("id", serde_json::json!(config_id))
+    {
+        Ok(query) => match query.optional().await {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                tracing::error!(config_id, "config 不存在");
+                return Err(EventOutcome::Failed(format!(
+                    "config_id={config_id} 不存在"
+                )));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, config_id, "加载 config 失败");
+                return Err(EventOutcome::Failed(format!("加载 config 失败: {error}")));
+            }
+        },
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "构造 config 查询失败");
+            return Err(EventOutcome::Failed(format!(
+                "构造 config 查询失败: {error}"
+            )));
+        }
+    };
+
+    let base_token: String = match config.require("base_token") {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 base_token");
+            return Err(EventOutcome::Failed(format!(
+                "config 缺 base_token: {error}"
+            )));
+        }
+    };
+    let table_id: String = match config.require("table_id") {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 table_id");
+            return Err(EventOutcome::Failed(format!("config 缺 table_id: {error}")));
+        }
+    };
+    let approval_code: String = match config.require("approval_code") {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 approval_code");
+            return Err(EventOutcome::Failed(format!(
+                "config 缺 approval_code: {error}"
+            )));
+        }
+    };
+    let applicant_field: String = match config.optional::<String>("applicant_field") {
+        Ok(Some(v)) => v,
+        Ok(None) => String::new(),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 applicant_field");
+            return Err(EventOutcome::Failed(format!(
+                "config 缺 applicant_field: {error}"
+            )));
+        }
+    };
+    let backfill_field: String = match config.optional::<String>("backfill_field") {
+        Ok(Some(v)) => v,
+        Ok(None) => String::new(),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 backfill_field");
+            return Err(EventOutcome::Failed(format!(
+                "config 缺 backfill_field: {error}"
+            )));
+        }
+    };
+    let status_field = optional_nonempty(&config, "status_field");
+    let flow_field = optional_nonempty(&config, "flow_field");
+    let start_time_field = optional_nonempty(&config, "start_time_field");
+    let end_time_field = optional_nonempty(&config, "end_time_field");
+    let department_field = optional_nonempty(&config, "department_field");
+    let handler_field = optional_nonempty(&config, "handler_field");
+
+    tracing::debug!(
+        config_id,
+        base_token = %base_token,
+        table_id = %table_id,
+        approval_code = %approval_code,
+        status_field = ?status_field,
+        flow_field = ?flow_field,
+        start_time_field = ?start_time_field,
+        end_time_field = ?end_time_field,
+        department_field = ?department_field,
+        handler_field = ?handler_field,
+        "加载配置完成"
+    );
+    Ok(EventConfig {
+        base_token,
+        table_id,
+        approval_code,
+        applicant_field,
+        backfill_field,
+        status_field,
+        flow_field,
+        start_time_field,
+        end_time_field,
+        department_field,
+        handler_field,
+    })
+}
+
+/// 拉取实例详情，把「实例不存在/出站失败」翻译成事件结论。
+async fn load_event_detail(
+    runner: &RoundRunner,
+    event: &PendingEvent,
+) -> Result<InstanceDetail, EventOutcome> {
+    match get_instance(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &event.instance_code,
+    )
+    .await
+    {
+        Ok(GetOutcome::Found(detail)) => {
+            tracing::debug!(
+                instance_code = %event.instance_code,
+                status = ?detail.status,
+                start_time = ?detail.start_time,
+                end_time = ?detail.end_time,
+                "获取审批实例详情成功"
+            );
+            Ok(*detail)
+        }
+        Ok(GetOutcome::NotFound) => {
+            tracing::warn!(
+                instance_code = %event.instance_code,
+                "审批实例不存在，可能已被删除"
+            );
+            Err(EventOutcome::Failed("实例不存在".to_string()))
+        }
+        Err(failure) => {
+            tracing::error!(
+                error = %failure.message,
+                instance_code = %event.instance_code,
+                "获取实例详情失败"
+            );
+            Err(outbound_failure_outcome("获取实例详情失败", failure))
+        }
+    }
+}
+
+/// 把实例状态与同步时间写到任务行（单条与组 fan-out 共用）。
+async fn save_task_sync_fact(
+    runner: &RoundRunner,
+    task_id: i64,
+    status: &str,
+) -> Result<(), EventOutcome> {
+    tracing::debug!(task_id, status = %status, "更新 task 的 instance_status");
+    let mut row = Record::new();
+    row.insert("instance_status", serde_json::json!(status));
+    row.insert(
+        "last_synced_at",
+        serde_json::json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64),
+    );
+    let result = runner
+        .context
+        .approval_tasks()
+        .query()
+        .where_eq("id", serde_json::json!(task_id));
+    match result {
+        Ok(query) => {
+            if let Err(error) = query.update(row).await {
+                tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
+                Err(EventOutcome::Failed(format!(
+                    "保存审批同步事实失败: {error}"
+                )))
+            } else {
+                tracing::info!(task_id, status = %status, "task instance_status 更新成功");
+                Ok(())
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, task_id, "构造 task 更新查询失败");
+            Err(EventOutcome::Failed(format!(
+                "构造审批同步事实查询失败: {error}"
+            )))
+        }
+    }
+}
+
+/// 任务行声明的组键（空白视为不属于组）。
+fn task_group_key(row: &Record) -> Option<String> {
+    row.optional::<String>("group_id")
+        .ok()
+        .flatten()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+/// 按 `(config_id, group_key)` 定位组行并 fan-out；组行已不存在时按跳过收口。
+async fn fan_out_by_group_key(
+    runner: &RoundRunner,
+    config_id: i64,
+    group_key: &str,
+    event: &PendingEvent,
+) -> EventOutcome {
+    match approval_aggregation::repository::load_group(&runner.context, config_id, group_key).await
+    {
+        Ok(Some(group)) => fan_out_group_event(runner, &group, event).await,
+        Ok(None) => {
+            tracing::warn!(
+                config_id,
+                group_key,
+                instance_code = %event.instance_code,
+                "任务行指向的聚合组行不存在，跳过事件"
+            );
+            EventOutcome::Skipped("聚合组行不存在（可能已随配置删除）".to_string())
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "读取聚合组失败");
+            EventOutcome::Failed(format!("读取聚合组失败: {error}"))
+        }
+    }
+}
+
+/// 组事件 fan-out：同一条实例的扩展字段回写给组内**每个**成员记录。
+///
+/// 逐成员 `write_extended` 且 `applicant: None`：事件只同步审批事实，不重写申请人
+/// 列（`write_fields` 全有全无，多写一列会让整条事件失败）。组实例身份只落组行，
+/// 所以这里按 `group_key` 取成员，不依赖任务行的 `instance_code`（设计 §4.7）。
+async fn fan_out_group_event(
+    runner: &RoundRunner,
+    group: &Record,
+    event: &PendingEvent,
+) -> EventOutcome {
+    let config_id: i64 = match group.require("config_id") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "组行缺 config_id");
+            return EventOutcome::Failed(format!("组行缺 config_id: {error}"));
+        }
+    };
+    let group_key: String = match group.require("group_key") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "组行缺 group_key");
+            return EventOutcome::Failed(format!("组行缺 group_key: {error}"));
+        }
+    };
+    tracing::debug!(
+        config_id,
+        group_key,
+        instance_code = %event.instance_code,
+        "步骤 1: 实例命中聚合组，按组 fan-out"
+    );
+
+    let members = match approval_aggregation::repository::load_members(
+        &runner.context,
+        config_id,
+        &group_key,
+    )
+    .await
+    {
+        Ok(members) => members,
+        Err(error) => {
+            tracing::error!(error = %error, config_id, group_key, "读取聚合组成员失败");
+            return EventOutcome::Failed(format!("读取聚合组成员失败: {error}"));
+        }
+    };
+    if members.is_empty() {
+        tracing::warn!(config_id, group_key, "聚合组没有成员行，事件无可回写对象");
+        return EventOutcome::Skipped("聚合组没有成员行".to_string());
+    }
+
+    let config = match load_event_config(runner, config_id).await {
+        Ok(config) => config,
+        Err(outcome) => return outcome,
+    };
+    let mut detail = match load_event_detail(runner, event).await {
+        Ok(detail) => detail,
+        Err(outcome) => return outcome,
+    };
+    // 部门名解析与单条路径同口径：配了部门回填列才有这次出站，失败退化为写 ID。
+    fill_department_name(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        config.department_field.as_deref(),
+        &mut detail,
+    )
+    .await;
+
+    let coordinates = config.coordinates();
+    let fields = match bitable::list_all_fields(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+    )
+    .await
+    {
+        Ok(fields) => {
+            tracing::debug!(field_count = fields.len(), "读取表结构成功");
+            fields
+        }
+        Err(failure) => {
+            tracing::error!(error = %failure.message, "读取表结构失败");
+            return outbound_failure_outcome("读取表结构失败", failure);
+        }
+    };
+    let backfill = BitableBackfill {
+        transport: runner.transport(),
+        sleeper: runner.sleeper.as_ref(),
+        tokens: &runner.tokens,
+        coordinates: &coordinates,
+        fields: &fields,
+    };
+    let backfill_field_name = match bitable::resolve_field_name(&fields, &config.backfill_field) {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::error!(error = %error, backfill_field = %config.backfill_field, "回填列不可用");
+            return EventOutcome::Failed(format!("回填列不可用: {error}"));
+        }
+    };
+
+    let empty_cells = serde_json::Map::new();
+    for member in &members {
+        let task_id: i64 = match member.require("id") {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, "组任务行缺 id");
+                return EventOutcome::Failed(format!("组任务行缺 id: {error}"));
+            }
+        };
+        let record_id: String = match member.require("record_id") {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, task_id, "组任务行缺 record_id");
+                return EventOutcome::Failed(format!("组任务行缺 record_id: {error}"));
+            }
+        };
+        let input = DispatchInput {
+            fields: &fields,
+            context: Some(&runner.context),
+            execution: None,
+            coordinates: &coordinates,
+            record_id: &record_id,
+            cells: &empty_cells,
+            applicant_field: &config.applicant_field,
+            // 事件不重写申请人列：该列只由派发成功路径写入。
+            applicant: None,
+            backfill_field_name: &backfill_field_name,
+            status_field: config.status_field.as_deref(),
+            flow_field: config.flow_field.as_deref(),
+            start_time_field: config.start_time_field.as_deref(),
+            end_time_field: config.end_time_field.as_deref(),
+            department_field: config.department_field.as_deref(),
+            handler_field: config.handler_field.as_deref(),
+            approval_code: &config.approval_code,
+            widgets: &[],
+            form_snapshot: String::new(),
+            timezone_offset: runner.timezone_offset,
+        };
+        if let Err(failure) = write_extended(&backfill, &input, &detail).await {
+            return outbound_failure_outcome("组事件扩展字段回填失败", failure);
+        }
+        if let Some(status) = detail.status.as_deref() {
+            if let Err(outcome) = save_task_sync_fact(runner, task_id, status).await {
+                return outcome;
+            }
+        }
+    }
+    tracing::info!(
+        config_id,
+        group_key,
+        members = members.len(),
+        "组事件 fan-out 完成"
+    );
+    EventOutcome::Processed
 }
 
 /// 出站失败 → 事件结论：Fatal（远端明确拒绝，重试无意义）立即终态；
@@ -559,15 +1003,38 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         "=== 开始处理事件 ==="
     );
 
-    // 1. 用 instance_code 反查 task 表，取 record_id + config_id
-    tracing::debug!(instance_code = %event.instance_code, "步骤 1: 反查 task 表");
+    // 1. 先查组表：组实例的事件必然有组行，而 leader 任务行可能存过单条实例码，
+    //    先查任务表会让组事件被单条路径截获（设计 §4.7）。
+    tracing::debug!(instance_code = %event.instance_code, "步骤 1: 先反查聚合组表");
+    match approval_aggregation::repository::load_group_by_instance(
+        &runner.context,
+        &event.instance_code,
+    )
+    .await
+    {
+        Ok(Some(group)) => {
+            tracing::debug!(
+                instance_code = %event.instance_code,
+                "实例属于聚合组，按组 fan-out"
+            );
+            return fan_out_group_event(runner, &group, event).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(error = %error, "查询聚合组表失败");
+            return EventOutcome::Failed(format!("查询聚合组表失败: {error}"));
+        }
+    }
+
+    // 2. 用 instance_code 反查 task 表，取 record_id + config_id + group_id
+    tracing::debug!(instance_code = %event.instance_code, "步骤 2: 反查 task 表");
     let task_query_result = runner
         .context
         .approval_tasks()
         .query()
         .where_eq("instance_code", serde_json::json!(&event.instance_code));
     let task_rows = match task_query_result {
-        Ok(query) => match query.select_fields(&["id", "record_id", "config_id"]) {
+        Ok(query) => match query.select_fields(&["id", "record_id", "config_id", "group_id"]) {
             Ok(query) => match query.all().await {
                 Ok(rows) => rows,
                 Err(error) => {
@@ -586,11 +1053,25 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     };
 
-    let (task_id, record_id, config_id) = match task_rows.first() {
-        Some(row) => match require_task_identity(row) {
-            Ok(identity) => (identity.task_id, identity.record_id, identity.config_id),
-            Err(message) => return EventOutcome::Failed(message),
-        },
+    let identity = match task_rows.first() {
+        Some(row) => {
+            let identity = match require_task_identity(row) {
+                Ok(identity) => identity,
+                Err(message) => return EventOutcome::Failed(message),
+            };
+            // 任务行属于组（可能是入组前留下的单条实例码）：统一按组 fan-out，
+            // 否则只会更新 leader 一条记录（设计 §4.7）。
+            if let Some(group_key) = task_group_key(row) {
+                tracing::info!(
+                    task_id = identity.task_id,
+                    config_id = identity.config_id,
+                    group_key,
+                    "任务行命中但属于聚合组，按组 fan-out"
+                );
+                return fan_out_by_group_key(runner, identity.config_id, &group_key, event).await;
+            }
+            identity
+        }
         None => match resolve_missing_task(runner, event).await {
             MissingTaskResolution::Found(row) => {
                 // instance_code 尚未落库的竞态窗口：按实例 uuid 找到了本系统任务行。
@@ -600,10 +1081,34 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
                     instance_code = %event.instance_code,
                     "instance_code 未命中，按实例 uuid 找到 task 行"
                 );
-                match require_task_identity(&row) {
-                    Ok(identity) => (identity.task_id, identity.record_id, identity.config_id),
+                let identity = match require_task_identity(&row) {
+                    Ok(identity) => identity,
                     Err(message) => return EventOutcome::Failed(message),
+                };
+                if let Some(group_key) = task_group_key(&row) {
+                    tracing::info!(
+                        task_id = identity.task_id,
+                        config_id = identity.config_id,
+                        group_key,
+                        "uuid 兜底命中的任务行属于聚合组，按组 fan-out"
+                    );
+                    return fan_out_by_group_key(runner, identity.config_id, &group_key, event)
+                        .await;
                 }
+                identity
+            }
+            MissingTaskResolution::FoundGroup {
+                config_id,
+                group_key,
+            } => {
+                tracing::info!(
+                    event_id = event.id,
+                    instance_code = %event.instance_code,
+                    config_id,
+                    group_key,
+                    "instance_code 未命中，按实例 uuid 找到聚合组"
+                );
+                return fan_out_by_group_key(runner, config_id, &group_key, event).await;
             }
             MissingTaskResolution::Absent => {
                 return EventOutcome::Skipped(
@@ -620,6 +1125,11 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
             }
         },
     };
+    let TaskIdentity {
+        task_id,
+        record_id,
+        config_id,
+    } = identity;
 
     tracing::debug!(
         task_id,
@@ -629,143 +1139,33 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     );
 
     // 事件 UUID 在入站去重；终态之后仍可能撤销或删除，须重新读取最新详情。
-    // 2. 加载 config
-    tracing::debug!(config_id, "步骤 2: 加载审批配置");
-    let config = match runner
-        .context
-        .approval_configs()
-        .query()
-        .where_eq("id", serde_json::json!(config_id))
-    {
-        Ok(query) => match query.optional().await {
-            Ok(Some(config)) => config,
-            Ok(None) => {
-                tracing::error!(config_id, "config 不存在");
-                return EventOutcome::Failed(format!("config_id={config_id} 不存在"));
-            }
-            Err(error) => {
-                tracing::error!(error = %error, config_id, "加载 config 失败");
-                return EventOutcome::Failed(format!("加载 config 失败: {error}"));
-            }
-        },
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "构造 config 查询失败");
-            return EventOutcome::Failed(format!("构造 config 查询失败: {error}"));
-        }
+    // 3. 加载 config
+    tracing::debug!(config_id, "步骤 3: 加载审批配置");
+    let config = match load_event_config(runner, config_id).await {
+        Ok(config) => config,
+        Err(outcome) => return outcome,
     };
 
-    let base_token: String = match config.require("base_token") {
-        Ok(v) => v,
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "config 缺 base_token");
-            return EventOutcome::Failed(format!("config 缺 base_token: {error}"));
-        }
-    };
-    let table_id: String = match config.require("table_id") {
-        Ok(v) => v,
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "config 缺 table_id");
-            return EventOutcome::Failed(format!("config 缺 table_id: {error}"));
-        }
-    };
-    let approval_code: String = match config.require("approval_code") {
-        Ok(v) => v,
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "config 缺 approval_code");
-            return EventOutcome::Failed(format!("config 缺 approval_code: {error}"));
-        }
-    };
-    let applicant_field: String = match config.optional::<String>("applicant_field") {
-        Ok(Some(v)) => v,
-        Ok(None) => String::new(),
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "config 缺 applicant_field");
-            return EventOutcome::Failed(format!("config 缺 applicant_field: {error}"));
-        }
-    };
-    let backfill_field: String = match config.optional::<String>("backfill_field") {
-        Ok(Some(v)) => v,
-        Ok(None) => String::new(),
-        Err(error) => {
-            tracing::error!(error = %error, config_id, "config 缺 backfill_field");
-            return EventOutcome::Failed(format!("config 缺 backfill_field: {error}"));
-        }
-    };
-    let status_field = optional_nonempty(&config, "status_field");
-    let flow_field = optional_nonempty(&config, "flow_field");
-    let start_time_field = optional_nonempty(&config, "start_time_field");
-    let end_time_field = optional_nonempty(&config, "end_time_field");
-    let department_field = optional_nonempty(&config, "department_field");
-    let handler_field = optional_nonempty(&config, "handler_field");
-
-    tracing::debug!(
-        config_id,
-        base_token = %base_token,
-        table_id = %table_id,
-        approval_code = %approval_code,
-        status_field = ?status_field,
-        flow_field = ?flow_field,
-        start_time_field = ?start_time_field,
-        end_time_field = ?end_time_field,
-        department_field = ?department_field,
-        handler_field = ?handler_field,
-        "加载配置完成"
-    );
-
-    // 3. 调 get_instance 获取实例详情
-    tracing::debug!(instance_code = %event.instance_code, "步骤 3: 调用 get_instance 获取审批详情");
-    let mut detail = match get_instance(
-        runner.transport(),
-        runner.sleeper.as_ref(),
-        &runner.tokens,
-        &event.instance_code,
-    )
-    .await
-    {
-        Ok(GetOutcome::Found(detail)) => {
-            tracing::debug!(
-                instance_code = %event.instance_code,
-                status = ?detail.status,
-                start_time = ?detail.start_time,
-                end_time = ?detail.end_time,
-                "获取审批实例详情成功"
-            );
-            *detail
-        }
-        Ok(GetOutcome::NotFound) => {
-            tracing::warn!(
-                instance_code = %event.instance_code,
-                "审批实例不存在，可能已被删除"
-            );
-            return EventOutcome::Failed("实例不存在".to_string());
-        }
-        Err(failure) => {
-            tracing::error!(
-                error = %failure.message,
-                instance_code = %event.instance_code,
-                "获取实例详情失败"
-            );
-            return outbound_failure_outcome("获取实例详情失败", failure);
-        }
+    // 4. 调 get_instance 获取实例详情
+    tracing::debug!(instance_code = %event.instance_code, "步骤 4: 调用 get_instance 获取审批详情");
+    let mut detail = match load_event_detail(runner, event).await {
+        Ok(detail) => detail,
+        Err(outcome) => return outcome,
     };
 
-    // 3.5 部门名解析：配了部门回填列才有这次出站；解析失败退化为写 ID。
+    // 4.5 部门名解析：配了部门回填列才有这次出站；解析失败退化为写 ID。
     fill_department_name(
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,
-        department_field.as_deref(),
+        config.department_field.as_deref(),
         &mut detail,
     )
     .await;
 
-    // 4. 构造 BitableBackfill
-    tracing::debug!("步骤 4: 构造 BitableBackfill");
-    let coordinates = BitableCoordinates {
-        app_token: base_token.clone(),
-        table_id: table_id.clone(),
-        view_id: None,
-    };
+    // 5. 构造 BitableBackfill
+    tracing::debug!("步骤 5: 构造 BitableBackfill");
+    let coordinates = config.coordinates();
     let fields = match bitable::list_all_fields(
         runner.transport(),
         runner.sleeper.as_ref(),
@@ -791,12 +1191,12 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         fields: &fields,
     };
 
-    // 5. 构造 DispatchInput
-    tracing::debug!("步骤 5: 构造 DispatchInput");
-    let backfill_field_name = match bitable::resolve_field_name(&fields, &backfill_field) {
+    // 6. 构造 DispatchInput
+    tracing::debug!("步骤 6: 构造 DispatchInput");
+    let backfill_field_name = match bitable::resolve_field_name(&fields, &config.backfill_field) {
         Ok(name) => name,
         Err(error) => {
-            tracing::error!(error = %error, backfill_field = %backfill_field, "回填列不可用");
+            tracing::error!(error = %error, backfill_field = %config.backfill_field, "回填列不可用");
             return EventOutcome::Failed(format!("回填列不可用: {error}"));
         }
     };
@@ -808,25 +1208,25 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         coordinates: &coordinates,
         record_id: &record_id,
         cells: &serde_json::Map::new(),
-        applicant_field: &applicant_field,
+        applicant_field: &config.applicant_field,
         applicant: None,
         backfill_field_name: &backfill_field_name,
-        status_field: status_field.as_deref(),
-        flow_field: flow_field.as_deref(),
-        start_time_field: start_time_field.as_deref(),
-        end_time_field: end_time_field.as_deref(),
-        department_field: department_field.as_deref(),
-        handler_field: handler_field.as_deref(),
-        approval_code: &approval_code,
+        status_field: config.status_field.as_deref(),
+        flow_field: config.flow_field.as_deref(),
+        start_time_field: config.start_time_field.as_deref(),
+        end_time_field: config.end_time_field.as_deref(),
+        department_field: config.department_field.as_deref(),
+        handler_field: config.handler_field.as_deref(),
+        approval_code: &config.approval_code,
         widgets: &[],
         form_snapshot: String::new(),
         timezone_offset: runner.timezone_offset,
     };
 
-    // 6. 调 write_extended 回写多维表格
+    // 7. 调 write_extended 回写多维表格
     tracing::debug!(
         record_id = %record_id,
-        "步骤 6: 调用 write_extended 回写多维表格"
+        "步骤 7: 调用 write_extended 回写多维表格"
     );
     if let Err(failure) = write_extended(&backfill, &input, &detail).await {
         return outbound_failure_outcome("扩展字段回填失败", failure);
@@ -836,36 +1236,10 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         "多维表格回写完成"
     );
 
-    // 7. 更新 task 行的 instance_status
+    // 8. 更新 task 行的 instance_status
     if let Some(status) = detail.status.as_deref() {
-        tracing::debug!(task_id, status = %status, "步骤 7: 更新 task 的 instance_status");
-        let mut row = Record::new();
-        row.insert("instance_status", serde_json::json!(status));
-        row.insert(
-            "last_synced_at",
-            serde_json::json!(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64),
-        );
-        let result = runner
-            .context
-            .approval_tasks()
-            .query()
-            .where_eq("id", serde_json::json!(task_id));
-        match result {
-            Ok(query) => {
-                if let Err(error) = query.update(row).await {
-                    tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
-                    return EventOutcome::Failed(format!("保存审批同步事实失败: {error}"));
-                } else {
-                    tracing::info!(task_id, status = %status, "task instance_status 更新成功");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, task_id, "构造 task 更新查询失败");
-                return EventOutcome::Failed(format!("构造审批同步事实查询失败: {error}"));
-            }
+        if let Err(outcome) = save_task_sync_fact(runner, task_id, status).await {
+            return outcome;
         }
     }
 
@@ -956,6 +1330,7 @@ async fn mark_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::feishu::domain::tenant_token::TenantTokenCache;
 
     struct EventReplay {
         status: String,
@@ -975,7 +1350,10 @@ mod tests {
             let body = if request.url.contains("/instances/") {
                 json!({"code":0,"data":{"instance_code":"INST-TERMINAL","status":self.status,"reverted":self.reverted,"serial_number":"SN-1"}})
             } else if request.url.ends_with("/fields") {
-                json!({"code":0,"data":{"has_more":false,"total":2,"items":[{"field_id":"fldNumber","field_name":"编号","type":1},{"field_id":"fldStatus","field_name":"状态","type":1}]}})
+                // `fldPerson` 也列进来：组事件 fan-out 传 `applicant: None`，写出来的
+                // 单元格里就不该出现「发起人」——型别缺失会让「误重写申请人列」直接
+                // 以 Fatal 暴露，反而不是在断言里静默放过。
+                json!({"code":0,"data":{"has_more":false,"total":3,"items":[{"field_id":"fldNumber","field_name":"编号","type":1},{"field_id":"fldStatus","field_name":"状态","type":1},{"field_id":"fldPerson","field_name":"发起人","type":11}]}})
             } else if request.url.ends_with("/records/batch_update") {
                 self.writes
                     .lock()
@@ -1183,5 +1561,415 @@ mod tests {
     #[test]
     fn max_retry_count_is_positive() {
         const { assert!(MAX_EVENT_RETRY_COUNT > 0) };
+    }
+
+    /// 组事件夹具：一条配置 + 一行组行 + leader/成员两行任务行。
+    ///
+    /// 组行与成员行都直接落库：事件 worker 只需要「查得到」，不关心播种路径。
+    struct GroupEventFixture {
+        database: yang_db::Database,
+        context: Arc<FeishuContext>,
+        namespace: String,
+        config_id: i64,
+        group_key: String,
+        group_uuid: String,
+        leader_id: i64,
+        member_id: i64,
+        leader_record: String,
+        member_record: String,
+    }
+
+    impl GroupEventFixture {
+        async fn new() -> anyhow::Result<Self> {
+            let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+            let database = yang_db::Database::connect(&url).await?;
+            let name: String = sqlx::query_scalar("SELECT DATABASE()")
+                .fetch_one(database.pool())
+                .await?;
+            anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+            crate::schema::sync_with_database(
+                database,
+                yang_db::DatabaseConfig::default(),
+                Arc::new(crate::config::SecuritySettings::default()),
+            )
+            .await?;
+            let database = yang_db::Database::connect(&url).await?;
+            let context = crate::addon::feishu::build_context(
+                Arc::new(database.pool().clone()),
+                Arc::new(crate::config::SecuritySettings::default()),
+                None,
+            )?;
+            let pool = database.pool();
+            let namespace = uuid::Uuid::new_v4().simple().to_string();
+            let config_id = sqlx::query(
+                "INSERT INTO feishu_approval_config \
+                 (title,base_token,table_id,approval_code,applicant_field,backfill_field,\
+                  status_field,base_timezone,enabled,created_at,updated_at) \
+                 VALUES ('事件组测试',?,'tblEventGroup','DEF-EVENT','fldPerson',\
+                         'fldNumber','fldStatus','Asia/Shanghai',true,NOW(),NOW())",
+            )
+            .bind(format!("appEvent{namespace}"))
+            .execute(pool)
+            .await?
+            .last_insert_id() as i64;
+            let group_key = format!("gk{namespace}");
+            let group_uuid = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO feishu_approval_group \
+                 (config_id,group_key,signature_hash,uuid,effect_phase,created_at,updated_at) \
+                 VALUES (?,?,?,?,'created',NOW(),NOW())",
+            )
+            .bind(config_id)
+            .bind(&group_key)
+            .bind(format!("sig-{namespace}"))
+            .bind(&group_uuid)
+            .execute(pool)
+            .await?;
+            let leader_record = format!("{namespace}-leader");
+            let member_record = format!("{namespace}-member");
+            let leader_id = insert_event_task_row(
+                pool,
+                config_id,
+                &group_key,
+                0,
+                &leader_record,
+                &format!("uuid-{leader_record}"),
+            )
+            .await?;
+            let member_id = insert_event_task_row(
+                pool,
+                config_id,
+                &group_key,
+                1,
+                &member_record,
+                &format!("uuid-{member_record}"),
+            )
+            .await?;
+            Ok(Self {
+                database,
+                context,
+                namespace,
+                config_id,
+                group_key,
+                group_uuid,
+                leader_id,
+                member_id,
+                leader_record,
+                member_record,
+            })
+        }
+
+        async fn set_group_instance(&self, instance_code: &str) -> anyhow::Result<()> {
+            sqlx::query("UPDATE feishu_approval_group SET instance_code=? WHERE config_id=? AND group_key=?")
+                .bind(instance_code)
+                .bind(self.config_id)
+                .bind(&self.group_key)
+                .execute(self.database.pool())
+                .await?;
+            Ok(())
+        }
+
+        async fn set_leader_instance(&self, instance_code: &str) -> anyhow::Result<()> {
+            sqlx::query("UPDATE feishu_approval_task SET instance_code=? WHERE id=?")
+                .bind(instance_code)
+                .bind(self.leader_id)
+                .execute(self.database.pool())
+                .await?;
+            Ok(())
+        }
+
+        /// 落一条带 `event.uuid`（= 组 uuid）的实例事件。
+        async fn insert_group_instance_event(&self, instance_code: &str) -> anyhow::Result<i64> {
+            let payload = serde_json::json!({
+                "uuid": format!("evt{}", self.namespace),
+                "event": {"type": "approval_instance", "uuid": self.group_uuid},
+            })
+            .to_string();
+            Ok(sqlx::query(
+                "INSERT INTO feishu_approval_event \
+                 (event_id,event_type,instance_code,status,received_at,raw_payload,\
+                  retry_count,created_at,updated_at) \
+                 VALUES (?,?,?,'APPROVED',NOW(),?,0,NOW(),NOW())",
+            )
+            .bind(format!("evt-{}", self.namespace))
+            .bind("approval_instance")
+            .bind(instance_code)
+            .bind(payload)
+            .execute(self.database.pool())
+            .await?
+            .last_insert_id() as i64)
+        }
+
+        async fn instance_statuses(&self) -> anyhow::Result<(Option<String>, Option<String>)> {
+            let leader: Option<String> =
+                sqlx::query_scalar("SELECT instance_status FROM feishu_approval_task WHERE id=?")
+                    .bind(self.leader_id)
+                    .fetch_one(self.database.pool())
+                    .await?;
+            let member: Option<String> =
+                sqlx::query_scalar("SELECT instance_status FROM feishu_approval_task WHERE id=?")
+                    .bind(self.member_id)
+                    .fetch_one(self.database.pool())
+                    .await?;
+            Ok((leader, member))
+        }
+
+        async fn last_synced_at(&self) -> anyhow::Result<(Option<i64>, Option<i64>)> {
+            let leader: Option<i64> =
+                sqlx::query_scalar("SELECT last_synced_at FROM feishu_approval_task WHERE id=?")
+                    .bind(self.leader_id)
+                    .fetch_one(self.database.pool())
+                    .await?;
+            let member: Option<i64> =
+                sqlx::query_scalar("SELECT last_synced_at FROM feishu_approval_task WHERE id=?")
+                    .bind(self.member_id)
+                    .fetch_one(self.database.pool())
+                    .await?;
+            Ok((leader, member))
+        }
+
+        async fn cleanup(self) -> anyhow::Result<()> {
+            let pool = self.database.pool();
+            sqlx::query("DELETE FROM feishu_approval_event WHERE event_id=?")
+                .bind(format!("evt-{}", self.namespace))
+                .execute(pool)
+                .await?;
+            sqlx::query(
+                "DELETE FROM feishu_approval_task_applicant WHERE task_id IN \
+                 (SELECT id FROM feishu_approval_task WHERE config_id=?)",
+            )
+            .bind(self.config_id)
+            .execute(pool)
+            .await?;
+            sqlx::query("DELETE FROM feishu_approval_task WHERE config_id=?")
+                .bind(self.config_id)
+                .execute(pool)
+                .await?;
+            sqlx::query("DELETE FROM feishu_approval_group WHERE config_id=?")
+                .bind(self.config_id)
+                .execute(pool)
+                .await?;
+            sqlx::query("DELETE FROM feishu_approval_config WHERE id=?")
+                .bind(self.config_id)
+                .execute(pool)
+                .await?;
+            Ok(())
+        }
+    }
+
+    async fn insert_event_task_row(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+        group_key: &str,
+        group_seq: i64,
+        record_id: &str,
+        uuid: &str,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query(
+            "INSERT INTO feishu_approval_task \
+             (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) \
+             VALUES (?,?,?,'backfilled',?,?,NOW(),NOW())",
+        )
+        .bind(config_id)
+        .bind(record_id)
+        .bind(uuid)
+        .bind(group_key)
+        .bind(group_seq)
+        .execute(pool)
+        .await?
+        .last_insert_id() as i64)
+    }
+
+    /// 给事件 worker 装配真实 MySQL 上下文与 Redis 缓存（与单条事件测试同口径）。
+    async fn build_event_runner(
+        context: &Arc<FeishuContext>,
+        namespace: &str,
+        transport: Arc<EventReplay>,
+    ) -> anyhow::Result<(RoundRunner, Arc<RedisTenantTokenCache>)> {
+        let redis_url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            redis_url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let redis =
+            yang_db::RedisClient::connect_with_config(&redis_url, yang_db::RedisConfig::default())
+                .await?;
+        let cache = Arc::new(RedisTenantTokenCache::new(redis, namespace));
+        cache.put("test-tenant", 7200).await?;
+        let tokens = Arc::new(TenantTokenProvider::new(
+            cache.clone(),
+            transport.clone(),
+            Arc::new(TokioSleeper),
+            FeishuCredentials {
+                app_id: "cli_test".into(),
+                app_secret: "test-secret".into(),
+            },
+            namespace,
+        )?);
+        let runner = RoundRunner {
+            tools: Arc::new(yang_base::tools::ToolsBuilder::new().build()?),
+            context: Arc::clone(context),
+            tokens,
+            transport,
+            sleeper: Arc::new(TokioSleeper),
+            timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+        };
+        Ok((runner, cache))
+    }
+
+    fn assert_processed(outcome: EventOutcome) {
+        match outcome {
+            EventOutcome::Processed => {}
+            EventOutcome::Skipped(reason) => panic!("组事件不应跳过: {reason}"),
+            EventOutcome::Failed(message) => panic!("组事件处理失败: {message}"),
+            EventOutcome::Terminal(message) => panic!("组事件不应终态: {message}"),
+        }
+    }
+
+    /// 取两次批写里各自写到的 record_id（按字典序），并断言每个成员只写一次。
+    fn written_record_ids(
+        transport: &EventReplay,
+        expected: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        let writes = transport
+            .writes
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        let mut record_ids: Vec<String> = writes
+            .iter()
+            .map(|write| {
+                write["records"][0]["record_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        record_ids.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        anyhow::ensure!(
+            record_ids == expected,
+            "组事件必须逐成员回写（含 leader），实际 {record_ids:?}，期望 {expected:?}"
+        );
+        for write in &writes {
+            let fields = &write["records"][0]["fields"];
+            anyhow::ensure!(
+                fields["状态"] == serde_json::json!("已通过"),
+                "扩展字段必须逐成员回写，实际 {fields}"
+            );
+            anyhow::ensure!(
+                fields.get("发起人").is_none(),
+                "事件 fan-out 不得重写申请人列，实际 {fields}"
+            );
+        }
+        Ok(record_ids)
+    }
+
+    /// 事件按 instance_code 命中组表：必须 fan-out 到全体成员，而不是只写 leader。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
+    async fn event_by_instance_code_updates_all_member_records() -> anyhow::Result<()> {
+        let fixture = GroupEventFixture::new().await?;
+        let instance_code = format!("INST-{}", fixture.namespace);
+        fixture.set_group_instance(&instance_code).await?;
+        let transport = Arc::new(EventReplay {
+            status: "APPROVED".into(),
+            reverted: false,
+            fail_write: false,
+            writes: Default::default(),
+        });
+        let (runner, cache) =
+            build_event_runner(&fixture.context, &fixture.namespace, transport.clone()).await?;
+        let event = PendingEvent {
+            id: 0,
+            instance_code: instance_code.clone(),
+            retry_count: 0,
+        };
+
+        assert_processed(process_event_inner(&runner, &event).await);
+        written_record_ids(
+            &transport,
+            &[fixture.leader_record.clone(), fixture.member_record.clone()],
+        )?;
+        let (leader, member) = fixture.instance_statuses().await?;
+        assert_eq!(leader.as_deref(), Some("APPROVED"), "leader 行也要同步状态");
+        assert_eq!(member.as_deref(), Some("APPROVED"), "成员行也要同步状态");
+        let (leader, member) = fixture.last_synced_at().await?;
+        assert!(leader.is_some() && member.is_some(), "两行都要记录同步时间");
+
+        cache.invalidate().await?;
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 实例码尚未落库：事件 uuid 先命中的是组行，必须同样 fan-out。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
+    async fn event_before_instance_code_uses_group_uuid_fallback() -> anyhow::Result<()> {
+        let fixture = GroupEventFixture::new().await?;
+        let instance_code = format!("INST-BEFORE-{}", fixture.namespace);
+        let event_id = fixture.insert_group_instance_event(&instance_code).await?;
+        let transport = Arc::new(EventReplay {
+            status: "APPROVED".into(),
+            reverted: false,
+            fail_write: false,
+            writes: Default::default(),
+        });
+        let (runner, cache) =
+            build_event_runner(&fixture.context, &fixture.namespace, transport.clone()).await?;
+        let event = PendingEvent {
+            id: event_id,
+            instance_code: instance_code.clone(),
+            retry_count: 0,
+        };
+
+        assert_processed(process_event_inner(&runner, &event).await);
+        written_record_ids(
+            &transport,
+            &[fixture.leader_record.clone(), fixture.member_record.clone()],
+        )?;
+        let (leader, member) = fixture.instance_statuses().await?;
+        assert_eq!(leader.as_deref(), Some("APPROVED"));
+        assert_eq!(member.as_deref(), Some("APPROVED"));
+
+        cache.invalidate().await?;
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 任务行（leader 上遗留的单条实例码）命中但 `group_id` 非空：仍走组 fan-out。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
+    async fn task_row_hit_with_group_id_still_fans_out_to_members() -> anyhow::Result<()> {
+        let fixture = GroupEventFixture::new().await?;
+        let legacy_instance = format!("INST-LEGACY-{}", fixture.namespace);
+        fixture.set_leader_instance(&legacy_instance).await?;
+        let transport = Arc::new(EventReplay {
+            status: "APPROVED".into(),
+            reverted: false,
+            fail_write: false,
+            writes: Default::default(),
+        });
+        let (runner, cache) =
+            build_event_runner(&fixture.context, &fixture.namespace, transport.clone()).await?;
+        let event = PendingEvent {
+            id: 0,
+            instance_code: legacy_instance,
+            retry_count: 0,
+        };
+
+        assert_processed(process_event_inner(&runner, &event).await);
+        written_record_ids(
+            &transport,
+            &[fixture.leader_record.clone(), fixture.member_record.clone()],
+        )?;
+        let (leader, member) = fixture.instance_statuses().await?;
+        assert_eq!(leader.as_deref(), Some("APPROVED"));
+        assert_eq!(member.as_deref(), Some("APPROVED"));
+
+        cache.invalidate().await?;
+        fixture.cleanup().await?;
+        Ok(())
     }
 }
