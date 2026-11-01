@@ -8004,4 +8004,365 @@ mod tests {
         fixture.cleanup().await?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // 聚合派发端到端：播种 → 批量认领 → 组处理（真实 MySQL + 脚本传输）
+    // -----------------------------------------------------------------------
+
+    /// 端到端夹具的审批定义：非明细控件「事由」+ 顶层明细「明细」，子控件值逐成员不同。
+    const AGGREGATE_E2E_FORM_SNAPSHOT: &str = r#"[
+        {"id":"wName","name":"事由","type":"input","required":false},
+        {"id":"wDetail","name":"明细","type":"fieldList","children":[
+            {"id":"wDesc","name":"明细说明","type":"input","required":false}
+        ]}
+    ]"#;
+
+    /// 端到端用例的字段列表：与非明细/明细子控件两条映射一一对应，外加回填与发起人列。
+    fn aggregate_e2e_fields() -> Vec<bitable::FieldItem> {
+        [
+            ("fldNumber", "审批编号", 15),
+            ("fldText", "事由", 1),
+            ("fldDesc", "明细说明", 1),
+            ("fldPerson", "发起人", 11),
+        ]
+        .into_iter()
+        .map(|(field_id, field_name, field_type)| bitable::FieldItem {
+            is_primary: false,
+            field_id: field_id.to_string(),
+            field_name: field_name.to_string(),
+            field_type: Some(field_type),
+            ui_type: None,
+            property: None,
+        })
+        .collect()
+    }
+
+    fn aggregate_e2e_fields_envelope() -> String {
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {
+                "has_more": false,
+                "total": 4,
+                "items": [
+                    {"field_id": "fldNumber", "field_name": "审批编号", "type": 15},
+                    {"field_id": "fldText", "field_name": "事由", "type": 1},
+                    {"field_id": "fldDesc", "field_name": "明细说明", "type": 1},
+                    {"field_id": "fldPerson", "field_name": "发起人", "type": 11},
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    /// 批量取记录响应：`(record_id, 事由, 明细说明)`，字段按列名作键（官方形态）。
+    fn aggregate_e2e_batch_get_envelope(items: &[(&str, &str, &str)]) -> String {
+        let rows: Vec<serde_json::Value> = items
+            .iter()
+            .map(|(record_id, text, detail)| {
+                serde_json::json!({
+                    "record_id": record_id,
+                    "fields": {"事由": text, "明细说明": detail},
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {"records": rows}
+        })
+        .to_string()
+    }
+
+    fn aggregate_e2e_record(record_id: &str, text: &str, detail: &str) -> bitable::RecordItem {
+        bitable::RecordItem {
+            record_id: record_id.to_string(),
+            fields: BTreeMap::from([
+                ("事由".to_string(), serde_json::json!(text)),
+                ("明细说明".to_string(), serde_json::json!(detail)),
+            ]),
+            created_by: None,
+        }
+    }
+
+    /// 聚合开启 + 带明细的定义快照 + 顶层/明细两条字段映射。
+    async fn insert_aggregate_e2e_config(
+        pool: &sqlx::MySqlPool,
+        namespace: &str,
+    ) -> anyhow::Result<i64> {
+        let config_id = insert_aggregate_config(pool, namespace, "e", true).await?;
+        sqlx::query("UPDATE feishu_approval_config SET form_snapshot=? WHERE id=?")
+            .bind(AGGREGATE_E2E_FORM_SNAPSHOT)
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        insert_aggregate_field_map(pool, config_id).await?;
+        sqlx::query(
+            "INSERT INTO feishu_approval_field_map \
+             (config_id,widget_id,widget_type,required,bitable_field,bitable_field_name,\
+              converter,created_at,updated_at) \
+             VALUES (?,'wDesc','input',false,'fldDesc','明细说明','direct',NOW(),NOW())",
+        )
+        .bind(config_id)
+        .execute(pool)
+        .await?;
+        Ok(config_id)
+    }
+
+    /// 端到端串起三段接缝：`seed_aggregate_groups` 产出组与 leader →
+    /// 批量 `claim_ready` 只拿 leader → `process_group` 一次 create 两行明细 →
+    /// 两名成员回填同一编号。
+    ///
+    /// 现有用例分别覆盖：播种止于行断言、处理用手插组行、批量认领另用手建行。
+    /// 这里把它们串成一条链路，任一接缝的假设漂移都会让本用例变红。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_end_to_end_seed_claim_process_creates_one_instance_with_two_rows(
+    ) -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_e2e_config(&pool, &namespace).await?;
+
+        // 1. 播种：非明细值相同、明细子控件值不同 ⇒ 仍合成一个组（明细不进签名）。
+        let leader_record = format!("{namespace}-r1");
+        let member_record = format!("{namespace}-r2");
+        let leader = aggregate_e2e_record(&leader_record, "报销", "明细-甲");
+        let member = aggregate_e2e_record(&member_record, "报销", "明细-乙");
+        let fields = aggregate_e2e_fields();
+        let transport = Arc::new(SeedTransport::new(vec![
+            aggregate_e2e_fields_envelope(),
+            aggregate_e2e_batch_get_envelope(&[(&leader_record, "报销", "明细-甲")]),
+            aggregate_e2e_batch_get_envelope(&[(&member_record, "报销", "明细-乙")]),
+            create_envelope("INST-E2E"),
+            detail_envelope("INST-E2E", "SERIAL-E2E"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            serde_json::json!({
+                "code": 0,
+                "data": {
+                    "has_more": false,
+                    "items": [
+                        {"record_id": leader_record, "fields": {}},
+                        {"record_id": member_record, "fields": {}}
+                    ]
+                }
+            })
+            .to_string(),
+            serde_json::json!({"code": 0, "data": {"message_id": "om_e2e"}}).to_string(),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let seeded = seed_aggregate_groups(
+            &mut transaction,
+            &runner,
+            &config,
+            &[&leader, &member],
+            &fields,
+        )
+        .await?;
+        transaction.commit().await?;
+        assert_eq!(seeded.seeded, 2, "两条记录都必须成为组成员");
+        assert!(
+            seeded.touched.contains(&leader_record) && seeded.touched.contains(&member_record),
+            "组内全部成员都要返回（缺一个就不落受理发起人）"
+        );
+
+        // 2. 组表 1 行、任务表 2 行：leader `group_seq=0`，成员 `group_seq=1`。
+        let groups: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT group_key,uuid,effect_phase FROM feishu_approval_group WHERE config_id=?",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(groups.len(), 1, "同签名的两条记录必须合成一个组");
+        let (group_key, group_uuid_value, phase) = &groups[0];
+        assert_eq!(phase, "ready");
+        assert_eq!(group_uuid_value.len(), 36, "组 uuid 必须是规范 UUID 形态");
+
+        let rows: Vec<(i64, String, i64)> = sqlx::query_as(
+            "SELECT id,record_id,group_seq FROM feishu_approval_task \
+             WHERE config_id=? ORDER BY group_seq",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(rows.len(), 2, "一个组两条任务行");
+        let leader_id = rows[0].0;
+        let member_id = rows[1].0;
+        assert_eq!(
+            (rows[0].1.as_str(), rows[0].2),
+            (leader_record.as_str(), 0),
+            "leader 必须是 group_seq=0"
+        );
+        assert_eq!(
+            (rows[1].1.as_str(), rows[1].2),
+            (member_record.as_str(), 1),
+            "成员必须是 group_seq=1"
+        );
+
+        // 3. 播种之后落受理发起人（与 `run_round` 顺序一致），再批量认领：
+        //    组只认 leader，成员行不得被认领。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_e2e",
+            None,
+            &[
+                (config_id, leader_record.clone()),
+                (config_id, member_record.clone()),
+            ],
+        )
+        .await;
+        let claims =
+            approval_execution::claim_ready(&context, leader_id - 1, None, CLAIM_BATCH).await?;
+        let ours: Vec<i64> = claims
+            .iter()
+            .filter(|claim| claim.id == leader_id || claim.id == member_id)
+            .map(|claim| claim.id)
+            .collect();
+        assert_eq!(ours, vec![leader_id], "批量认领只能拿到组 leader");
+        let claim = claims
+            .into_iter()
+            .find(|claim| claim.id == leader_id)
+            .ok_or_else(|| anyhow::anyhow!("组 leader 未被批量认领"))?;
+        let row = context
+            .approval_tasks()
+            .query()
+            .where_eq("id", serde_json::json!(leader_id))?
+            .optional()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("组 leader 任务行不存在"))?;
+        let task = load_task(&runner, &row, claim)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("组 leader 任务无法加载配置"))?;
+        assert_eq!(task.applicant_open_id.as_deref(), Some("ou_e2e"));
+
+        // 4. 组处理：字段表 → 逐成员读记录 → 一次 create → 取编号 → 批量回填
+        //    → 逐成员扩展字段 → 组通知。
+        let outcome = process_group(&runner, &task).await;
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "组处理必须回填成功，实际 {:?}",
+            outcome.result
+        );
+        assert!(outcome.persisted);
+
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        let creates: Vec<&crate::addon::feishu::domain::outbound::OutboundRequest> = requests
+            .iter()
+            .filter(|request| {
+                request.method == crate::addon::feishu::domain::outbound::OutboundMethod::Post
+                    && request.url.ends_with("/approval/v4/instances")
+            })
+            .collect();
+        assert_eq!(creates.len(), 1, "一个组只能 create 一次");
+        // create 的 `form` 是压缩后的 JSON 数组字符串：明细恰好两行、两行值不同。
+        let form: serde_json::Value = serde_json::from_str(
+            creates[0]
+                .json_body
+                .as_ref()
+                .and_then(|body| body["form"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("create 请求缺少 form"))?,
+        )?;
+        let detail = form
+            .as_array()
+            .and_then(|nodes| nodes.iter().find(|node| node["id"] == "wDetail"))
+            .ok_or_else(|| anyhow::anyhow!("form 缺少明细控件"))?;
+        let detail_rows = detail["value"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("明细控件没有值"))?;
+        assert_eq!(detail_rows.len(), 2, "一次 create 必须带两行明细");
+        let texts: Vec<&str> = detail_rows
+            .iter()
+            .filter_map(|row| row[0]["value"].as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["明细-甲", "明细-乙"],
+            "两行明细必须保留各自成员的值且顺序稳定"
+        );
+
+        // batch_update：编号回填一次覆盖两名成员、写同一个编号。
+        let serial_writes: Vec<&crate::addon::feishu::domain::outbound::OutboundRequest> = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/records/batch_update"))
+            .collect();
+        let backfill = serial_writes
+            .iter()
+            .find(|request| {
+                request
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| body["records"].as_array())
+                    .is_some_and(|rows| rows.len() == 2)
+            })
+            .ok_or_else(|| anyhow::anyhow!("没有覆盖两名成员的编号回填"))?;
+        let records = backfill
+            .json_body
+            .as_ref()
+            .and_then(|body| body["records"].as_array())
+            .ok_or_else(|| anyhow::anyhow!("回填请求缺少 records"))?;
+        let mut written: Vec<&str> = records
+            .iter()
+            .filter_map(|record| record["record_id"].as_str())
+            .collect();
+        written.sort_unstable();
+        let mut expected = vec![leader_record.as_str(), member_record.as_str()];
+        expected.sort_unstable();
+        assert_eq!(written, expected, "编号回填必须覆盖全部成员");
+        for record in records {
+            assert_eq!(
+                record["fields"]["审批编号"]["text"].as_str(),
+                Some("SERIAL-E2E"),
+                "两名成员必须写同一个编号"
+            );
+        }
+
+        // 5. 组行写入实例码与编号；leader 行 instance_code 仍为 NULL。
+        let group: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT effect_phase,instance_code,serial_number FROM feishu_approval_group \
+             WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(group_key)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            group,
+            (
+                "created".to_string(),
+                Some("INST-E2E".to_string()),
+                Some("SERIAL-E2E".to_string())
+            ),
+            "实例码与编号只落组行"
+        );
+        let leader_code: Option<String> =
+            sqlx::query_scalar("SELECT instance_code FROM feishu_approval_task WHERE id=?")
+                .bind(leader_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            leader_code, None,
+            "组实例码不得落到 leader 任务行（设计 §4.1）"
+        );
+        let states: Vec<String> = sqlx::query_scalar(
+            "SELECT state FROM feishu_approval_task WHERE config_id=? ORDER BY group_seq",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(states, vec!["backfilled", "backfilled"]);
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
 }

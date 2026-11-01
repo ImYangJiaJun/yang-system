@@ -299,6 +299,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_success_backfills_same_serial_and_writes_extensions", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合派发端到端集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_end_to_end_seed_claim_process_creates_one_instance_with_two_rows", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "聚合组通知一次渲染集成测试",
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_notification_is_sent_once_with_member_row_summary", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
