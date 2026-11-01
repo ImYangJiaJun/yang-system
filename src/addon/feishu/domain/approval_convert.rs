@@ -305,14 +305,85 @@ pub(crate) fn prepare_definition<'a>(
     Ok((definition, mappings))
 }
 
+/// 聚合表单里的一行：一条多维表格记录的全部单元格。
+///
+/// `record_id` 不参与表单值，只用于错误定位——空明细必须写明是哪条记录。
+pub(crate) struct GroupFormRow<'a> {
+    pub(crate) record_id: &'a str,
+    pub(crate) cells: &'a Map<String, Value>,
+    pub(crate) attachment_codes: &'a BTreeMap<String, Vec<String>>,
+}
+
+/// 聚合表单的组装输入：顶层控件取第一行，明细控件每条记录一行。
+pub(crate) struct GroupFormInput<'a> {
+    pub(crate) widgets: &'a [WidgetMap],
+    pub(crate) form_snapshot: &'a str,
+    pub(crate) rows: &'a [GroupFormRow<'a>],
+    pub(crate) timezone_offset: FixedOffset,
+}
+
 /// 把一条多维表格记录组装成创建实例接口要求的 `form` 字符串。
 ///
 /// 返回的是**压缩后的 JSON 数组字符串**（`instance/create.md:30`）。
 pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> {
-    let (definition, mappings) = prepare_definition(input.form_snapshot, input.widgets)?;
-    let widgets = assemble_definition(&definition, &mappings, input)?;
+    let row = GroupFormRow {
+        record_id: "",
+        cells: input.cells,
+        attachment_codes: input.attachment_codes,
+    };
+    assemble(
+        input.widgets,
+        input.form_snapshot,
+        std::slice::from_ref(&row),
+        input.timezone_offset,
+        false,
+    )
+}
 
-    serde_json::to_string(&Value::Array(widgets)).map_err(|error| ConvertError::BadValue {
+/// 把一组同签名的多维表格记录组装成一个多行明细的 `form` 字符串。
+///
+/// 与 [`build_form`] 的差别只有明细的填法：顶层 `fieldList` **恰好每条记录一行**，
+/// 任一成员的明细为空即报 `BadValue`（不跳过——少一行意味着审批实例缺一条业务
+/// 数据）；非明细控件取第一行（leader）的值。进入某行之后的嵌套 `fieldList`
+/// 只接收该行的单行切片。
+pub(crate) fn build_group_form(input: &GroupFormInput<'_>) -> Result<String, ConvertError> {
+    assemble(
+        input.widgets,
+        input.form_snapshot,
+        input.rows,
+        input.timezone_offset,
+        true,
+    )
+}
+
+/// `build_form` 与 `build_group_form` 的公共装配段。
+///
+/// `enforce_member_rows` 只在聚合路径为 true：顶层明细按成员数强制成行，
+/// 空明细则报错；单条路径沿用既有语义（必填报缺、可选整块省略）。
+fn assemble(
+    widgets: &[WidgetMap],
+    form_snapshot: &str,
+    rows: &[GroupFormRow<'_>],
+    timezone_offset: FixedOffset,
+    enforce_member_rows: bool,
+) -> Result<String, ConvertError> {
+    let (definition, mappings) = prepare_definition(form_snapshot, widgets)?;
+    if rows.is_empty() {
+        return Err(ConvertError::BadValue {
+            widget_id: String::new(),
+            reason: "表单组装至少需要一行记录".to_string(),
+        });
+    }
+    let values = assemble_definition(
+        &definition,
+        &mappings,
+        rows,
+        timezone_offset,
+        false,
+        enforce_member_rows,
+    )?;
+
+    serde_json::to_string(&Value::Array(values)).map_err(|error| ConvertError::BadValue {
         widget_id: String::new(),
         reason: format!("form 序列化失败：{error}"),
     })
@@ -361,7 +432,12 @@ fn collect_signature(
         };
         let mut mapping = (*mapping).clone();
         mapping.required |= node.required;
-        let value = match assemble_widget(&mapping, input) {
+        let value = match assemble_widget(
+            &mapping,
+            input.cells,
+            input.attachment_codes,
+            input.timezone_offset,
+        ) {
             Ok(Some(value)) => value,
             Ok(None) | Err(ConvertError::MissingRequired { .. }) => Value::Null,
             Err(error) => return Err(error),
@@ -408,12 +484,25 @@ fn canonical_number(number: &serde_json::Number) -> String {
     }
 }
 
-/// 一条记录在每个明细控件中形成一行，子控件保持定义中的原始 id。
+/// 按定义顺序组装一行（或聚合模式下的多行明细）。
+///
+/// - 非明细控件取 `rows[0]`（leader）的单元格；
+/// - 顶层 `fieldList` 在 `enforce_member_rows` 时**每条记录一行**，任一成员明细
+///   为空直接报 `BadValue`（不跳过：少一行会让审批实例缺一条业务数据）；
+/// - 进入某行的递归带 `inside_detail_row=true` 且只传该行的单行切片，嵌套
+///   `fieldList` 因此只看到本行数据；控件组同理按单行处理（非明细取首行）。
 fn assemble_definition(
     definition: &[FormWidget],
     mappings: &BTreeMap<&str, &WidgetMap>,
-    input: &FormInput<'_>,
+    rows: &[GroupFormRow<'_>],
+    timezone_offset: FixedOffset,
+    inside_detail_row: bool,
+    enforce_member_rows: bool,
 ) -> Result<Vec<Value>, ConvertError> {
+    let primary = rows.first().ok_or_else(|| ConvertError::BadValue {
+        widget_id: String::new(),
+        reason: "表单组装至少需要一行记录".to_string(),
+    })?;
     let mut values = Vec::new();
     for node in definition {
         if node.r#type == "fieldList" {
@@ -426,10 +515,37 @@ fn assemble_definition(
             {
                 continue;
             }
+            if !inside_detail_row && enforce_member_rows {
+                let mut detail_rows = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let has_value = node.walk().iter().any(|child| {
+                        mappings
+                            .get(child.id.as_str())
+                            .and_then(|mapping| row.cells.get(&mapping.bitable_field))
+                            .is_some_and(|cell| !is_empty(cell))
+                    });
+                    if !has_value {
+                        return Err(ConvertError::BadValue {
+                            widget_id: node.id.clone(),
+                            reason: format!("记录 {} 的明细为空", row.record_id),
+                        });
+                    }
+                    detail_rows.push(assemble_definition(
+                        &node.children,
+                        mappings,
+                        std::slice::from_ref(row),
+                        timezone_offset,
+                        true,
+                        false,
+                    )?);
+                }
+                values.push(json!({"id": node.id, "type": "fieldList", "value": detail_rows}));
+                continue;
+            }
             let has_value = node.walk().iter().any(|child| {
                 mappings
                     .get(child.id.as_str())
-                    .and_then(|mapping| input.cells.get(&mapping.bitable_field))
+                    .and_then(|mapping| primary.cells.get(&mapping.bitable_field))
                     .is_some_and(|cell| !is_empty(cell))
             });
             if !has_value {
@@ -440,7 +556,14 @@ fn assemble_definition(
                 }
                 continue;
             }
-            let row = assemble_definition(&node.children, mappings, input)?;
+            let row = assemble_definition(
+                &node.children,
+                mappings,
+                std::slice::from_ref(primary),
+                timezone_offset,
+                true,
+                false,
+            )?;
             values.push(json!({"id": node.id, "type": "fieldList", "value": [row]}));
         } else if is_container(&node.r#type) {
             // 控件组：子控件在 `children` 里（定义原文的 `value`，阶段一已解析）。
@@ -452,7 +575,15 @@ fn assemble_definition(
             {
                 continue;
             }
-            let children = assemble_definition(&node.children, mappings, input)?;
+            // 控件组不是「每条成员一行」的明细；组内嵌套明细按首行取（非明细语义）。
+            let children = assemble_definition(
+                &node.children,
+                mappings,
+                rows,
+                timezone_offset,
+                inside_detail_row,
+                false,
+            )?;
             if children.is_empty() {
                 if node.required {
                     return Err(ConvertError::MissingRequired {
@@ -465,7 +596,12 @@ fn assemble_definition(
         } else if let Some(mapping) = mappings.get(node.id.as_str()) {
             let mut mapping = (*mapping).clone();
             mapping.required |= node.required;
-            if let Some(value) = assemble_widget(&mapping, input)? {
+            if let Some(value) = assemble_widget(
+                &mapping,
+                primary.cells,
+                primary.attachment_codes,
+                timezone_offset,
+            )? {
                 if let Err(reason) = node.connect_definition_codes() {
                     return Err(ConvertError::InvalidDefinition(format!(
                         "关联审批控件「{}」配置无效：{reason}，请刷新配置",
@@ -489,9 +625,11 @@ fn assemble_definition(
 /// 组装单个控件；无值且非必填时返回 `Ok(None)`。
 fn assemble_widget(
     widget: &WidgetMap,
-    input: &FormInput<'_>,
+    cells: &Map<String, Value>,
+    attachment_codes: &BTreeMap<String, Vec<String>>,
+    timezone_offset: FixedOffset,
 ) -> Result<Option<Value>, ConvertError> {
-    let cell = input.cells.get(&widget.bitable_field);
+    let cell = cells.get(&widget.bitable_field);
 
     // 先判「这个控件类型能不能提单」——它比有没有值更根本。含不支持控件的定义
     // 无论数据是否完整都提不出去，早点报错能让用户改定义而不是反复补数据。
@@ -518,7 +656,7 @@ fn assemble_widget(
     let interval_end_cell = if widget.widget_type == "dateInterval" {
         match widget.interval_end_field.as_deref() {
             None => None,
-            Some(field) => match input.cells.get(field).filter(|value| !is_empty(value)) {
+            Some(field) => match cells.get(field).filter(|value| !is_empty(value)) {
                 Some(value) => Some(value),
                 None => {
                     return if widget.required {
@@ -543,8 +681,7 @@ fn assemble_widget(
         } else {
             "附件"
         };
-        let codes = input
-            .attachment_codes
+        let codes = attachment_codes
             .get(&widget.widget_id)
             .filter(|codes| !codes.is_empty() && codes.iter().all(|code| !code.trim().is_empty()))
             .ok_or_else(|| ConvertError::BadValue {
@@ -555,9 +692,7 @@ fn assemble_widget(
     } else {
         match widget.converter {
             Converter::Direct => assemble_direct(widget, cell)?,
-            Converter::Date => {
-                assemble_date(widget, cell, interval_end_cell, input.timezone_offset)?
-            }
+            Converter::Date => assemble_date(widget, cell, interval_end_cell, timezone_offset)?,
             Converter::Option => assemble_option(widget, cell)?,
         }
     };
@@ -2377,6 +2512,188 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(missing.contains("\"req\":null"), "{missing}");
         assert_ne!(missing, number_form);
+    }
+
+    /// 多行明细表单的测试入口：顶层控件取第一行，明细逐成员一行。
+    fn render_group(
+        snapshot: &str,
+        widgets: &[WidgetMap],
+        rows: &[(&str, Map<String, Value>)],
+    ) -> Result<Value, ConvertError> {
+        let codes = BTreeMap::new();
+        let group_rows: Vec<GroupFormRow<'_>> = rows
+            .iter()
+            .map(|(record_id, cells)| GroupFormRow {
+                record_id,
+                cells,
+                attachment_codes: &codes,
+            })
+            .collect();
+        let form = build_group_form(&GroupFormInput {
+            widgets,
+            form_snapshot: snapshot,
+            rows: &group_rows,
+            timezone_offset: shanghai(),
+        })?;
+        Ok(serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    #[test]
+    fn group_form_emits_exactly_one_row_per_member() {
+        let snapshot = r#"[{"id":"top","type":"input"},{"id":"detail","type":"fieldList","children":[{"id":"desc","type":"textarea"}]}]"#;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let mut desc = widget("desc", "textarea");
+        desc.bitable_field = "fld_desc".to_string();
+        let widgets = [top, desc];
+        let actual = render_group(
+            snapshot,
+            &widgets,
+            &[
+                (
+                    "recA",
+                    cells(&[("fld_top", json!("共同")), ("fld_desc", json!("明细 A"))]),
+                ),
+                (
+                    "recB",
+                    cells(&[("fld_top", json!("共同")), ("fld_desc", json!("明细 B"))]),
+                ),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([
+                {"id":"top","type":"input","value":"共同"},
+                {"id":"detail","type":"fieldList","value":[
+                    [{"id":"desc","type":"textarea","value":"明细 A"}],
+                    [{"id":"desc","type":"textarea","value":"明细 B"}]
+                ]}
+            ])
+        );
+    }
+
+    #[test]
+    fn group_form_rejects_a_member_with_empty_detail() {
+        // 空明细成员**不能**被静默跳过：少一行会让审批实例缺一条业务数据。
+        let snapshot = r#"[{"id":"top","type":"input"},{"id":"detail","type":"fieldList","children":[{"id":"desc","type":"textarea"}]}]"#;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let mut desc = widget("desc", "textarea");
+        desc.bitable_field = "fld_desc".to_string();
+        let error = match render_group(
+            snapshot,
+            &[top, desc],
+            &[
+                (
+                    "recA",
+                    cells(&[("fld_top", json!("共同")), ("fld_desc", json!("明细 A"))]),
+                ),
+                ("recB", cells(&[("fld_top", json!("共同"))])),
+            ],
+        ) {
+            Ok(rendered) => panic!("空明细成员必须报错，实际生成：{rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, ConvertError::BadValue { widget_id, reason }
+                if widget_id == "detail" && reason.contains("recB")),
+            "错误必须定位到明细控件与记录：{error}"
+        );
+    }
+
+    #[test]
+    fn nested_field_list_inside_a_row_uses_that_rows_values() {
+        // 进入某成员的行内后，嵌套 fieldList 只接收该行的数据，不能串到别的成员。
+        let snapshot = r#"[{"id":"detail","type":"fieldList","children":[
+            {"id":"nested","type":"fieldList","children":[{"id":"deep","type":"input"}]}
+        ]}]"#;
+        let mut deep = widget("deep", "input");
+        deep.bitable_field = "fld_deep".to_string();
+        let actual = render_group(
+            snapshot,
+            &[deep],
+            &[
+                ("recA", cells(&[("fld_deep", json!("A"))])),
+                ("recB", cells(&[("fld_deep", json!("B"))])),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{
+                "id":"detail","type":"fieldList","value":[
+                    [{"id":"nested","type":"fieldList","value":[
+                        [{"id":"deep","type":"input","value":"A"}]
+                    ]}],
+                    [{"id":"nested","type":"fieldList","value":[
+                        [{"id":"deep","type":"input","value":"B"}]
+                    ]}]
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn group_form_uses_first_row_for_non_detail_widgets() {
+        // 非明细控件只提交一次，取第一行（leader）的值。
+        let snapshot = r#"[{"id":"top","type":"input"}]"#;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let actual = render_group(
+            snapshot,
+            &[top],
+            &[
+                ("recA", cells(&[("fld_top", json!("第一行"))])),
+                ("recB", cells(&[("fld_top", json!("第二行"))])),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{"id":"top","type":"input","value":"第一行"}])
+        );
+    }
+
+    #[test]
+    fn group_form_fills_every_detail_widget_with_n_rows() {
+        // 多个明细控件各自 N 行，不能只有一个填满。
+        let snapshot = r#"[
+            {"id":"detailA","type":"fieldList","children":[{"id":"a","type":"input"}]},
+            {"id":"detailB","type":"fieldList","children":[{"id":"b","type":"input"}]}
+        ]"#;
+        let mut first = widget("a", "input");
+        first.bitable_field = "fld_a".to_string();
+        let mut second = widget("b", "input");
+        second.bitable_field = "fld_b".to_string();
+        let actual = render_group(
+            snapshot,
+            &[first, second],
+            &[
+                (
+                    "recA",
+                    cells(&[("fld_a", json!("a1")), ("fld_b", json!("b1"))]),
+                ),
+                (
+                    "recB",
+                    cells(&[("fld_a", json!("a2")), ("fld_b", json!("b2"))]),
+                ),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([
+                {"id":"detailA","type":"fieldList","value":[
+                    [{"id":"a","type":"input","value":"a1"}],
+                    [{"id":"a","type":"input","value":"a2"}]
+                ]},
+                {"id":"detailB","type":"fieldList","value":[
+                    [{"id":"b","type":"input","value":"b1"}],
+                    [{"id":"b","type":"input","value":"b2"}]
+                ]}
+            ])
+        );
     }
 
     #[test]
