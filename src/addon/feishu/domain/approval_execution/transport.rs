@@ -1,7 +1,10 @@
 //! 每次真实副作用前先记阶段；没有远端确认时禁止 transport 自动重发。
 
 use super::super::{context::FeishuContext, outbound::*};
-use super::{begin_effect, confirm_effect, facts, mark_unknown, TaskClaim};
+use super::{
+    begin_effect, begin_group_effect, confirm_effect, confirm_group_effect, facts, mark_unknown,
+    TaskClaim,
+};
 use yang_base::BaseError;
 
 pub(crate) struct ExecutionTransport<'a> {
@@ -121,6 +124,114 @@ impl OutboundTransport for ExecutionTransport<'_> {
             .map_err(storage)?;
         Err(BaseError::ConfigError(
             "飞书写入未获得有效确认，任务已转人工核查，禁止自动重发".into(),
+        ))
+    }
+}
+
+/// 聚合组的执行传输：**只拦创建实例**，确认走组专用函数。
+///
+/// # 为什么回填不拦
+///
+/// 组 leader 任务行永远不持有组实例码（设计 §4.1），单条那套「靠 leader 的
+/// `instance_code` 判安全阶段」在组上没有可判的事实；而组回填的失败由
+/// `BackfillReport.failed` 判定并整组重试（`CreatedPendingBackfill`），重复写同一
+/// 编号是幂等的。把 `batch_update` 也拦进来反而会把组行阶段从 `created` 误写成
+/// `ready`——那会让下一轮重新尝试创建，凭空多出一个实例。
+pub(crate) struct GroupExecutionTransport<'a> {
+    pub(crate) inner: &'a dyn OutboundTransport,
+    pub(crate) context: &'a FeishuContext,
+    pub(crate) claim: &'a TaskClaim,
+    pub(crate) group_key: &'a str,
+}
+
+#[async_trait::async_trait]
+impl OutboundTransport for GroupExecutionTransport<'_> {
+    async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+        let create = request.method == OutboundMethod::Post
+            && request.url.ends_with("/approval/v4/instances");
+        if !create {
+            return self.inner.send(request).await;
+        }
+        let storage = |error: anyhow::Error| BaseError::ConfigError(error.to_string());
+        // 创建前先提交组行与 leader 的 `creating`：崩溃后只能靠组 uuid 回捞。
+        begin_group_effect(self.context, self.claim, self.group_key, "creating")
+            .await
+            .map_err(storage)?;
+        let result = self.inner.send(request).await;
+        match result {
+            Ok(response) => {
+                let json = serde_json::from_str::<serde_json::Value>(&response.body).ok();
+                let code = json.as_ref().and_then(|v| v["code"].as_i64());
+                if code == Some(0) && (200..300).contains(&response.status) {
+                    let created = json
+                        .as_ref()
+                        .and_then(|v| v["data"]["instance_code"].as_str())
+                        .filter(|s| !s.trim().is_empty());
+                    if let Some(created) = created {
+                        // 实例码只写组行；leader 只镜像阶段（设计 §4.1）。
+                        confirm_group_effect(
+                            self.context,
+                            self.claim,
+                            self.group_key,
+                            "created",
+                            Some(created),
+                        )
+                        .await
+                        .map_err(storage)?;
+                        return Ok(response);
+                    }
+                } else if code == Some(i64::from(CODE_UUID_CONFLICT)) {
+                    // 组 uuid 冲突：实例此前已建成功，按组 uuid 回捞。
+                    confirm_group_effect(self.context, self.claim, self.group_key, "lookup", None)
+                        .await
+                        .map_err(storage)?;
+                    return Ok(response);
+                } else if code.is_some_and(|code| {
+                    CODES_TOKEN_EXPIRED
+                        .iter()
+                        .any(|known| i64::from(*known) == code)
+                        || [CODE_RATE_LIMITED, CODE_TOO_MANY_REQUEST]
+                            .iter()
+                            .any(|known| i64::from(*known) == code)
+                }) {
+                    // 鉴权/频控被挡在写入之前：恢复安全阶段，允许有界重试。
+                    confirm_group_effect(self.context, self.claim, self.group_key, "ready", None)
+                        .await
+                        .map_err(storage)?;
+                    return Ok(response);
+                } else if code.is_some_and(|code| code != 0) {
+                    // 远端明确拒绝（含 HTTP 200 + 非零业务码）：写入未发生，交上层按
+                    // 业务错误分类成整组暂停。
+                    confirm_group_effect(self.context, self.claim, self.group_key, "ready", None)
+                        .await
+                        .map_err(storage)?;
+                    tracing::warn!(
+                        http_status = response.status,
+                        business_code = code,
+                        "飞书组创建被远端明确拒绝（未执行），交上层按业务错误处置"
+                    );
+                    return Ok(response);
+                }
+                tracing::warn!(
+                    response = %summarize(response.status, &response.body),
+                    "飞书组创建响应无法确认，转人工核查"
+                );
+            }
+            Err(error @ BaseError::RateLimitExceeded { .. }) => {
+                confirm_group_effect(self.context, self.claim, self.group_key, "ready", None)
+                    .await
+                    .map_err(storage)?;
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "飞书组创建未获得传输层确认，结果未知");
+            }
+        }
+        mark_unknown(self.context, self.claim)
+            .await
+            .map_err(storage)?;
+        Err(BaseError::ConfigError(
+            "飞书组创建未获得有效确认，任务已转人工核查，禁止自动重发".into(),
         ))
     }
 }

@@ -9,7 +9,9 @@ pub(crate) use repository::{
     confirm_group_effect, detach_from_group, facts, finish, finish_group, is_owned, mark_unknown,
     reopen, DetachOutcome, TaskClaim,
 };
-pub(crate) use transport::ExecutionTransport;
+// `GroupExecutionTransport` 由 worker 的组处理接入（Task 9）；先随组派发落地。
+#[allow(unused_imports)]
+pub(crate) use transport::{ExecutionTransport, GroupExecutionTransport};
 
 use super::approval_notification::NotificationRecipient;
 use serde::{Deserialize, Serialize};

@@ -26,14 +26,17 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::approval::{
     create_instance, get_approval_definition, get_instance, resolve_department_name, CreateOutcome,
     GetOutcome, InstanceDetail,
 };
 use super::approval_attachment;
-use super::approval_convert::{build_form, Converter, FixedOffset, FormInput, WidgetMap};
+use super::approval_convert::{
+    build_form, build_group_form, Converter, FixedOffset, FormInput, GroupFormInput, GroupFormRow,
+    WidgetMap,
+};
 use super::approval_uuid::derive_uuid;
 use super::bitable::{BitableCoordinates, FieldItem};
 use super::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
@@ -778,6 +781,426 @@ pub(crate) async fn dispatch_one(
     )
     .await;
     finish_backfill(backfill, input, &uuid, detail).await
+}
+
+// ---------------------------------------------------------------------------
+// 聚合组派发：一次 create 组装 N 行明细，同编号回填全部成员
+// ---------------------------------------------------------------------------
+
+// 组派发的入口由 worker 的组处理在 Task 9 接入；Task 8 先交付编排与单测，
+// 与 `approval_aggregation` / `approval_execution` 的组原语同一条惯例。
+#[allow(dead_code)]
+/// 组内一条成员记录：原始单元格 + 已搬运好的附件 code。
+///
+/// 附件由调用方（worker 的组处理）逐记录预检/搬运后传入——组只有一次 `create`，
+/// 搬运必须在组装表单之前完成（设计 §4.6 第 4 步）。空 map 表示该成员没有媒体控件。
+pub(crate) struct GroupMemberInput<'a> {
+    pub(crate) record_id: &'a str,
+    pub(crate) cells: &'a Map<String, Value>,
+    pub(crate) attachment_codes: BTreeMap<String, Vec<String>>,
+}
+
+/// 一个聚合组的派发输入。
+///
+/// 组身份（`group_uuid` / `instance_code`）由组行提供，**不从 leader 任务行取**：
+/// leader 永远不持有组实例码（设计 §4.1）。
+#[allow(dead_code)]
+pub(crate) struct GroupDispatchInput<'a> {
+    pub(crate) fields: &'a [FieldItem],
+    /// 仅在「60012 回捞未命中」时用来把组行阶段写回 `ready`（设计 §4.6 第 3 步）。
+    pub(crate) context: Option<&'a super::context::FeishuContext>,
+    pub(crate) execution: Option<&'a super::approval_execution::TaskClaim>,
+    pub(crate) coordinates: &'a BitableCoordinates,
+    pub(crate) group_key: &'a str,
+    /// 组行派生出的幂等键；`create` 必须用它（成员行的 `uuid` 只服务单条点击）。
+    pub(crate) group_uuid: &'a str,
+    /// 组行已有的实例码。非空 = 已建过实例：恢复回填，跳过创建与签名复核。
+    pub(crate) instance_code: Option<&'a str>,
+    pub(crate) backfill_field_name: &'a str,
+    pub(crate) status_field: Option<&'a str>,
+    pub(crate) flow_field: Option<&'a str>,
+    pub(crate) start_time_field: Option<&'a str>,
+    pub(crate) end_time_field: Option<&'a str>,
+    pub(crate) department_field: Option<&'a str>,
+    pub(crate) handler_field: Option<&'a str>,
+    pub(crate) approval_code: &'a str,
+    pub(crate) widgets: &'a [WidgetMap],
+    pub(crate) form_snapshot: &'a str,
+    pub(crate) timezone_offset: FixedOffset,
+    pub(crate) applicant_field: &'a str,
+    /// 批量点击人（open_id）。组缺少身份时整组暂停，不走单条 `Waiting`。
+    pub(crate) applicant_open_id: Option<&'a str>,
+    /// 组内全部成员，**按 `group_seq` 升序**（下标即明细行序）。
+    pub(crate) members: &'a [GroupMemberInput<'a>],
+}
+
+/// 组失败的处置。只有两种：整组暂停，或保持 `pending` 等下一轮。
+///
+/// 与单条 [`DispatchResult`] 分开的理由是「**绝不写回填列**」：单条终态要写原因，
+/// 而组暂停只进 `last_error` 与通知——写进任何成员的编号列都会让该行退出扫描集，
+/// 整组就再也修不回来了（设计 §5）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum GroupOutcome {
+    /// 数据/配置/远端明确拒绝：整组暂停，等人工重新批量点击。
+    Paused { message: String },
+    /// 频控/瞬时失败/凭证失效：保持 `pending`，按既有退避重试。
+    Retryable { message: String },
+}
+
+/// 组失败分类：`Fatal` → 整组暂停，其余 → 可重试。
+///
+/// **不调用 `backfill.write`**，也不写任何成员的编号列（设计 §4.6）。
+#[allow(dead_code)]
+pub(crate) fn classify_group_failure(failure: OutboundFailure) -> GroupOutcome {
+    tracing::warn!(kind = ?failure.kind, "聚合组出站失败，按错误类别决定暂停或重试");
+    let reason = super::approval_feedback::outbound_reason(&failure);
+    match failure.kind {
+        FailureKind::Retry { .. }
+        | FailureKind::TokenExpired
+        | FailureKind::UuidConflict
+        | FailureKind::InstanceNotFound => GroupOutcome::Retryable { message: reason },
+        // 终态文案要裁剪：多维表格的读者范围远大于运维。
+        FailureKind::Fatal { code } => GroupOutcome::Paused {
+            message: sanitize_terminal_message(&reason, code),
+        },
+    }
+}
+
+/// 组处置 → 编排结论。
+///
+/// 组暂停回 [`DispatchResult::Terminal`]：worker 的组分支据此写 `state='paused'`
+/// （不是 `terminal`），并**跳过**单条的「终态写回填列」动作。
+#[allow(dead_code)]
+fn group_result(outcome: GroupOutcome) -> DispatchResult {
+    match outcome {
+        GroupOutcome::Paused { message } => DispatchResult::Terminal { message },
+        GroupOutcome::Retryable { message } => DispatchResult::Retryable { message },
+    }
+}
+
+/// 派发一个聚合组：一次 `create`、按组 uuid 回捞、同编号回填全部成员。
+///
+/// 与 [`dispatch_one`] 的差别只在「一条实例对多条记录」：
+///
+/// - `create` 的幂等键是**组 uuid**（成员行 uuid 只服务单条点击）；
+/// - 组实例码由 transport 的组专用确认写进组行，leader 任务行的 `instance_code`
+///   保持为 NULL（设计 §4.1）；
+/// - `60012` 按组 uuid 回捞；未命中把组行阶段写回 `ready` 再退避重发；
+/// - 回填是**批量**的：`BackfillReport.failed` 非空即整组重试，全部成功后才逐成员
+///   写扩展字段与发起人列。
+#[allow(dead_code)]
+pub(crate) async fn dispatch_group(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    backfill: &dyn Backfill,
+    input: &GroupDispatchInput<'_>,
+) -> DispatchResult {
+    if input.members.is_empty() {
+        // 空组不该出现（播种至少一行）；真出现了也只能暂停，不能建一个空单。
+        return DispatchResult::Terminal {
+            message: "聚合组没有成员记录，已暂停".into(),
+        };
+    }
+
+    // ---- 1. 已建实例：恢复回填，不再创建、不再复核签名 ----
+    if let Some(code) = input
+        .instance_code
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+    {
+        tracing::info!(stage = "recover", instance_code = %code, "按组实例码恢复回填");
+        return match get_instance(transport, sleeper, tokens, code).await {
+            Ok(GetOutcome::Found(detail)) => {
+                let mut detail = *detail;
+                fill_department_name(
+                    transport,
+                    sleeper,
+                    tokens,
+                    input.department_field,
+                    &mut detail,
+                )
+                .await;
+                finish_group_backfill(backfill, input, detail).await
+            }
+            // 实例码已在组行落实（外部副作用已发生），详情查不到只是暂时不可见：
+            // 保留事实，下一轮再来，绝不重新创建。
+            Ok(GetOutcome::NotFound) | Err(_) => DispatchResult::CreatedPendingBackfill {
+                message: "聚合组实例已确认但详情暂不可见，保留事实等待核查".into(),
+                instance_code: code.to_string(),
+                serial_number: None,
+            },
+        };
+    }
+
+    // ---- 2. 发起人：组缺身份 = 整组暂停 ----
+    let Some(open_id) = input
+        .applicant_open_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::info!(
+            stage = "initiator",
+            group_key = input.group_key,
+            outcome = "paused",
+            "聚合组没有发起人身份，整组暂停"
+        );
+        return DispatchResult::Terminal {
+            message: MISSING_INITIATOR_REASON.to_string(),
+        };
+    };
+    let open_id = open_id.to_string();
+
+    // ---- 3. 组装多行明细表单 ----
+    let rows: Vec<GroupFormRow<'_>> = input
+        .members
+        .iter()
+        .map(|member| GroupFormRow {
+            record_id: member.record_id,
+            cells: member.cells,
+            attachment_codes: &member.attachment_codes,
+        })
+        .collect();
+    tracing::debug!(
+        stage = "form",
+        member_count = rows.len(),
+        "开始组装聚合组表单"
+    );
+    let form = match build_group_form(&GroupFormInput {
+        widgets: input.widgets,
+        form_snapshot: input.form_snapshot,
+        rows: &rows,
+        timezone_offset: input.timezone_offset,
+    }) {
+        Ok(form) => form,
+        Err(error) => {
+            log_conversion_error(&error, input.widgets);
+            // 组路径一律暂停：空明细/缺必填/选项冲突都是「修好后重新点击」的事，
+            // 轮询不会自愈（设计 §5）。
+            return DispatchResult::Terminal {
+                message: super::approval_feedback::conversion_reason(
+                    &error,
+                    input.form_snapshot,
+                    input.widgets,
+                    input.fields,
+                ),
+            };
+        }
+    };
+    tracing::debug!(stage = "form", "聚合组表单组装完成");
+
+    // ---- 4. 创建（幂等键 = 组 uuid） ----
+    tracing::debug!(
+        stage = "create",
+        group_uuid = input.group_uuid,
+        "开始创建聚合组实例"
+    );
+    let reclaimed: Option<InstanceDetail>;
+    let instance_code = match create_instance(
+        transport,
+        sleeper,
+        tokens,
+        input.approval_code,
+        &form,
+        &open_id,
+        input.group_uuid,
+    )
+    .await
+    {
+        Ok(CreateOutcome::Created { instance_code }) => {
+            reclaimed = None;
+            instance_code
+        }
+        Ok(CreateOutcome::UuidConflict) => {
+            tracing::info!(stage = "recover", "组 uuid 冲突，按组 uuid 恢复审批实例");
+            match get_instance(transport, sleeper, tokens, input.group_uuid).await {
+                Ok(GetOutcome::Found(detail)) => {
+                    let code = detail.instance_code.clone();
+                    reclaimed = Some(*detail);
+                    code
+                }
+                Ok(GetOutcome::NotFound) => {
+                    // 组行停在 `lookup` 等不到实例：写回 `ready` 才能重新创建
+                    // （组行阶段是唯一事实，重试不会自己复位，设计 §4.6 第 3 步）。
+                    if let (Some(context), Some(claim)) = (input.context, input.execution) {
+                        if let Err(error) = super::approval_execution::confirm_group_effect(
+                            context,
+                            claim,
+                            input.group_key,
+                            "ready",
+                            None,
+                        )
+                        .await
+                        {
+                            tracing::warn!(stage = "recover", error = %error, "组阶段复位失败");
+                        }
+                    }
+                    return DispatchResult::Retryable {
+                        message: format!(
+                            "组 uuid 冲突但按组 uuid 查不到实例（uuid={}），稍后重试",
+                            input.group_uuid
+                        ),
+                    };
+                }
+                Err(failure) => return group_result(classify_group_failure(failure)),
+            }
+        }
+        Err(failure) => return group_result(classify_group_failure(failure)),
+    };
+
+    // ---- 5. 详情（回捞路径已带回编号，不再多打一次） ----
+    let mut detail = match reclaimed {
+        Some(detail) => detail,
+        None => {
+            tracing::debug!(stage = "detail", instance_code = %instance_code, "开始查询组实例编号");
+            match get_instance(transport, sleeper, tokens, &instance_code).await {
+                Ok(GetOutcome::Found(detail)) => *detail,
+                Ok(GetOutcome::NotFound) => {
+                    return DispatchResult::CreatedPendingBackfill {
+                        message: "聚合组实例已确认，详情暂不可见，请稍后重试。".into(),
+                        instance_code,
+                        serial_number: None,
+                    };
+                }
+                Err(failure) => {
+                    return DispatchResult::CreatedPendingBackfill {
+                        message: super::approval_feedback::outbound_reason(&failure),
+                        instance_code,
+                        serial_number: None,
+                    };
+                }
+            }
+        }
+    };
+    fill_department_name(
+        transport,
+        sleeper,
+        tokens,
+        input.department_field,
+        &mut detail,
+    )
+    .await;
+    finish_group_backfill(backfill, input, detail).await
+}
+
+/// 组回填：先把同一编号批量写进**全部成员**，全部落库后才逐成员写扩展字段。
+///
+/// 部分失败返回 [`DispatchResult::CreatedPendingBackfill`] 让整组重试——重复写同一
+/// 编号是幂等的；把部分成功当成功会让一部分成员永久缺编号（设计 §4.6 第 8 步）。
+#[allow(dead_code)]
+async fn finish_group_backfill(
+    backfill: &dyn Backfill,
+    input: &GroupDispatchInput<'_>,
+    detail: InstanceDetail,
+) -> DispatchResult {
+    let Some(serial_number) = serial_number_of(&detail) else {
+        tracing::info!(stage = "detail", instance_code = %detail.instance_code, "聚合组实例已创建但编号尚未生成，等待下一轮重试");
+        return DispatchResult::CreatedPendingBackfill {
+            message: "聚合组实例已确认，编号尚未生成，请稍后重试。".into(),
+            instance_code: detail.instance_code.clone(),
+            serial_number: None,
+        };
+    };
+    let link = match super::approval::instance_applink(&detail.instance_code) {
+        Ok(link) => link,
+        Err(error) => {
+            tracing::warn!(stage = "backfill", "聚合组实例链接生成失败，等待下一轮重试");
+            return DispatchResult::CreatedPendingBackfill {
+                message: format!("审批编号：{serial_number}；实例链接暂不可用：{error}"),
+                instance_code: detail.instance_code.clone(),
+                serial_number: Some(serial_number),
+            };
+        }
+    };
+    let value = serde_json::json!({"text": serial_number, "link": link});
+    let rows: Vec<(String, Value)> = input
+        .members
+        .iter()
+        .map(|member| (member.record_id.to_string(), value.clone()))
+        .collect();
+    tracing::debug!(
+        stage = "backfill",
+        instance_code = %detail.instance_code,
+        member_count = rows.len(),
+        "开始批量回填聚合组编号"
+    );
+    let report = backfill_in_chunks(backfill, input.backfill_field_name, &rows).await;
+    if !report.failed.is_empty() {
+        let failed_ids: Vec<&str> = report
+            .failed
+            .iter()
+            .take(5)
+            .map(|(record_id, _)| record_id.as_str())
+            .collect();
+        tracing::warn!(
+            stage = "backfill",
+            failed = report.failed.len(),
+            written = report.written.len(),
+            "聚合组编号回填部分失败，整组重试"
+        );
+        return DispatchResult::CreatedPendingBackfill {
+            message: format!(
+                "审批编号：{serial_number}；{} 条成员回填失败（{}），整组重试",
+                report.failed.len(),
+                failed_ids.join("、")
+            ),
+            instance_code: detail.instance_code.clone(),
+            serial_number: Some(serial_number),
+        };
+    }
+    if let Err(failure) = write_group_extended(backfill, input, &detail).await {
+        tracing::warn!(stage = "backfill", kind = ?failure.kind, "聚合组扩展字段回填失败");
+        return DispatchResult::CreatedPendingBackfill {
+            message: format!(
+                "审批编号：{serial_number}；扩展字段回填失败：{}",
+                super::approval_feedback::outbound_reason(&failure)
+            ),
+            instance_code: detail.instance_code.clone(),
+            serial_number: Some(serial_number),
+        };
+    }
+    DispatchResult::Backfilled {
+        serial_number,
+        instance_code: detail.instance_code.clone(),
+    }
+}
+
+/// 逐成员写扩展字段与发起人列（与单条路径同一份 [`write_extended`]）。
+///
+/// 顶层控件值相同，所以每个成员的写入内容只差 `record_id` 与自己的单元格——发起人
+/// 列无条件覆盖成点击人（000a1a3 起）：组内每条记录都记下真正的发起人。
+#[allow(dead_code)]
+async fn write_group_extended(
+    backfill: &dyn Backfill,
+    input: &GroupDispatchInput<'_>,
+    detail: &InstanceDetail,
+) -> Result<(), OutboundFailure> {
+    for member in input.members {
+        let single = DispatchInput {
+            fields: input.fields,
+            context: input.context,
+            execution: input.execution,
+            coordinates: input.coordinates,
+            record_id: member.record_id,
+            cells: member.cells,
+            applicant_field: input.applicant_field,
+            applicant: input.applicant_open_id.map(str::to_string),
+            backfill_field_name: input.backfill_field_name,
+            status_field: input.status_field,
+            flow_field: input.flow_field,
+            start_time_field: input.start_time_field,
+            end_time_field: input.end_time_field,
+            department_field: input.department_field,
+            handler_field: input.handler_field,
+            approval_code: input.approval_code,
+            widgets: input.widgets,
+            form_snapshot: input.form_snapshot.to_string(),
+            timezone_offset: input.timezone_offset,
+        };
+        write_extended(backfill, &single, detail).await?;
+    }
+    Ok(())
 }
 
 /// 在上传附件/图片和创建审批之前校验关联实例；同一实例在一单中只查询一次。
@@ -3799,5 +4222,381 @@ mod tests {
             report.written.len(),
             crate::addon::feishu::domain::bitable::BACKFILL_CHUNK + 1
         );
+    }
+
+    // ---- 聚合组派发（Task 8） ----
+
+    /// 组夹具：第一条是 leader（`group_seq=0`），其余是成员。
+    struct GroupFixture {
+        member_cells: Vec<serde_json::Map<String, Value>>,
+        widgets: Vec<WidgetMap>,
+        group_key: String,
+        group_uuid: String,
+    }
+
+    impl GroupFixture {
+        fn new() -> Self {
+            let mut top = widget("top", "input");
+            top.bitable_field = "fld_top".to_string();
+            let mut desc = widget("desc", "textarea");
+            desc.bitable_field = "fld_desc".to_string();
+            Self {
+                member_cells: vec![
+                    cells(&[("fld_top", json!("共同")), ("fld_desc", json!("明细 A"))]),
+                    cells(&[("fld_top", json!("共同")), ("fld_desc", json!("明细 B"))]),
+                ],
+                widgets: vec![top, desc],
+                group_key: "gk00000000000000000000000000test".to_string(),
+                group_uuid: "0f7a65c4-2c56-4a05-9bd3-57e0f1f75b3b".to_string(),
+            }
+        }
+
+        fn members(&self) -> Vec<GroupMemberInput<'_>> {
+            self.member_cells
+                .iter()
+                .enumerate()
+                .map(|(index, cells)| GroupMemberInput {
+                    record_id: if index == 0 { "recA" } else { "recB" },
+                    cells,
+                    attachment_codes: BTreeMap::new(),
+                })
+                .collect()
+        }
+    }
+
+    /// 组装组输入；`members` 由调用方提供（生命周期跟着夹具走）。
+    fn group_input<'a>(
+        fixture: &'a GroupFixture,
+        members: &'a [GroupMemberInput<'a>],
+    ) -> GroupDispatchInput<'a> {
+        GroupDispatchInput {
+            fields: &[],
+            context: None,
+            execution: None,
+            coordinates: &COORDINATES,
+            group_key: &fixture.group_key,
+            group_uuid: &fixture.group_uuid,
+            instance_code: None,
+            backfill_field_name: "审批编号",
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
+            approval_code: "4202AD96-9EC1",
+            widgets: &fixture.widgets,
+            form_snapshot: r#"[{"id":"top","type":"input"},{"id":"detail","type":"fieldList","children":[{"id":"desc","type":"textarea"}]}]"#,
+            timezone_offset: FixedOffset::from_seconds(8 * 3600)
+                .unwrap_or_else(|error| panic!("{error}")),
+            applicant_field: "fld_applicant",
+            applicant_open_id: Some("ou_clicker"),
+            members,
+        }
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_sends_one_create_with_two_detail_rows() {
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-GROUP")),
+            (200, &ok_detail("INST-GROUP", "SERIAL-G")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &group_input(&fixture, &members),
+        )
+        .await;
+        assert_eq!(
+            result,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL-G".to_string(),
+                instance_code: "INST-GROUP".to_string(),
+            }
+        );
+        let requests = transport
+            .full_requests
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let creates: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/approval/v4/instances"))
+            .collect();
+        assert_eq!(creates.len(), 1, "一次 create 覆盖整组");
+        assert_eq!(
+            creates[0].json_body.as_ref().map(|body| &body["uuid"]),
+            Some(&json!(fixture.group_uuid)),
+            "create 的幂等键必须是组 uuid"
+        );
+        let form: Value = serde_json::from_str(
+            creates[0]
+                .json_body
+                .as_ref()
+                .unwrap_or_else(|| panic!("缺创建请求"))["form"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            form[1]["value"],
+            json!([
+                [{"id":"desc","type":"textarea","value":"明细 A"}],
+                [{"id":"desc","type":"textarea","value":"明细 B"}]
+            ]),
+            "明细必须一成员一行"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_never_writes_instance_code_to_leader() {
+        // leader 任务行永远不持有组实例码：组确认由 GroupExecutionTransport 写组行。
+        // 这里钉住编排层**不把实例码塞进任何任务行字段**——返回的 instance_code 只
+        // 供 worker 写组行，成员/leader 行不出现在回填写入里。
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-ONLY-GROUP")),
+            (200, &ok_detail("INST-ONLY-GROUP", "SERIAL-G")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        assert!(matches!(
+            dispatch_group(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &backfill,
+                &group_input(&fixture, &members)
+            )
+            .await,
+            DispatchResult::Backfilled { .. }
+        ));
+        assert!(
+            backfill.raw_writes().iter().all(|(_, field, value)| {
+                field != "instance_code" && value.as_str() != Some("INST-ONLY-GROUP")
+            }),
+            "组实例码不得作为任何单元格的值：{:?}",
+            backfill.raw_writes()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_recovers_by_group_uuid_on_60012() {
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (400, &uuid_conflict()),
+            (200, &ok_detail("INST-RECOVERED", "SERIAL-R")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &group_input(&fixture, &members),
+        )
+        .await;
+        assert_eq!(
+            result,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL-R".to_string(),
+                instance_code: "INST-RECOVERED".to_string(),
+            }
+        );
+        let requests = transport.requests();
+        assert!(
+            requests[1].contains(&fixture.group_uuid),
+            "60012 必须按**组 uuid** 回捞：{requests:?}"
+        );
+        assert_eq!(
+            backfill.writes().len(),
+            2,
+            "两名成员都写同一编号：{:?}",
+            backfill.writes()
+        );
+        assert!(backfill
+            .writes()
+            .iter()
+            .all(|(_, _, serial)| serial == "SERIAL-R"));
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_returns_created_pending_backfill_on_partial_failure() {
+        // 一条成员回填失败 = 整组重试，绝不把部分成功当完成。
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-PARTIAL")),
+            (200, &ok_detail("INST-PARTIAL", "SERIAL-P")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::with_poison("recB");
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &group_input(&fixture, &members),
+        )
+        .await;
+        assert!(
+            matches!(
+                &result,
+                DispatchResult::CreatedPendingBackfill { instance_code, serial_number, message }
+                    if instance_code == "INST-PARTIAL"
+                        && serial_number.as_deref() == Some("SERIAL-P")
+                        && message.contains("回填失败")
+            ),
+            "{result:?}"
+        );
+        // 失败的成员不得被写成扩展字段：只写了成功那一条的编号。
+        assert!(
+            backfill
+                .batches()
+                .iter()
+                .all(|(record_id, _)| record_id != "recB"),
+            "部分失败时不得为失败成员写扩展字段：{:?}",
+            backfill.batches()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_fatal_writes_no_backfill_cells() {
+        // 飞书明确拒绝（1390013 = 不支持自定义审批流程）：整组暂停，回填列一个字都不写。
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![(
+            400,
+            r#"{"code":1390013,"msg":"unsupported custom workflow"}"#,
+        )]);
+        let backfill = RecordingBackfill::default();
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &group_input(&fixture, &members),
+        )
+        .await;
+        assert!(
+            matches!(result, DispatchResult::Terminal { .. }),
+            "Fatal 必须判整组暂停：{result:?}"
+        );
+        assert!(
+            backfill.raw_writes().is_empty(),
+            "Fatal 不得写任何回填单元格：{:?}",
+            backfill.raw_writes()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_writes_extended_fields_and_applicant_per_member() {
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-EXT")),
+            (200, &ok_detail("INST-EXT", "SERIAL-E")),
+            (200, r#"{"code":0,"data":{}}"#),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let mut input = group_input(&fixture, &members);
+        input.status_field = Some("fld_status");
+        input.start_time_field = Some("fld_start");
+        let result = dispatch_group(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await;
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+        let batches = backfill.batches();
+        assert_eq!(batches.len(), 2, "每个成员各一次合并写：{batches:?}");
+        for (record_id, fields) in &batches {
+            assert!(
+                fields.contains(&"fld_applicant".to_string()),
+                "发起人列必须逐成员写：{record_id} {fields:?}"
+            );
+            assert!(
+                fields.contains(&"fld_status".to_string()),
+                "六个扩展字段同样逐成员写：{record_id} {fields:?}"
+            );
+        }
+        let applicants: Vec<_> = backfill
+            .raw_writes()
+            .into_iter()
+            .filter(|(_, field, _)| field == "fld_applicant")
+            .collect();
+        assert_eq!(applicants.len(), 2, "两条成员记录各写一次发起人");
+        assert!(applicants
+            .iter()
+            .all(|(_, _, value)| value == &json!([{"id": "ou_clicker"}])));
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_recovers_existing_instance_without_creating() {
+        // 组行已有实例码（上一轮创建成功但本地确认前后崩溃）：只恢复详情并回填，
+        // **不再 create**——否则同一组会多出一个审批单。
+        let fixture = GroupFixture::new();
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_detail("INST-EXISTING", "SERIAL-X")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let mut input = group_input(&fixture, &members);
+        input.instance_code = Some("INST-EXISTING");
+        let result = dispatch_group(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await;
+        assert_eq!(
+            result,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL-X".to_string(),
+                instance_code: "INST-EXISTING".to_string(),
+            }
+        );
+        let created = transport
+            .full_requests
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .iter()
+            .filter(|request| {
+                request.method == crate::addon::feishu::domain::outbound::OutboundMethod::Post
+                    && request.url.ends_with("/approval/v4/instances")
+            })
+            .count();
+        assert_eq!(created, 0, "已有实例码时不得再次创建");
+        assert_eq!(backfill.writes().len(), 2, "全部成员仍要回填同一编号");
+    }
+
+    #[test]
+    fn group_failure_classification_pauses_only_on_fatal() {
+        for (kind, paused) in [
+            (FailureKind::Fatal { code: 1390015 }, true),
+            (
+                FailureKind::Retry {
+                    retry_after_seconds: None,
+                },
+                false,
+            ),
+            (FailureKind::TokenExpired, false),
+            (FailureKind::InstanceNotFound, false),
+            (FailureKind::UuidConflict, false),
+        ] {
+            let outcome = classify_group_failure(OutboundFailure {
+                kind,
+                message: "原文".to_string(),
+            });
+            assert_eq!(
+                matches!(outcome, GroupOutcome::Paused { .. }),
+                paused,
+                "{kind:?}"
+            );
+        }
     }
 }
