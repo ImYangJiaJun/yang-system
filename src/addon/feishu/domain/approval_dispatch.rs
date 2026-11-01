@@ -807,7 +807,8 @@ pub(crate) struct GroupMemberInput<'a> {
 #[allow(dead_code)]
 pub(crate) struct GroupDispatchInput<'a> {
     pub(crate) fields: &'a [FieldItem],
-    /// 仅在「60012 回捞未命中」时用来把组行阶段写回 `ready`（设计 §4.6 第 3 步）。
+    /// 组行阶段与实例码的落库入口：`60012` 回捞未命中时把阶段写回 `ready`，
+    /// 命中时把实例码与 `created` 写回组行（设计 §4.6 第 3/7 步）。
     pub(crate) context: Option<&'a super::context::FeishuContext>,
     pub(crate) execution: Option<&'a super::approval_execution::TaskClaim>,
     pub(crate) coordinates: &'a BitableCoordinates,
@@ -1048,6 +1049,31 @@ pub(crate) async fn dispatch_group(
         }
         Err(failure) => return group_result(classify_group_failure(failure)),
     };
+
+    // 实例码必须落回**组行**（leader 行永远不持有组实例码，设计 §4.1）。
+    //
+    // `create` 成功时 `GroupExecutionTransport` 已经写过一次；但 `60012` 回捞
+    // 那条路只把阶段确认成 `lookup`，**实例码还在详情里没落库**——不回写的话
+    // 组行 `instance_code` 永久为 NULL：`maintain_groups` 以它判定「已提交组」，
+    // 成员编号被清空后就不会再 reopen 补回填（设计 §4.6 第 3/7 步）。
+    if let (Some(context), Some(claim)) = (input.context, input.execution) {
+        if super::approval_execution::confirm_group_effect(
+            context,
+            claim,
+            input.group_key,
+            "created",
+            Some(&instance_code),
+        )
+        .await
+        .is_err()
+        {
+            return DispatchResult::CreatedPendingBackfill {
+                message: "聚合组实例已存在，但组行确认失败，已暂停后续写入".into(),
+                instance_code,
+                serial_number: None,
+            };
+        }
+    }
 
     // ---- 5. 详情（回捞路径已带回编号，不再多打一次） ----
     let mut detail = match reclaimed {
@@ -4426,6 +4452,108 @@ mod tests {
             .writes()
             .iter()
             .all(|(_, _, serial)| serial == "SERIAL-R"));
+    }
+
+    /// 真实库上下文：组派发的实例码回写只碰 MySQL，出站仍由脚本传输接管。
+    async fn group_dispatch_context(
+    ) -> anyhow::Result<Arc<crate::addon::feishu::domain::context::FeishuContext>> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许独立测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        Ok(crate::addon::feishu::build_context(
+            Arc::new(database.pool().clone()),
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?)
+    }
+
+    /// `60012` 回捞命中必须把实例码写回**组行**（设计 §4.6 第 3/7 步）。
+    ///
+    /// 复现：上一轮 `create` 已成功但响应丢失——组行停在 `lookup`、`instance_code`
+    /// 为 NULL；下一次批量点击重发 `create` 得 60012 → 按组 uuid 回捞命中。
+    /// 只取详情不回写会让组行 `instance_code` 永久为 NULL，而 `maintain_groups`
+    /// 以它判定「已提交组」：成员编号被清空后再也不会被 reopen 补回填。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_dispatch_60012_recovery_persists_instance_code_to_group_row(
+    ) -> anyhow::Result<()> {
+        let context = group_dispatch_context().await?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id: i64 = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('组回捞落码测试','appGroupRecover',?,'DEF-GROUP','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}"))
+            .execute(context.approval_configs().pool())
+            .await?
+            .last_insert_id() as i64;
+        let fixture = {
+            let mut fixture = GroupFixture::new();
+            // 组 uuid 有全局唯一索引：每次运行都要换一个，否则重跑必撞。
+            fixture.group_uuid = uuid::Uuid::new_v4().to_string();
+            fixture
+        };
+        // 组行停在 `lookup` 且无实例码：上一轮 create 成功、本地确认前中断。
+        sqlx::query("INSERT INTO feishu_approval_group (config_id,group_key,uuid,signature_hash,effect_phase,instance_code,created_at,updated_at) VALUES (?,?,?,'sig','lookup',NULL,NOW(),NOW())")
+            .bind(config_id)
+            .bind(&fixture.group_key)
+            .bind(&fixture.group_uuid)
+            .execute(context.approval_groups().pool())
+            .await?;
+        let leader_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) VALUES (?,?,?,'pending',?,0,NOW(),NOW())")
+            .bind(config_id)
+            .bind(format!("{namespace}-leader"))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&fixture.group_key)
+            .execute(context.approval_tasks().pool())
+            .await?
+            .last_insert_id() as i64;
+        let claim = crate::addon::feishu::domain::approval_execution::claim_ready(
+            &context,
+            0,
+            Some(leader_id),
+            1,
+        )
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("组 leader 未被认领"))?;
+
+        let members = fixture.members();
+        let transport = ScriptedTransport::new(vec![
+            (400, &uuid_conflict()),
+            (200, &ok_detail("INST-RECOVERED", "SERIAL-R")),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let mut input = group_input(&fixture, &members);
+        input.context = Some(context.as_ref());
+        input.execution = Some(&claim);
+        let result = dispatch_group(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await;
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+
+        let (phase, instance): (String, Option<String>) = sqlx::query_as(
+            "SELECT effect_phase,instance_code FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&fixture.group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(phase, "created", "回捞命中后组行阶段必须落实为 created");
+        assert_eq!(
+            instance.as_deref(),
+            Some("INST-RECOVERED"),
+            "回捞到的实例码必须写回组行"
+        );
+        Ok(())
     }
 
     #[tokio::test]

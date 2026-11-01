@@ -299,6 +299,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::detaching_leader_promotes_next_member", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合 60012 回捞落码组行集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_dispatch::tests::group_dispatch_60012_recovery_persists_instance_code_to_group_row", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "聚合删除配置清理组行集成测试",
         ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::delete_config::tests::delete_config_removes_group_rows_members_and_applicants", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
