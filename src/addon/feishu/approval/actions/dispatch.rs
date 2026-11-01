@@ -655,6 +655,9 @@ async fn handle_dispatch(
                 record_id,
                 initiator,
                 input,
+                // 单条点击是显式「给我单独建一单」：命中聚合组时先摘组，
+                // 并允许在编号已回填的记录上再建一个实例（决策 7）。
+                true,
             )
             .await
             {
@@ -910,8 +913,14 @@ fn applicant_failure_message(failure: &OutboundFailure) -> String {
 ///   走实例恢复 + 重新回填，不新建审批），文案换成「已发起过」。
 /// - `backfilled` 且单元格仍有值 → 维持原有 Queued 行为，不重开。
 /// - 其它状态 → 与原逻辑一致，点击即人工重试。
-fn click_reopen_plan(prior_state: &str, backfill_empty: bool) -> (bool, bool) {
+/// - `force_solo`（本次点击从聚合组摘出）：即使编号还在表里也重开——组实例的编号
+///   属于组行，成员行自己从未建过实例，这次点击就是它的第一个实例（决策 7）。
+///   编号仍会被新实例覆盖，以最后写入为准。
+fn click_reopen_plan(prior_state: &str, backfill_empty: bool, force_solo: bool) -> (bool, bool) {
     let backfilled = prior_state == "backfilled";
+    if force_solo {
+        return (true, backfilled && backfill_empty);
+    }
     (
         if backfilled { backfill_empty } else { true },
         backfilled && backfill_empty,
@@ -935,6 +944,7 @@ async fn dispatch_single(
     record_id: &str,
     initiator: &str,
     request: &DispatchInput,
+    force_solo: bool,
 ) -> Result<DispatchOutcome, BaseError> {
     tracing::debug!(
         stage = "config",
@@ -1170,17 +1180,46 @@ async fn dispatch_single(
         .map_err(|e| BaseError::ConfigError(e.to_string()))?;
     // 点击前任务行停在什么状态：`backfilled` 且源记录的回填列被清空，就是
     // 「用户删掉编号后再点一次」——只恢复原实例并重新回填，不新建审批。
-    let prior_state = context
+    let task_row = context
         .approval_tasks()
         .query()
-        .select_fields(&["state"])?
+        .select_fields(&["state", "group_id"])?
         .where_primary_key_eq(serde_json::json!(task_id))?
         .optional()
         .await?
-        .and_then(|row| row.optional::<String>("state").ok().flatten())
-        .unwrap_or_default();
+        .ok_or_else(|| BaseError::ConfigError("任务受理后不可见".into()))?;
+    let prior_state = task_row.optional::<String>("state")?.unwrap_or_default();
+    // 组内任务被单条点击：先摘组再按单条语义建单（设计 §4.9）。摘组在独立事务内
+    // 锁配置行、复检租约；组内有在途执行时本轮不动，返回可重试提示。
+    let grouped = task_row
+        .optional::<String>("group_id")?
+        .is_some_and(|value| !value.trim().is_empty());
+    let mut was_group_member = false;
+    if grouped {
+        match approval_execution::detach_from_group(context, task_id)
+            .await
+            .map_err(|e| BaseError::ConfigError(e.to_string()))?
+        {
+            approval_execution::DetachOutcome::Busy => {
+                return Ok(DispatchOutcome::success(
+                    Outcome::Accepted,
+                    Some(config_id),
+                    Some(base_token),
+                    Some(table_id),
+                    true,
+                    FeedbackStatus::Queued,
+                    "该记录所在的聚合组正在处理，请稍后重新点击".into(),
+                    None,
+                ));
+            }
+            approval_execution::DetachOutcome::Detached { .. }
+            | approval_execution::DetachOutcome::GroupRemoved => was_group_member = true,
+            approval_execution::DetachOutcome::NotGrouped => {}
+        }
+    }
     let backfill_empty = cells.get(&backfill_field).map_or(true, is_empty);
-    let (should_reopen, reinitiated) = click_reopen_plan(&prior_state, backfill_empty);
+    let (should_reopen, reinitiated) =
+        click_reopen_plan(&prior_state, backfill_empty, force_solo && was_group_member);
     let claim = approval_execution::claim_ready(context, 0, Some(task_id), 1)
         .await
         .map_err(|e| BaseError::ConfigError(e.to_string()))?
@@ -1950,26 +1989,37 @@ mod tests {
         };
         // 点击闸门：backfilled + 单元格已清空才重开，否则维持 Queued。
         assert_eq!(
-            click_reopen_plan("backfilled", true),
+            click_reopen_plan("backfilled", true, false),
             (true, true),
             "清空编号后点击应重开并改文案"
         );
         assert_eq!(
-            click_reopen_plan("backfilled", false),
+            click_reopen_plan("backfilled", false, false),
             (false, false),
             "编号还在表里时不重开"
         );
-        for state in ["pending", "review", "terminal", "unnotified"] {
+        for state in ["pending", "review", "terminal", "unnotified", "paused"] {
             assert_eq!(
-                click_reopen_plan(state, false),
+                click_reopen_plan(state, false, false),
                 (true, false),
                 "{state} 点击即人工重试"
             );
         }
         assert_eq!(
-            click_reopen_plan("pending", true),
+            click_reopen_plan("pending", true, false),
             (true, false),
             "非 backfilled 的空单元格不是「重新发起」"
+        );
+        // 摘组后的单条点击（force_solo）：编号仍在表里也强制重开，建第二个实例。
+        assert_eq!(
+            click_reopen_plan("backfilled", false, true),
+            (true, false),
+            "组成员摘组后即使编号还在也必须独立建单"
+        );
+        assert_eq!(
+            click_reopen_plan("backfilled", true, true),
+            (true, true),
+            "清空编号的组成员仍按「重新发起」改文案"
         );
         for status in [
             FeedbackStatus::Waiting,
@@ -3517,5 +3567,123 @@ mod tests {
             "校验不过时不该再发别的请求（尤其不该有创建实例）：{:#?}",
             transport.seen()
         );
+    }
+
+    /// 真实库上下文：这些用例只碰 MySQL（不建 HTTP 栈、不外发）。
+    async fn real_mysql_context() -> anyhow::Result<(yang_db::Database, Arc<FeishuContext>)> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许独立测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        let context = crate::addon::feishu::build_context(
+            Arc::new(database.pool().clone()),
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        Ok((database, context))
+    }
+
+    /// 组内任务被单条点击时：先摘组，`force_solo` 跳过「编号还在表里就 Queued」的
+    /// 短路，让这条记录以自己的 uuid 再建一个实例（设计 §4.9 决策 7）。
+    ///
+    /// 这里验的是**建第二个实例所需的数据库前提**：摘组成功、行被重开、可被认领，
+    /// 且实例幂等键是成员行自己的 uuid 而不是组 uuid。真正的出站创建由
+    /// `dispatch_one` 的编排测试覆盖（需要完整的 Feishu 凭证栈）。
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn force_solo_creates_second_instance_for_submitted_group_member() -> anyhow::Result<()> {
+        let (_database, context) = real_mysql_context().await?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id: i64 = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('单条摘组测试','appSolo',?,'DEF-SOLO','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}"))
+            .execute(context.approval_configs().pool())
+            .await?
+            .last_insert_id() as i64;
+        let group_key = format!("gk{namespace}");
+        let group_uuid = uuid::Uuid::new_v4().to_string();
+        let group_instance = "INST-SUBMITTED";
+        sqlx::query("INSERT INTO feishu_approval_group (config_id,group_key,uuid,signature_hash,effect_phase,instance_code,created_at,updated_at) VALUES (?,?,?,'sig','created',?,NOW(),NOW())")
+            .bind(config_id)
+            .bind(&group_key)
+            .bind(&group_uuid)
+            .bind(group_instance)
+            .execute(context.approval_groups().pool())
+            .await?;
+        let leader_uuid = uuid::Uuid::new_v4().to_string();
+        let member_uuid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) VALUES (?,?,?,'backfilled',?,0,NOW(),NOW())")
+            .bind(config_id)
+            .bind(format!("{namespace}-leader"))
+            .bind(&leader_uuid)
+            .bind(&group_key)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        let member_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) VALUES (?,?,?,'backfilled',?,1,NOW(),NOW())")
+            .bind(config_id)
+            .bind(format!("{namespace}-member"))
+            .bind(&member_uuid)
+            .bind(&group_key)
+            .execute(context.approval_tasks().pool())
+            .await?
+            .last_insert_id() as i64;
+
+        // 组成员被单条点击：先从组里摘出（组实例仍由剩余 leader 收尾）。
+        assert_eq!(
+            approval_execution::detach_from_group(&context, member_id).await?,
+            approval_execution::DetachOutcome::Detached { promoted: None },
+            "普通成员摘组不提升 leader"
+        );
+        // 回填列仍有编号 —— 普通点击会在 `backfilled` 上短路成 Queued；
+        // force_solo 必须跳过它，否则组成员永远建不出自己的实例。
+        assert!(
+            click_reopen_plan("backfilled", false, true).0,
+            "force_solo 必须跳过「编号还在表里」的短路"
+        );
+        assert!(
+            approval_execution::reopen(&context, member_id).await?,
+            "摘组后的成员行必须能重开"
+        );
+        let claim = approval_execution::claim_ready(&context, 0, Some(member_id), 1)
+            .await?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("摘组后的成员行未被认领"))?;
+        assert_eq!(claim.id, member_id);
+        let (uuid, instance): (String, Option<String>) =
+            sqlx::query_as("SELECT uuid,instance_code FROM feishu_approval_task WHERE id=?")
+                .bind(member_id)
+                .fetch_one(context.approval_tasks().pool())
+                .await?;
+        assert_eq!(uuid, member_uuid, "第二个实例用成员行自己的幂等键");
+        assert_ne!(
+            uuid, group_uuid,
+            "不得复用组 uuid（否则 60012 回捞到组实例）"
+        );
+        assert_eq!(instance, None, "成员行不得继承组实例码");
+        // 组行与 leader 仍在：第二个实例不影响原组的收尾路径。
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_task WHERE group_id=? AND group_seq=0",
+        )
+        .bind(&group_key)
+        .fetch_one(context.approval_tasks().pool())
+        .await?;
+        assert_eq!(remaining, 1, "原组由 leader 继续收尾");
+        let group_instance_stored: Option<String> = sqlx::query_scalar(
+            "SELECT instance_code FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(group_instance_stored.as_deref(), Some(group_instance));
+        Ok(())
     }
 }

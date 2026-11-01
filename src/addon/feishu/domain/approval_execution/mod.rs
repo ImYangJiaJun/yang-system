@@ -2,9 +2,12 @@
 
 mod repository;
 mod transport;
+// 组执行原语先落地并自带真实库测试；生产消费者（组派发、组处理）在后续任务接入。
+#[allow(unused_imports)]
 pub(crate) use repository::{
-    admit, attach_initiator, begin_effect, claim_ready, confirm_effect, facts, finish, is_owned,
-    mark_unknown, reopen, TaskClaim,
+    admit, attach_initiator, begin_effect, begin_group_effect, claim_ready, confirm_effect,
+    confirm_group_effect, detach_from_group, facts, finish, finish_group, is_owned, mark_unknown,
+    reopen, DetachOutcome, TaskClaim,
 };
 pub(crate) use transport::ExecutionTransport;
 
@@ -545,6 +548,412 @@ mod tests {
             row.insert("state", serde_json::json!("backfilled"));
             assert!(!finish(&context, &claim, &row, false).await?, "{change}");
         }
+        Ok(())
+    }
+
+    /// 插入一行组行（阶段与实例码由调用方给定）。
+    async fn insert_group(
+        context: &FeishuContext,
+        config_id: i64,
+        group_key: &str,
+        phase: &str,
+        instance_code: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query("INSERT INTO feishu_approval_group (config_id,group_key,uuid,signature_hash,effect_phase,instance_code,created_at,updated_at) VALUES (?,?,?,?,?,?,NOW(),NOW())")
+            .bind(config_id)
+            .bind(group_key)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind("sig")
+            .bind(phase)
+            .bind(instance_code)
+            .execute(context.approval_groups().pool())
+            .await?;
+        Ok(())
+    }
+
+    /// 插入一行组内任务行：`seq=0` 是 leader，`>=1` 是成员。
+    async fn insert_group_task(
+        context: &FeishuContext,
+        config_id: i64,
+        group_key: &str,
+        seq: i64,
+        record_id: &str,
+        state: &str,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,group_id,group_seq,created_at,updated_at) VALUES (?,?,?,?,?,?,NOW(),NOW())")
+            .bind(config_id)
+            .bind(record_id)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(state)
+            .bind(group_key)
+            .bind(seq)
+            .execute(context.approval_tasks().pool())
+            .await?
+            .last_insert_id() as i64)
+    }
+
+    async fn max_task_id(context: &FeishuContext) -> anyhow::Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COALESCE(MAX(id),0) FROM feishu_approval_task")
+                .fetch_one(context.approval_tasks().pool())
+                .await?,
+        )
+    }
+
+    async fn task_group_columns(
+        context: &FeishuContext,
+        task_id: i64,
+    ) -> anyhow::Result<(Option<String>, i64, String, String)> {
+        Ok(sqlx::query_as(
+            "SELECT group_id,group_seq,state,effect_phase FROM feishu_approval_task WHERE id=?",
+        )
+        .bind(task_id)
+        .fetch_one(context.approval_tasks().pool())
+        .await?)
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn claim_ready_skips_group_members_in_batch_mode() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let config_id = snapshot.config["id"].as_i64().context("配置 id 应存在")?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let group_key = format!("gk{namespace}");
+        insert_group(&context, config_id, &group_key, "ready", None).await?;
+        // 游标必须取在插入之前：`id>after` 只认本轮新建的行。
+        let after = max_task_id(&context).await?;
+        let leader = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            0,
+            &format!("{namespace}-leader"),
+            "pending",
+        )
+        .await?;
+        let member = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            1,
+            &format!("{namespace}-member"),
+            "pending",
+        )
+        .await?;
+
+        let claimed: Vec<i64> = claim_ready(&context, after, None, 10)
+            .await?
+            .iter()
+            .map(|claim| claim.id)
+            .collect();
+        assert!(claimed.contains(&leader), "批量认领必须认 leader");
+        assert!(
+            !claimed.contains(&member),
+            "批量认领不得认组成员：执行副作用绑定在 leader 上"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn claim_ready_by_id_allows_group_member() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let config_id = snapshot.config["id"].as_i64().context("配置 id 应存在")?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let group_key = format!("gk{namespace}");
+        insert_group(&context, config_id, &group_key, "ready", None).await?;
+        let member = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            1,
+            &format!("{namespace}-member"),
+            "pending",
+        )
+        .await?;
+
+        let claims = claim_ready(&context, 0, Some(member), 1).await?;
+        assert_eq!(claims.len(), 1, "单条认领不受组过滤限制");
+        assert_eq!(claims[0].id, member);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn claim_ready_accepts_group_leader_in_lookup_phase() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let config_id = snapshot.config["id"].as_i64().context("配置 id 应存在")?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let group_key = format!("gk{namespace}");
+        insert_group(&context, config_id, &group_key, "lookup", None).await?;
+        let after = max_task_id(&context).await?;
+        let leader = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            0,
+            &format!("{namespace}-leader"),
+            "pending",
+        )
+        .await?;
+        // 上一个实例的租约过期：清扫必须放过组 leader 的 lookup，否则这里会先被
+        // 扫成 review，回捞永远等不到。
+        sqlx::query("UPDATE feishu_approval_task SET effect_phase='lookup',worker_id='stale-owner',lease_until=UNIX_TIMESTAMP()-10 WHERE id=?")
+            .bind(leader)
+            .execute(context.approval_tasks().pool())
+            .await?;
+
+        let claims = claim_ready(&context, after, None, 10).await?;
+        assert!(
+            claims.iter().any(|claim| claim.id == leader),
+            "组 leader 的 lookup 阶段必须可认领（60012 回捞）"
+        );
+        let (_, _, state, phase) = task_group_columns(&context, leader).await?;
+        assert_eq!(
+            (state.as_str(), phase.as_str()),
+            ("pending", "lookup"),
+            "过期租约清扫不得把组 leader 的 lookup 扫成 review"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn reopen_resets_paused_rows() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let claim = claimed(&context, &snapshot).await?;
+        sqlx::query(
+            "UPDATE feishu_approval_task SET state='paused',worker_id=NULL,lease_until=NULL WHERE id=?",
+        )
+        .bind(claim.id)
+        .execute(context.approval_tasks().pool())
+        .await?;
+        assert!(
+            reopen(&context, claim.id).await?,
+            "暂停行必须可被重新点击拉起"
+        );
+        let (_, _, state, _) = task_group_columns(&context, claim.id).await?;
+        assert_eq!(state, "pending");
+
+        // 有有效租约时不能抢：暂停态同样受租约保护。
+        sqlx::query("UPDATE feishu_approval_task SET state='paused',worker_id='w',lease_until=UNIX_TIMESTAMP()+300 WHERE id=?")
+            .bind(claim.id)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        assert!(
+            !reopen(&context, claim.id).await?,
+            "执行中的暂停行不得被重开"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn finish_group_clears_lease_and_writes_member_states() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let config_id = snapshot.config["id"].as_i64().context("配置 id 应存在")?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let group_key = format!("gk{namespace}");
+        insert_group(&context, config_id, &group_key, "ready", None).await?;
+        let leader = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            0,
+            &format!("{namespace}-leader"),
+            "pending",
+        )
+        .await?;
+        let member_one = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            1,
+            &format!("{namespace}-member-1"),
+            "pending",
+        )
+        .await?;
+        let member_two = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            2,
+            &format!("{namespace}-member-2"),
+            "pending",
+        )
+        .await?;
+        let claim = claim_ready(&context, 0, Some(leader), 1)
+            .await?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("组 leader 未被认领"))?;
+
+        begin_group_effect(&context, &claim, &group_key, "creating").await?;
+        let (_, _, state, phase) = task_group_columns(&context, leader).await?;
+        assert_eq!((state.as_str(), phase.as_str()), ("pending", "creating"));
+        let group_phase: String = sqlx::query_scalar(
+            "SELECT effect_phase FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(group_phase, "creating", "组行阶段与 leader 阶段同事务推进");
+
+        confirm_group_effect(
+            &context,
+            &claim,
+            &group_key,
+            "created",
+            Some("INSTANCE-GROUP"),
+        )
+        .await?;
+        let (leader_instance, leader_phase): (Option<String>, String) = sqlx::query_as(
+            "SELECT instance_code,effect_phase FROM feishu_approval_task WHERE id=?",
+        )
+        .bind(leader)
+        .fetch_one(context.approval_tasks().pool())
+        .await?;
+        assert_eq!(leader_instance, None, "组实例码只写组行，leader 不得持有");
+        assert_eq!(leader_phase, "created");
+        let group_instance: Option<String> = sqlx::query_scalar(
+            "SELECT instance_code FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(group_instance.as_deref(), Some("INSTANCE-GROUP"));
+
+        assert!(
+            finish_group(
+                &context,
+                &claim,
+                &group_key,
+                "backfilled",
+                Some("SERIAL-1"),
+                None,
+                false
+            )
+            .await?,
+            "finish_group 必须能收尾 creating/lookup/created 阶段的 leader"
+        );
+        let (state, worker, lease): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT state,worker_id,lease_until FROM feishu_approval_task WHERE id=?",
+        )
+        .bind(leader)
+        .fetch_one(context.approval_tasks().pool())
+        .await?;
+        assert_eq!(state, "backfilled");
+        assert_eq!(worker, None, "收尾必须清租约");
+        assert_eq!(lease, None);
+        for member in [member_one, member_two] {
+            let (state, worker): (String, Option<String>) =
+                sqlx::query_as("SELECT state,worker_id FROM feishu_approval_task WHERE id=?")
+                    .bind(member)
+                    .fetch_one(context.approval_tasks().pool())
+                    .await?;
+            assert_eq!(state, "backfilled", "全体成员必须与 leader 同状态");
+            assert_eq!(worker, None);
+        }
+        let (serial, phase): (Option<String>, String) = sqlx::query_as(
+            "SELECT serial_number,effect_phase FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(serial.as_deref(), Some("SERIAL-1"));
+        assert_eq!(phase, "created", "编号到手即组实例已确认创建");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn detaching_leader_promotes_next_member() -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+        let config_id = snapshot.config["id"].as_i64().context("配置 id 应存在")?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let group_key = format!("gk{namespace}");
+        insert_group(&context, config_id, &group_key, "created", Some("INST-X")).await?;
+        let leader = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            0,
+            &format!("{namespace}-leader"),
+            "backfilled",
+        )
+        .await?;
+        let member_one = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            1,
+            &format!("{namespace}-member-1"),
+            "backfilled",
+        )
+        .await?;
+        let member_two = insert_group_task(
+            &context,
+            config_id,
+            &group_key,
+            2,
+            &format!("{namespace}-member-2"),
+            "backfilled",
+        )
+        .await?;
+
+        // 组内任一成员有有效租约：整组不能摘（否则删掉在途执行的行）。
+        sqlx::query("UPDATE feishu_approval_task SET worker_id='w',lease_until=UNIX_TIMESTAMP()+300 WHERE id=?")
+            .bind(member_two)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        assert_eq!(
+            detach_from_group(&context, leader).await?,
+            DetachOutcome::Busy
+        );
+        sqlx::query("UPDATE feishu_approval_task SET worker_id=NULL,lease_until=NULL WHERE id=?")
+            .bind(member_two)
+            .execute(context.approval_tasks().pool())
+            .await?;
+
+        assert_eq!(
+            detach_from_group(&context, leader).await?,
+            DetachOutcome::Detached {
+                promoted: Some(member_one)
+            },
+            "摘 leader 必须把最小序号成员提升为 leader"
+        );
+        let (group_id, seq, _, _) = task_group_columns(&context, leader).await?;
+        assert_eq!((group_id, seq), (None, 0), "被摘行保留为单条任务");
+        let (group_id, seq, _, _) = task_group_columns(&context, member_one).await?;
+        assert_eq!((group_id.as_deref(), seq), (Some(group_key.as_str()), 0));
+
+        assert_eq!(
+            detach_from_group(&context, member_one).await?,
+            DetachOutcome::Detached {
+                promoted: Some(member_two)
+            }
+        );
+        assert_eq!(
+            detach_from_group(&context, member_two).await?,
+            DetachOutcome::GroupRemoved,
+            "组内再无成员时删除组行"
+        );
+        let groups: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+        )
+        .bind(config_id)
+        .bind(&group_key)
+        .fetch_one(context.approval_groups().pool())
+        .await?;
+        assert_eq!(groups, 0);
         Ok(())
     }
 

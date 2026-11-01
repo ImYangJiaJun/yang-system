@@ -275,6 +275,46 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_maintenance_rechecks_lease_state_and_phase", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合批量认领跳过成员集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::claim_ready_skips_group_members_in_batch_mode", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合单条认领允许成员集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::claim_ready_by_id_allows_group_member", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组 leader lookup 认领集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::claim_ready_accepts_group_leader_in_lookup_phase", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合暂停行重开集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::reopen_resets_paused_rows", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组收尾清租约与成员状态集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::finish_group_clears_lease_and_writes_member_states", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合摘 leader 提升成员集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::detaching_leader_promotes_next_member", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合删除配置清理组行集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::delete_config::tests::delete_config_removes_group_rows_members_and_applicants", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合删除放行未提交暂停组集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::delete_config::tests::delete_config_allows_unsubmitted_paused_group", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合删除阻止已建实例暂停组集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::delete_config::tests::delete_config_blocks_paused_group_with_instance", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合摘组后强制独立建单集成测试",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::approval::actions::dispatch::tests::force_solo_creates_second_instance_for_submitted_group_member", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Legacy task record index guard integration",
         ("cargo", "test", "--lib", "--locked", "infrastructure::schema::tests::real_mysql_legacy_task_record_index_guard_blocks_startup", "--", "--ignored", "--exact", "--test-threads=1"),
     ),

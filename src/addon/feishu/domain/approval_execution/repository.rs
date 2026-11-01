@@ -154,7 +154,8 @@ pub(crate) async fn attach_initiator(
 ///
 /// # 收窄条件
 ///
-/// - `pending / review / terminal / unnotified` 可重开。
+/// - `pending / review / terminal / unnotified / paused` 可重开。`paused` 是聚合组
+///   整组暂停后的人工重试入口：暂停组不参与轮询认领，只有重新点击才能拉起。
 /// - `backfilled` **也能重开，但只由调用方在「人工点击且源记录回填列为空」时**调用
 ///   ——那是用户清空编号之后的显式重发请求。重开后 `effect_phase` 因实例已存在
 ///   变为 `created`，`dispatch_one` 走「按 instance_code / uuid 恢复实例并重新
@@ -169,7 +170,7 @@ pub(crate) async fn attach_initiator(
 pub(crate) async fn reopen(context: &FeishuContext, task_id: i64) -> anyhow::Result<bool> {
     // tenant-boundary: raw-sql feishu-approval-reopen
     let result = sqlx::query(
-        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified','backfilled') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
+        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified','backfilled','paused') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
     )
     .bind(task_id)
     .execute(context.approval_tasks().pool())
@@ -234,6 +235,18 @@ pub(crate) struct TaskClaim {
 }
 
 /// 原子认领可安全执行的任务；只读阶段租约过期允许接管，未知副作用禁止重放。
+///
+/// # 聚合组的认领口径
+///
+/// - 批量（`only_id=None`）只认组 leader（`group_seq=0`）：成员行只承载自身状态，
+///   执行副作用绑定在 leader 上；按成员认领会让同一组被处理多遍。
+/// - 单条（`only_id=Some`）不受组过滤限制：单条点击先摘组再认领，这里只是兜底。
+/// - 组 leader 的 `lookup` 阶段可认领：`60012` 之后要按组 uuid 回捞，没有这次
+///   认领就永远等不到（设计 §4.5）。
+///
+/// 过期租约清扫同样排除组 leader 的 `lookup`：清扫先把「阶段不是
+/// `ready`/`created`」的行写成 `review`，若不排除，回捞阶段会在认领前先被扫成人工
+/// 核查，组永久停摆（设计 §4.6 第 12 步）。
 pub(crate) async fn claim_ready(
     context: &FeishuContext,
     after: i64,
@@ -242,12 +255,12 @@ pub(crate) async fn claim_ready(
 ) -> anyhow::Result<Vec<TaskClaim>> {
     let pool = context.approval_tasks().pool();
     // tenant-boundary: raw-sql feishu-approval-execution-1
-    sqlx::query("UPDATE feishu_approval_task SET state='review',last_error='外部写入结果未知，禁止自动重放；请人工核查',updated_at=UNIX_TIMESTAMP() WHERE worker_id IS NOT NULL AND lease_until<=UNIX_TIMESTAMP() AND effect_phase NOT IN ('ready','created') AND state<>'review'")
+    sqlx::query("UPDATE feishu_approval_task SET state='review',last_error='外部写入结果未知，禁止自动重放；请人工核查',updated_at=UNIX_TIMESTAMP() WHERE worker_id IS NOT NULL AND lease_until<=UNIX_TIMESTAMP() AND effect_phase NOT IN ('ready','created') AND NOT (group_id IS NOT NULL AND group_seq=0 AND effect_phase='lookup') AND state<>'review'")
         .execute(pool).await?;
     let mut transaction = pool.begin().await?;
     // tenant-boundary: raw-sql feishu-approval-execution-2
-    let rows: Vec<(i64, i64, i64)> = sqlx::query_as("SELECT id,generation,attempts FROM feishu_approval_task WHERE id>? AND (? IS NULL OR id=?) AND state='pending' AND effect_phase IN ('ready','created') AND (available_at IS NULL OR available_at<=UNIX_TIMESTAMP()) AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP()) ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED")
-        .bind(after).bind(only_id).bind(only_id).bind(limit as u32)
+    let rows: Vec<(i64, i64, i64)> = sqlx::query_as("SELECT id,generation,attempts FROM feishu_approval_task WHERE id>? AND (? IS NULL OR id=?) AND state='pending' AND (effect_phase IN ('ready','created') OR (group_id IS NOT NULL AND group_seq=0 AND effect_phase='lookup')) AND (? IS NOT NULL OR group_seq=0) AND (available_at IS NULL OR available_at<=UNIX_TIMESTAMP()) AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP()) ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED")
+        .bind(after).bind(only_id).bind(only_id).bind(only_id).bind(limit as u32)
         .fetch_all(&mut *transaction).await?;
     let mut claims = Vec::with_capacity(rows.len());
     for (id, generation, attempts) in rows {
@@ -307,4 +320,327 @@ pub(crate) async fn finish(
         .bind(claim.id).bind(&claim.owner).bind(claim.generation)
         .execute(context.approval_tasks().pool()).await?;
     Ok(result.rows_affected() == 1)
+}
+
+// 组执行原语先落地并自带真实库测试；消费者（组派发、组处理）在后续任务接入。
+#[allow(dead_code)]
+/// 组 leader 所属的配置 id（执行权校验一体）。
+///
+/// # 为什么组函数都要先读它
+///
+/// 组键只在**同一配置内**唯一；`begin_group_effect` / `confirm_group_effect` /
+/// `finish_group` 只拿到 `group_key`，写组行必须带上 `config_id` 才能精确定位。
+/// 顺带在这一步校验执行权（worker/generation/租约/状态/组 leader 身份），
+/// 后续 UPDATE 再用同一组条件兜底——两道之间租约可能刚好过期，第二道的
+/// 影响行数是最终事实。
+async fn leader_config_id_in_tx(
+    connection: &mut sqlx::MySqlConnection,
+    claim: &TaskClaim,
+    group_key: &str,
+) -> anyhow::Result<Option<i64>> {
+    // tenant-boundary: raw-sql feishu-approval-group-leader-config
+    let row: Option<i64> = sqlx::query_scalar(
+        "SELECT config_id FROM feishu_approval_task WHERE id=? AND worker_id=? AND generation=? AND lease_until>UNIX_TIMESTAMP() AND state<>'review' AND group_id=? AND group_seq=0",
+    )
+    .bind(claim.id)
+    .bind(&claim.owner)
+    .bind(claim.generation)
+    .bind(group_key)
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(row)
+}
+
+#[allow(dead_code)]
+/// 组副作用开始：**组行阶段与 leader 阶段同一事务**推进，并顺延 leader 租约。
+///
+/// 组行阶段是外部副作用的唯一事实（`reopen` 不会重置它），leader 的阶段只是认领
+/// 依据的镜像；两者必须一起提交，否则崩溃后会出现「组行说创建过、leader 说没试过」
+/// 或反之（设计 §4.1、§6.3）。
+pub(crate) async fn begin_group_effect(
+    context: &FeishuContext,
+    claim: &TaskClaim,
+    group_key: &str,
+    phase: &str,
+) -> anyhow::Result<()> {
+    let mut transaction = context.approval_tasks().pool().begin().await?;
+    let config_id = leader_config_id_in_tx(&mut transaction, claim, group_key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("聚合组 leader 执行权已失效"))?;
+    // tenant-boundary: raw-sql feishu-approval-group-begin-leader
+    let result = sqlx::query("UPDATE feishu_approval_task SET effect_phase=?,lease_until=UNIX_TIMESTAMP()+?,updated_at=UNIX_TIMESTAMP() WHERE id=? AND worker_id=? AND generation=? AND lease_until>UNIX_TIMESTAMP() AND state<>'review' AND group_id=? AND group_seq=0 AND effect_phase IN ('ready','created')")
+        .bind(phase).bind(LEASE_SECONDS).bind(claim.id).bind(&claim.owner).bind(claim.generation).bind(group_key)
+        .execute(&mut *transaction).await?;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "外部写入未开始：聚合组执行权失效或上次写入结果未知"
+    );
+    // tenant-boundary: raw-sql feishu-approval-group-begin-row
+    let updated = sqlx::query(
+        "UPDATE feishu_approval_group SET effect_phase=?,updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_key=?",
+    )
+    .bind(phase)
+    .bind(config_id)
+    .bind(group_key)
+    .execute(&mut *transaction)
+    .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "聚合组行不存在，外部写入未开始"
+    );
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+/// 组副作用确认：**实例码只写组行**，leader 只写阶段。
+///
+/// 这条分配是设计 §4.1 的核心不变量：leader 任务行会随单条点击摘组保留，若把组
+/// 实例码写进去，摘出的行就带着别人的实例、事件也会被它截获。组实例码只属于组行。
+pub(crate) async fn confirm_group_effect(
+    context: &FeishuContext,
+    claim: &TaskClaim,
+    group_key: &str,
+    phase: &str,
+    instance: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut transaction = context.approval_tasks().pool().begin().await?;
+    let config_id = leader_config_id_in_tx(&mut transaction, claim, group_key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("聚合组 leader 执行权已失效"))?;
+    // tenant-boundary: raw-sql feishu-approval-group-confirm-leader
+    let result = sqlx::query("UPDATE feishu_approval_task SET effect_phase=?,updated_at=UNIX_TIMESTAMP() WHERE id=? AND worker_id=? AND generation=? AND lease_until>UNIX_TIMESTAMP() AND state<>'review' AND group_id=? AND group_seq=0")
+        .bind(phase).bind(claim.id).bind(&claim.owner).bind(claim.generation).bind(group_key)
+        .execute(&mut *transaction).await?;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "远端结果未能持久确认，禁止重放写入"
+    );
+    // tenant-boundary: raw-sql feishu-approval-group-confirm-row
+    let updated = sqlx::query(
+        "UPDATE feishu_approval_group SET effect_phase=?,instance_code=COALESCE(?,instance_code),updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_key=?",
+    )
+    .bind(phase)
+    .bind(instance)
+    .bind(config_id)
+    .bind(group_key)
+    .execute(&mut *transaction)
+    .await?;
+    anyhow::ensure!(updated.rows_affected() == 1, "聚合组行在确认时不存在");
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+/// 组收尾：**一个事务**内更新 leader（状态/退避/清租约）、全体成员状态、组行编号与阶段。
+///
+/// # 为什么不能复用单条 `finish`
+///
+/// 单条 `finish` 的阶段白名单是 `ready/created`，而组在 `60012` 之后会停在 `lookup`、
+/// 创建前停在 `creating`——照抄会让组在「回捞成功」或「创建中途暂停」时收不了尾。
+/// 组路径也不经过通用的 `record_outcome`，所以成员状态必须由这里一起写。
+///
+/// # 组行阶段
+///
+/// 编号到手 = 组实例已确认创建：组行 `effect_phase` 落实为 `created` 并记下编号。
+/// 暂停/重试不动组行阶段——它是外部副作用的唯一事实，只有确认函数有权推进。
+pub(crate) async fn finish_group(
+    context: &FeishuContext,
+    claim: &TaskClaim,
+    group_key: &str,
+    state: &str,
+    serial: Option<&str>,
+    reason: Option<&str>,
+    retry: bool,
+) -> anyhow::Result<bool> {
+    let attempts = if retry {
+        claim.attempts + 1
+    } else {
+        claim.attempts
+    };
+    let state = if retry && attempts >= 10 {
+        "review"
+    } else {
+        state
+    };
+    let delay = if retry {
+        (1_i64 << attempts.min(8)).min(300)
+    } else {
+        30
+    };
+    let mut transaction = context.approval_tasks().pool().begin().await?;
+    let Some(config_id) = leader_config_id_in_tx(&mut transaction, claim, group_key).await? else {
+        // 只读事务：显式回滚，别让 Drop 打印「事务被丢弃」。
+        transaction.rollback().await?;
+        return Ok(false);
+    };
+    // tenant-boundary: raw-sql feishu-approval-group-finish-leader
+    let result = sqlx::query("UPDATE feishu_approval_task SET state=?,last_error=?,attempts=?,available_at=UNIX_TIMESTAMP()+?,worker_id=NULL,lease_until=NULL,updated_at=UNIX_TIMESTAMP() WHERE id=? AND worker_id=? AND generation=? AND lease_until>UNIX_TIMESTAMP() AND state<>'review' AND group_id=? AND group_seq=0 AND effect_phase IN ('ready','creating','lookup','created')")
+        .bind(state).bind(reason).bind(attempts).bind(delay)
+        .bind(claim.id).bind(&claim.owner).bind(claim.generation).bind(group_key)
+        .execute(&mut *transaction).await?;
+    if result.rows_affected() != 1 {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+    // 成员行只承载自身状态：组实例身份一律不落到这里（设计 §4.1）。
+    // tenant-boundary: raw-sql feishu-approval-group-finish-members
+    sqlx::query(
+        "UPDATE feishu_approval_task SET state=?,last_error=?,updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_id=? AND group_seq>0",
+    )
+    .bind(state)
+    .bind(reason)
+    .bind(config_id)
+    .bind(group_key)
+    .execute(&mut *transaction)
+    .await?;
+    if let Some(serial) = serial.filter(|value| !value.trim().is_empty()) {
+        // 编号到手 = 组实例已确认创建：组行阶段与编号一起落实。
+        // tenant-boundary: raw-sql feishu-approval-group-finish-row
+        let updated = sqlx::query(
+            "UPDATE feishu_approval_group SET serial_number=?,effect_phase='created',updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_key=?",
+        )
+        .bind(serial)
+        .bind(config_id)
+        .bind(group_key)
+        .execute(&mut *transaction)
+        .await?;
+        anyhow::ensure!(updated.rows_affected() == 1, "聚合组行在收尾时不存在");
+    }
+    transaction.commit().await?;
+    Ok(true)
+}
+
+/// 组内任务被单条点击时的摘组结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DetachOutcome {
+    /// 任务不属于任何组（含任务行已被删除的竞态）：调用方按普通单条语义继续。
+    NotGrouped,
+    /// 已摘出；`promoted` 是接手 leader 的成员任务 id（被摘的是 leader 且组内仍有成员）。
+    Detached { promoted: Option<i64> },
+    /// 已摘出且组内再无成员，组行已删除。
+    GroupRemoved,
+    /// 组内仍有未过期租约（正在执行），本轮不能摘。
+    Busy,
+}
+
+/// 把一行组内任务摘出为单条任务（设计 §4.9）。
+///
+/// # 加锁顺序
+///
+/// 先锁配置行、再锁组内任务行——与播种的 `seed_batch_click` 同一顺序（配置 → 任务）。
+/// 反向加锁会与「播种锁配置行后等任务行」形成环。
+///
+/// # 判定与写入同事务
+///
+/// 「组内有无有效租约」「谁是 leader」「摘完后还剩几行」全部取自行锁内复读的快照
+/// （`lock_group_members_in_tx` 带服务端时间 `now`）；到提交前认领方改不动这些行，
+/// 不会出现「判定无租约 → 摘组 → 实际删掉在途任务」的窗口（设计 §6.1）。
+///
+/// 摘出 leader 时把剩余组内序号最小的成员提升为 leader（`group_seq=0`）；组里没有
+/// 剩余成员时删除组行。组行已有实例码时同样摘出：组实例继续由新 leader 收尾。
+pub(crate) async fn detach_from_group(
+    context: &FeishuContext,
+    task_id: i64,
+) -> anyhow::Result<DetachOutcome> {
+    let located: Option<(i64, Option<String>)> =
+        // tenant-boundary: raw-sql feishu-approval-group-detach-locate
+        sqlx::query_as("SELECT config_id,group_id FROM feishu_approval_task WHERE id=?")
+            .bind(task_id)
+            .fetch_optional(context.approval_tasks().pool())
+            .await?;
+    let Some((config_id, Some(group_key))) = located else {
+        return Ok(DetachOutcome::NotGrouped);
+    };
+    let mut transaction = context.approval_tasks().pool().begin().await?;
+    // tenant-boundary: raw-sql feishu-approval-group-detach-lock-config
+    sqlx::query_scalar::<_, i64>("SELECT id FROM feishu_approval_config WHERE id=? FOR UPDATE")
+        .bind(config_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    // tenant-boundary: raw-sql feishu-approval-group-detach-now
+    let now: i64 = sqlx::query_scalar("SELECT UNIX_TIMESTAMP()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    // tenant-boundary: raw-sql feishu-approval-group-detach-members
+    let members: Vec<(i64, i64, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT id,group_seq,worker_id,lease_until FROM feishu_approval_task WHERE config_id=? AND group_id=? ORDER BY group_seq,id FOR UPDATE",
+    )
+    .bind(config_id)
+    .bind(&group_key)
+    .fetch_all(&mut *transaction)
+    .await?;
+    if members.is_empty() {
+        transaction.rollback().await?;
+        return Ok(DetachOutcome::NotGrouped);
+    }
+    if members
+        .iter()
+        .any(|(_, _, holder, lease)| live_lease(holder.as_deref(), *lease, now))
+    {
+        transaction.rollback().await?;
+        return Ok(DetachOutcome::Busy);
+    }
+    let Some(target_seq) = members
+        .iter()
+        .find(|(id, _, _, _)| *id == task_id)
+        .map(|(_, seq, _, _)| *seq)
+    else {
+        transaction.rollback().await?;
+        return Ok(DetachOutcome::NotGrouped);
+    };
+    // tenant-boundary: raw-sql feishu-approval-group-detach-row
+    let detached = sqlx::query(
+        "UPDATE feishu_approval_task SET group_id=NULL,group_seq=0,updated_at=UNIX_TIMESTAMP() WHERE id=?",
+    )
+    .bind(task_id)
+    .execute(&mut *transaction)
+    .await?;
+    anyhow::ensure!(detached.rows_affected() == 1, "任务行 {task_id} 摘组失败");
+    let mut promoted = None;
+    if target_seq == 0 {
+        let next = members
+            .iter()
+            .filter(|(id, _, _, _)| *id != task_id)
+            .min_by_key(|(_, seq, _, _)| *seq)
+            .map(|(id, _, _, _)| *id);
+        if let Some(next_id) = next {
+            // tenant-boundary: raw-sql feishu-approval-group-detach-promote
+            let updated = sqlx::query(
+                "UPDATE feishu_approval_task SET group_seq=0,updated_at=UNIX_TIMESTAMP() WHERE id=?",
+            )
+            .bind(next_id)
+            .execute(&mut *transaction)
+            .await?;
+            anyhow::ensure!(updated.rows_affected() == 1, "聚合组 leader 提升失败");
+            promoted = Some(next_id);
+        }
+    }
+    let group_removed = members.len() == 1;
+    if group_removed {
+        // tenant-boundary: raw-sql feishu-approval-group-detach-delete-row
+        sqlx::query("DELETE FROM feishu_approval_group WHERE config_id=? AND group_key=?")
+            .bind(config_id)
+            .bind(&group_key)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    if group_removed {
+        Ok(DetachOutcome::GroupRemoved)
+    } else {
+        Ok(DetachOutcome::Detached { promoted })
+    }
+}
+
+/// 租约判定（与 `approval_aggregation::repository::has_live_lease` 同口径的裸列版本）。
+///
+/// 有持有者但没有到期时刻按「仍持有」处理：宁可本轮不动，等下一轮再判。
+fn live_lease(holder: Option<&str>, lease_until: Option<i64>, now: i64) -> bool {
+    let holder = holder.map(str::trim).filter(|value| !value.is_empty());
+    match (holder, lease_until) {
+        (Some(_), None) => true,
+        (Some(_), Some(until)) => until > now,
+        _ => false,
+    }
 }
