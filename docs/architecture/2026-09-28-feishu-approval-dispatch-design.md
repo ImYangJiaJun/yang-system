@@ -218,6 +218,15 @@ Content-Type: application/json
 如果一条都没命中（用户没勾选任何记录），worker 向点击人发一条 IM 说明原因与下一步。
 轮询轮和未传 applicant 的旧工作流不发——命中 0 条是常态，每轮都发会变成定时骚扰。
 
+#### 同批聚合派发开关 `aggregate_batch`（2026-10-31 追加）
+
+配置表另有 `aggregate_batch`（Switch，必填、默认 `false`）。打开后，同一次批量勾选内
+「除明细控件子树外所有已映射字段的转换值完全一致」的记录合成一个审批实例：明细每条
+记录一行、组内回填同一编号、每组只发一条通知。开启时必须已配置 `batch_scope_field`
+（建/改配置都会校验）。开关关闭只停止**新建**组；已存在的组仍由 leader 收尾。组身份、
+播种顺序、暂停与回滚语义见
+`docs/architecture/2026-10-31-feishu-approval-aggregation-design.md`（§4、§十）。
+
 ### 5.2 处理状态表 `feishu_approval_task`
 
 这是**认领队列**，不只是记账表。用户明确不加闸门字段（§11 限制 1），所以「是否已处理」的判据必须落在库里，不能落在多维表格的字段上。
@@ -228,7 +237,7 @@ Content-Type: application/json
 | `config_id` | Int, indexed | |
 | `record_id` | Str, unique | 多维表格记录 id |
 | `uuid` | Str, unique | 幂等键（§5.4 的派生与存储规则） |
-| `state` | Radio | `pending` / `creating` / `created` / `backfilled` / `terminal` / `unnotified` |
+| `state` | Radio | `pending` / `creating` / `created` / `backfilled` / `terminal` / `unnotified` / `review` / `paused`（后两者为后续追加，见本节「聚合组列与 `paused` 状态」） |
 | `instance_code` | Str, nullable | |
 | `serial_number` | Str, nullable | |
 | `attempts` | Int | 可重试次数 |
@@ -257,6 +266,17 @@ pending ──claim──> creating ──create 成功──> created ──bat
 **已知未做**：`list_tasks` 的 `where` 树支持按 `state` 过滤，但控制台的任务下钻视图
 只按 `config_id` 查、没有状态筛选，也没有针对该状态的告警规则——所以这些行目前只能
 靠接口/SQL 捞。要让它真正「有人来看看」，还得给控制台加筛选（或给指标加告警）。
+
+#### 聚合组列与 `paused` 状态（2026-10-31 追加）
+
+任务表另有 `group_id`（可空聚合组键；`group_seq=0` 且非空 = leader，`>=1` = 成员，
+空 = 普通单条任务）与 `group_seq`（必填、默认 0、`sortable`，组内明细行序）。`state`
+枚举追加 `paused`：整组暂停，不参与认领、轮询不自动重试，`reopen` 会把它复位为
+`pending`（组行阶段由组表保留，不被 `reopen` 重置）。组实例身份（`uuid` /
+`instance_code` / `serial_number` / `effect_phase`）只落新表 `feishu_approval_group`，
+leader/成员任务行不写组实例码；批量认领只取 `group_seq=0` 的 leader，单条点击命中组
+成员会先摘组再按单条语义建单。详见
+`docs/architecture/2026-10-31-feishu-approval-aggregation-design.md` §4–§5。
 
 **硬性时序要求**（这条是根因 D 的修正，必须写死在实现里）：
 
