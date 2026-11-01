@@ -1515,6 +1515,12 @@ async fn seed_batch_click(
 /// **全组成员都在本次勾选内**。只解散这三个条件同时满足的组：勾选外的组保持
 /// 不动，已尝试创建的组永不解散（设计 §4.4、§七.2/3）。
 ///
+/// # 租约判定与写入同事务
+///
+/// 成员行在每个组判定前先 `FOR UPDATE` 锁住并复读（`lock_group_members_in_tx`），
+/// 租约用行快照里的服务端时间判定；复位/摘组/删行都在同一事务、同一批锁内完成。
+/// 连接池普通读会留下「读到无租约 → 被认领 → 仍按旧结论写」的窗口（设计 §6.1）。
+///
 /// # 已提交组的阶段
 ///
 /// 组行有实例码时 leader 复位到 `created`（实例已存在，处理期按实例码恢复）；
@@ -1540,7 +1546,6 @@ async fn maintain_groups(
     let groups =
         approval_aggregation::repository::list_groups_for_config(&runner.context, config_id)
             .await?;
-    let now = unix_now_seconds();
     let mut reopened = 0usize;
     for group in groups {
         let group_key: String = group.require("group_key")?;
@@ -1548,9 +1553,17 @@ async fn maintain_groups(
         let instance_code = group
             .optional::<String>("instance_code")?
             .filter(|value| !value.trim().is_empty());
-        let members =
-            approval_aggregation::repository::load_members(&runner.context, config_id, &group_key)
-                .await?;
+        // 租约判定必须与随后的 UPDATE/DELETE 同源：成员行先在本事务内 `FOR UPDATE`
+        // 锁住并复读，快照带服务端时间 `now`。连接池普通读与写之间，`claim_ready`
+        // 可以把该行认领走（它不锁配置行），复位会清掉有效租约、删除会删掉在途任务
+        // 行——设计 §6.1。
+        let members = approval_aggregation::repository::lock_group_members_in_tx(
+            transaction,
+            &runner.context,
+            config_id,
+            &group_key,
+        )
+        .await?;
         if members.is_empty() {
             // 组行与成员行不一致（崩溃或手工清理）：删掉孤儿组行，别让它每轮空转。
             approval_aggregation::repository::delete_group_in_tx(
@@ -1562,6 +1575,10 @@ async fn maintain_groups(
             .await?;
             continue;
         }
+        let Some(first_member) = members.first() else {
+            continue;
+        };
+        let now = approval_aggregation::repository::server_now(first_member)?;
         let member_records: Vec<String> = members
             .iter()
             .map(|member| member.require::<String>("record_id"))
@@ -1569,7 +1586,10 @@ async fn maintain_groups(
         let leader = members
             .iter()
             .find(|member| member.require::<i64>("group_seq").unwrap_or_default() == 0);
-        let leader_free = leader.map_or(true, |leader| !has_live_lease(leader, now));
+        let leader_free = match leader {
+            Some(leader) => !approval_aggregation::repository::has_live_lease(leader, now),
+            None => true,
+        };
 
         if instance_code.is_none()
             && phase == "ready"
@@ -1595,7 +1615,10 @@ async fn maintain_groups(
             (None, _, "review") => true,
             _ => false,
         };
-        if !reopen_needed || !leader_free || !reopenable(&leader_state) {
+        if !reopen_needed
+            || !leader_free
+            || !approval_aggregation::repository::reopenable_state(&leader_state)
+        {
             continue;
         }
         let leader_id: i64 = leader.require("id")?;
@@ -1628,6 +1651,10 @@ async fn maintain_groups(
 
 /// 解散一个未提交的组：删 applicant 行 → 删/摘任务行 → 删组行。
 ///
+/// `members` 必须是 [`approval_aggregation::repository::lock_group_members_in_tx`]
+/// 在本事务内锁住的行快照：租约与阶段判定都基于它，到提交前不会被认领方改写。
+/// 任一成员仍在执行或已进入外部写入阶段时整组不动（返回 `false`），绝不半解散。
+///
 /// 组内**已有自身实例码或回填编号**的行摘出组保留为单条任务：那些外部事实属于
 /// 该记录自己，不能随组一起删掉（设计 §4.4 第 3 步）。
 async fn dissolve_group(
@@ -1636,10 +1663,20 @@ async fn dissolve_group(
     config_id: i64,
     group_key: &str,
     members: &[Record],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    let Some(first) = members.first() else {
+        return Ok(false);
+    };
+    let now = approval_aggregation::repository::server_now(first)?;
+    let mut detach_ids: Vec<i64> = Vec::new();
     let mut delete_ids: Vec<i64> = Vec::new();
     for member in members {
         let task_id: i64 = member.require("id")?;
+        // 解散的前置条件之一是「leader 无未过期租约」；任何成员被认领都说明组还在
+        // 被处理，本轮不动（行已锁住，这个判定到提交前有效）。
+        if approval_aggregation::repository::has_live_lease(member, now) {
+            return Ok(false);
+        }
         let own_instance = member
             .optional::<String>("instance_code")?
             .filter(|value| !value.trim().is_empty());
@@ -1647,22 +1684,40 @@ async fn dissolve_group(
             .optional::<String>("serial_number")?
             .filter(|value| !value.trim().is_empty());
         if own_instance.is_some() || own_serial.is_some() {
+            detach_ids.push(task_id);
+        } else {
+            // 删除只允许从未尝试过外部写入的行（设计 §6.1）：阶段不是 `ready`、
+            // 或状态绑定外部事实时，删掉它就失去了对账依据。
+            let phase: String = member.require("effect_phase")?;
+            let state: String = member.require("state")?;
+            if phase != "ready" || !approval_aggregation::repository::dissolvable_state(&state) {
+                return Ok(false);
+            }
+            delete_ids.push(task_id);
+        }
+    }
+    for task_id in detach_ids {
+        anyhow::ensure!(
             approval_aggregation::repository::detach_task_from_group_in_tx(
                 transaction,
                 &runner.context,
                 task_id,
             )
-            .await?;
-        } else {
-            delete_ids.push(task_id);
-        }
+            .await?,
+            "解散摘组失败：任务行 {task_id} 的执行权已变化"
+        );
     }
-    approval_aggregation::repository::delete_task_rows_in_tx(
+    let deleted = approval_aggregation::repository::delete_task_rows_in_tx(
         transaction,
         &runner.context,
         &delete_ids,
     )
     .await?;
+    anyhow::ensure!(
+        deleted == delete_ids.len() as u64,
+        "解散删行不完整：期望 {} 行，实际 {deleted} 行",
+        delete_ids.len()
+    );
     approval_aggregation::repository::delete_group_in_tx(
         transaction,
         &runner.context,
@@ -1677,34 +1732,7 @@ async fn dissolve_group(
         deleted = delete_ids.len(),
         "聚合组已解散"
     );
-    Ok(())
-}
-
-/// 组行 `effect_phase='ready'` 且无租约的组可以解散；已尝试创建的一律不动。
-fn has_live_lease(row: &Record, now: f64) -> bool {
-    let holder = row
-        .optional::<String>("worker_id")
-        .ok()
-        .flatten()
-        .filter(|value| !value.trim().is_empty());
-    let lease = row.optional::<i64>("lease_until").ok().flatten();
-    match (holder, lease) {
-        // 有持有者但没有到期时刻：按「仍持有」处理，宁可不解散。
-        (Some(_), None) => true,
-        (Some(_), Some(until)) => until as f64 > now,
-        _ => false,
-    }
-}
-
-/// 单条 `reopen` 的状态白名单（与 `approval_execution::reopen` 的 SQL 同口径）。
-///
-/// `paused` 是组级暂停状态：暂停组只能靠人工批量点击重试，组维护在这里以同一
-/// 白名单复位 leader（已提交组按实例码恢复、未提交组按组 uuid 回捞）。
-fn reopenable(state: &str) -> bool {
-    matches!(
-        state,
-        "pending" | "review" | "terminal" | "unnotified" | "backfilled" | "paused"
-    )
+    Ok(true)
 }
 
 /// 聚合播种：对「本次勾选且没有任务行」的记录算一致性签名、分组并建组。
@@ -5640,6 +5668,181 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(rebuilt, 2, "两条记录重建为单条任务");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 组维护的复位/摘组/删行必须在行锁内复检租约、状态与外部写入阶段。
+    ///
+    /// 模拟「事务外读到无租约，写入前被另一实例认领」的窗口：行里已是有效租约，
+    /// 三个写入口都必须拒绝；任何一条守卫被摘掉，这里就会变红（设计 §6.1）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_maintenance_rechecks_lease_state_and_phase() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", false).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let group_key = format!("gk{namespace}");
+        let leader_record = format!("{namespace}-r1");
+        let member_record = format!("{namespace}-r2");
+        insert_group_row(&pool, config_id, &group_key, "ready", None).await?;
+        let leader_id = insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            0,
+            &leader_record,
+            "pending",
+            "ready",
+            None,
+        )
+        .await?;
+        let member_id = insert_group_task_row(
+            &pool,
+            config_id,
+            &group_key,
+            1,
+            &member_record,
+            "pending",
+            "ready",
+            None,
+        )
+        .await?;
+        // 另一实例已经把两行都认领走（有效租约）。
+        sqlx::query(
+            "UPDATE feishu_approval_task SET worker_id='other-instance', \
+             lease_until=UNIX_TIMESTAMP()+300 WHERE config_id=?",
+        )
+        .bind(config_id)
+        .execute(&pool)
+        .await?;
+        let transport: Arc<SeedTransport> = Arc::new(SeedTransport::new(vec![]));
+        let runner = build_seed_runner(database, Arc::clone(&context), transport).await?;
+
+        // 1. 有效租约：复位、摘组、删行全部拒绝。
+        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        assert!(
+            !approval_aggregation::repository::reopen_group_leader_in_tx(
+                &mut transaction,
+                &runner.context,
+                leader_id,
+                "created",
+            )
+            .await?,
+            "有有效租约的 leader 不得被复位"
+        );
+        assert!(
+            !approval_aggregation::repository::detach_task_from_group_in_tx(
+                &mut transaction,
+                &runner.context,
+                member_id,
+            )
+            .await?,
+            "有有效租约的成员不得被摘组"
+        );
+        assert_eq!(
+            approval_aggregation::repository::delete_task_rows_in_tx(
+                &mut transaction,
+                &runner.context,
+                &[leader_id, member_id],
+            )
+            .await?,
+            0,
+            "有有效租约的任务行不得被删除"
+        );
+        transaction.commit().await?;
+        let leader: (String, Option<String>, Option<i64>, Option<String>, String) = sqlx::query_as(
+            "SELECT state,worker_id,lease_until,group_id,effect_phase \
+                 FROM feishu_approval_task WHERE id=?",
+        )
+        .bind(leader_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(leader.0, "pending", "复位不得清掉在途状态");
+        assert_eq!(leader.1.as_deref(), Some("other-instance"));
+        assert!(leader.2.unwrap_or_default() > 0, "租约不得被清空");
+        assert_eq!(leader.3.as_deref(), Some(group_key.as_str()), "不得摘组");
+        assert_eq!(leader.4, "ready", "外部写入阶段不得被改写");
+
+        // 2. 租约过期但已进入外部写入：删行仍必须拒绝。
+        sqlx::query(
+            "UPDATE feishu_approval_task SET worker_id=NULL, lease_until=NULL WHERE config_id=?",
+        )
+        .bind(config_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query("UPDATE feishu_approval_task SET effect_phase='creating' WHERE id=?")
+            .bind(member_id)
+            .execute(&pool)
+            .await?;
+        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        assert_eq!(
+            approval_aggregation::repository::delete_task_rows_in_tx(
+                &mut transaction,
+                &runner.context,
+                &[leader_id, member_id],
+            )
+            .await?,
+            0,
+            "effect_phase 非 ready 的行不得被删除"
+        );
+        transaction.commit().await?;
+
+        // 3. 状态绑定外部事实（created）：同样不得删除。
+        sqlx::query(
+            "UPDATE feishu_approval_task SET state='created', effect_phase='ready' WHERE id=?",
+        )
+        .bind(member_id)
+        .execute(&pool)
+        .await?;
+        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        assert_eq!(
+            approval_aggregation::repository::delete_task_rows_in_tx(
+                &mut transaction,
+                &runner.context,
+                &[leader_id, member_id],
+            )
+            .await?,
+            0,
+            "状态绑定外部事实的行不得被删除"
+        );
+        transaction.commit().await?;
+
+        // 4. 状态不在复位白名单：即使无租约也不得复位。
+        sqlx::query(
+            "UPDATE feishu_approval_task SET state='created', worker_id=NULL, \
+             lease_until=NULL WHERE id=?",
+        )
+        .bind(leader_id)
+        .execute(&pool)
+        .await?;
+        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        assert!(
+            !approval_aggregation::repository::reopen_group_leader_in_tx(
+                &mut transaction,
+                &runner.context,
+                leader_id,
+                "created",
+            )
+            .await?,
+            "不在复位白名单的状态不得被复位"
+        );
+        transaction.commit().await?;
+        let leader_state: String =
+            sqlx::query_scalar("SELECT state FROM feishu_approval_task WHERE id=?")
+                .bind(leader_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(leader_state, "created", "被拒绝的复位不得改状态");
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 1, "守卫拒绝时组行必须保留");
 
         cleanup_aggregate_fixture(&pool, config_id).await?;
         Ok(())

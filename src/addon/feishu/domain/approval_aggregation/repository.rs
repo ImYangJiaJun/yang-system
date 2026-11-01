@@ -15,9 +15,13 @@
 //!
 //! 带 `_in_tx` 后缀的函数在调用方事务内执行，供「解散/建组/收尾」这类必须与其它写
 //! 原子提交的组合使用；其余读函数直接走连接池。
+//!
+//! 组维护的租约判定必须与写同事务：`lock_*_in_tx` 用 `SELECT ... FOR UPDATE` 锁住
+//! 任务行，并在行锁内复检 `worker_id`/`lease_until`/`state`/`effect_phase`——连接池
+//! 普通读与随后的 UPDATE/DELETE 之间，`claim_ready` 可以把该行认领走（设计 §6.1）。
 
 use serde_json::Value;
-use yang_base::table::{Record, SortOrder};
+use yang_base::table::Record;
 use yang_db::Transaction;
 
 use super::super::context::FeishuContext;
@@ -56,6 +60,58 @@ pub(crate) async fn lock_config_in_tx(
         .unwrap_or(false))
 }
 
+/// 读取行快照里的服务端当前时间（`select_expr(UNIX_TIMESTAMP(), field!("now"))` 的别名）。
+///
+/// 不走 `Record::require("now")`：`now` 是查询别名、不是表列，而 schema_anchor 会把
+/// `Record` 访问的键按表声明对账——那是它该做的事，所以这里用 `get` 显式绕开。
+pub(crate) fn server_now(row: &Record) -> anyhow::Result<i64> {
+    row.get("now")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("任务行快照缺少服务端时间列 now"))
+}
+
+/// 任务行是否仍被某个实例持有（有效租约）。
+///
+/// `now` 必须来自数据库（行快照里的 `now` 列，由 `UNIX_TIMESTAMP()` 生成）：租约是
+/// 用数据库时钟写入的，本地时钟与数据库有偏差时会把有效租约误判成过期。
+///
+/// 有持有者但没有到期时刻时按「仍持有」处理，宁可本轮不动，等下一轮再判。
+pub(crate) fn has_live_lease(row: &Record, now: i64) -> bool {
+    let holder = row
+        .optional::<String>("worker_id")
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty());
+    let lease = row.optional::<i64>("lease_until").ok().flatten();
+    match (holder, lease) {
+        (Some(_), None) => true,
+        (Some(_), Some(until)) => until > now,
+        _ => false,
+    }
+}
+
+/// 可被「重新点击」复位为 `pending` 的状态白名单。
+///
+/// 与单条 [`super::super::approval_execution::reopen`] 的 SQL 同口径，另加组级
+/// `paused`：暂停组只能靠人工批量点击重试。
+pub(crate) fn reopenable_state(state: &str) -> bool {
+    matches!(
+        state,
+        "pending" | "review" | "terminal" | "unnotified" | "backfilled" | "paused"
+    )
+}
+
+/// 可以随组一起删除的状态：这些状态都没有绑定外部事实。
+///
+/// `created` / `backfilled` 与实例码、编号绑定，只能摘组保留；`creating` 表示外部
+/// 写入进行中，任何情况下都不删（设计 §6.1 的 `state`/`effect_phase` 条件）。
+pub(crate) fn dissolvable_state(state: &str) -> bool {
+    matches!(
+        state,
+        "pending" | "review" | "terminal" | "unnotified" | "paused"
+    )
+}
+
 /// 把组 leader 复位为 `pending`，并把任务行阶段设成 `leader_phase`。
 ///
 /// **组行阶段不动**：组 `effect_phase` 是外部副作用的唯一事实，`reopen` 只负责把
@@ -63,14 +119,31 @@ pub(crate) async fn lock_config_in_tx(
 ///
 /// 与单条 [`super::super::approval_execution::reopen`] 的差别只有两点：不按
 /// `instance_code` 派生阶段（leader 永远不持有组实例码），以及不改
-/// `last_error`（通知去重依赖它）。租约与退避的检查由调用方在持有配置行锁、
-/// 读取组行后判定。
+/// `last_error`（通知去重依赖它）。
+///
+/// # 行锁内复检
+///
+/// 调用方的「无租约」判断来自事务外读，`claim_ready` 又不锁配置行；两读之间另一
+/// 实例可以把该行认领走。无条件 UPDATE 会清掉有效租约，在途处理的 `is_owned` /
+/// `finish` 随即失败。这里先 `FOR UPDATE` 锁住任务行、复检状态白名单与租约，
+/// 再按 id 更新——复检通过后到提交前，行不会被认领方改写（设计 §6.1）。
 pub(crate) async fn reopen_group_leader_in_tx(
     transaction: &mut Transaction,
     context: &FeishuContext,
     task_id: i64,
     leader_phase: &str,
 ) -> anyhow::Result<bool> {
+    let locked = lock_task_rows_in_tx(transaction, context, &[task_id], false)
+        .await?
+        .unwrap_or_default();
+    let Some(current) = locked.first() else {
+        return Ok(false);
+    };
+    let now = server_now(current)?;
+    let state: String = current.require("state")?;
+    if !reopenable_state(&state) || has_live_lease(current, now) {
+        return Ok(false);
+    }
     let row = Record::new()
         .set("state", "pending")
         .set("effect_phase", leader_phase)
@@ -118,21 +191,34 @@ pub(crate) async fn insert_group_task_in_tx(
 ///
 /// 解散时用于「组内已有自身实例码或回填」的行：那些行的外部事实属于它自己，
 /// 不能随组一起删掉。
+///
+/// 行先在当前事务内 `FOR UPDATE` 锁住并复检租约：正在执行的成员不摘组，否则
+/// 在途处理看到的成员集合会在中途变化。返回 `false` 表示这一行没有动。
 pub(crate) async fn detach_task_from_group_in_tx(
     transaction: &mut Transaction,
     context: &FeishuContext,
     task_id: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    let locked = lock_task_rows_in_tx(transaction, context, &[task_id], false)
+        .await?
+        .unwrap_or_default();
+    let Some(current) = locked.first() else {
+        return Ok(false);
+    };
+    let now = server_now(current)?;
+    if has_live_lease(current, now) {
+        return Ok(false);
+    }
     let row = Record::new()
         .set("group_id", Value::Null)
         .set("group_seq", 0);
-    context
+    let updated = context
         .approval_tasks()
         .query()
         .where_eq("id", serde_json::json!(task_id))?
         .update_in_tx(transaction, row)
         .await?;
-    Ok(())
+    Ok(updated == 1)
 }
 
 /// `where_in` 的单次元素上限（与框架 `MAX_IN_LIST_SIZE` 同值）。
@@ -326,7 +412,17 @@ pub(crate) async fn list_groups_for_config(
     Ok(rows)
 }
 
-/// 读一个组的**全部任务行**（leader `group_seq=0` 在最前），按 `group_seq` 升序。
+/// 在调用方事务内锁住一个组的**全部任务行**（`FOR UPDATE`，按 `group_seq` 升序）。
+///
+/// # 为什么必须锁而不只是读
+///
+/// 调用方基于成员行判定「leader 无租约、可以复位/解散」，随后还要按 id 更新/删除。
+/// `claim_ready` 只锁任务行、不锁配置行，连接池普通读到「无租约」与写之间足以让
+/// 另一实例认领该行：复位会清掉有效租约，删除会删掉在途任务行（设计 §6.1）。
+/// 行锁把「判定」与「写」放进同一个事务窗口，认领方只能跳过或在提交后重读。
+///
+/// 快照带 `now` 列（服务端 `UNIX_TIMESTAMP()`）：租约判定必须用数据库时钟，
+/// 与认领写入的租约同源。
 ///
 /// # 为什么 leader 也在返回里
 ///
@@ -334,21 +430,46 @@ pub(crate) async fn list_groups_for_config(
 /// 回填给「全部成员」写同一编号、解散判据要「全组都在本次勾选内」——三处都不能少
 /// 了这一行。调用方按 `group_seq` 区分角色（0 = leader，`>=1` = 成员）。
 ///
-/// `group_seq` 必须是 `sortable` 的（DSL 是 fail-closed，漏了这里运行期报 403）；
 /// 顺序即明细行序——播种按扫描顺序落 `group_seq`，所以「组内第几行」是稳定的。
-pub(crate) async fn load_members(
+pub(crate) async fn lock_group_members_in_tx(
+    transaction: &mut Transaction,
     context: &FeishuContext,
     config_id: i64,
     group_key: &str,
 ) -> anyhow::Result<Vec<Record>> {
-    let rows = context
-        .approval_tasks()
-        .query()
-        .where_eq("config_id", serde_json::json!(config_id))?
-        .where_eq("group_id", serde_json::json!(group_key))?
-        .order_by("group_seq", SortOrder::Asc)?
-        .order_by("id", SortOrder::Asc)?
-        .all()
+    let rows = transaction
+        .select_for_update::<Record>(
+            yang_db::QueryBuilder::from_pool(
+                context.approval_tasks().pool(),
+                yang_db::table!("feishu_approval_task"),
+            )
+            .fields(&[
+                yang_db::field!("id"),
+                yang_db::field!("record_id"),
+                yang_db::field!("group_seq"),
+                yang_db::field!("state"),
+                yang_db::field!("effect_phase"),
+                yang_db::field!("instance_code"),
+                yang_db::field!("serial_number"),
+                yang_db::field!("worker_id"),
+                yang_db::field!("lease_until"),
+            ])
+            .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
+            .where_and(
+                yang_db::field!("config_id"),
+                yang_db::CompareOp::Eq,
+                config_id,
+            )
+            .map_err(anyhow::Error::from)?
+            .where_and(
+                yang_db::field!("group_id"),
+                yang_db::CompareOp::Eq,
+                group_key,
+            )
+            .map_err(anyhow::Error::from)?
+            .order(yang_db::field!("group_seq"), yang_db::SortOrder::Asc)
+            .order(yang_db::field!("id"), yang_db::SortOrder::Asc),
+        )
         .await?;
     Ok(rows)
 }
@@ -363,7 +484,7 @@ pub(crate) async fn load_members(
 ///
 /// # 为什么不直接 `where_gt("group_seq", 0)`
 ///
-/// `group_seq` 只开了 `sortable`（`load_members` 的升序依赖它），`filterable` 没开，
+/// `group_seq` 只开了 `sortable`（成员行的组内顺序依赖它），`filterable` 没开，
 /// DSL 是 fail-closed：拿它当筛选条件会在运行期报 403。同一事务里先读出成员 id、
 /// 再按 `id`（filterable）批量更新，既不动 schema，也保持原子性。
 ///
@@ -411,12 +532,64 @@ pub(crate) async fn set_members_state_in_tx(
     Ok(updated)
 }
 
+/// 在调用方事务内按 id 锁住任务行（`FOR UPDATE`），附服务端当前时间 `now`。
+///
+/// `require_deletable` 为真时顺带复检「可以随组删除」：行数必须与请求一致，且每行
+/// 都未被持有、`effect_phase='ready'`、状态不绑定外部事实。返回 `None` 表示整批
+/// 不可删（调用方一行都不动）。
+async fn lock_task_rows_in_tx(
+    transaction: &mut Transaction,
+    context: &FeishuContext,
+    task_ids: &[i64],
+    require_deletable: bool,
+) -> anyhow::Result<Option<Vec<Record>>> {
+    let rows = transaction
+        .select_for_update::<Record>(
+            yang_db::QueryBuilder::from_pool(
+                context.approval_tasks().pool(),
+                yang_db::table!("feishu_approval_task"),
+            )
+            .fields(&[
+                yang_db::field!("id"),
+                yang_db::field!("state"),
+                yang_db::field!("effect_phase"),
+                yang_db::field!("worker_id"),
+                yang_db::field!("lease_until"),
+            ])
+            .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
+            .where_in(yang_db::field!("id"), task_ids.to_vec()),
+        )
+        .await?;
+    if !require_deletable {
+        return Ok(Some(rows));
+    }
+    if rows.len() != task_ids.len() {
+        return Ok(None);
+    }
+    for row in &rows {
+        let now = server_now(row)?;
+        let state: String = row.require("state")?;
+        let phase: String = row.require("effect_phase")?;
+        if has_live_lease(row, now) || phase != "ready" || !dissolvable_state(&state) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(rows))
+}
+
 /// 删除任务行：先删 `feishu_approval_task_applicant`，再删任务行。
 ///
 /// # 顺序不能反
 ///
 /// applicant 表没有外键，先删任务行会留下指向已删除任务的孤儿 PII（与 `delete_config`
 /// 同一口径）。两段都按 `IN_CHUNK` 切分：框架对超限的 `IN` 是拒绝，不是截断。
+///
+/// # 全有或全无
+///
+/// 组行与成员行必须一起消失，部分删除会留下指向空组的行。所以先 `FOR UPDATE` 锁住
+/// 整批行并复检：任何一行仍在执行（有效租约）、已进入外部写入阶段（`effect_phase`
+/// 非 `ready`）、状态绑定外部事实或行已不存在，就**一行都不删**、返回 0——调用方据此
+/// 放弃本次解散（设计 §6.1）。
 pub(crate) async fn delete_task_rows_in_tx(
     transaction: &mut Transaction,
     context: &FeishuContext,
@@ -424,6 +597,14 @@ pub(crate) async fn delete_task_rows_in_tx(
 ) -> anyhow::Result<u64> {
     if task_ids.is_empty() {
         return Ok(0);
+    }
+    for chunk in task_ids.chunks(IN_CHUNK) {
+        if lock_task_rows_in_tx(transaction, context, chunk, true)
+            .await?
+            .is_none()
+        {
+            return Ok(0);
+        }
     }
     let mut deleted = 0u64;
     for chunk in task_ids.chunks(IN_CHUNK) {
@@ -483,10 +664,7 @@ mod tests {
         let group_seq = task
             .field("group_seq")
             .unwrap_or_else(|| panic!("group_seq 字段必须存在"));
-        assert!(
-            group_seq.is_sortable(),
-            "load_members 按 group_seq 排序依赖该位"
-        );
+        assert!(group_seq.is_sortable(), "组维护按 group_seq 排序依赖该位");
         let group_id = task
             .field("group_id")
             .unwrap_or_else(|| panic!("group_id 字段必须存在"));

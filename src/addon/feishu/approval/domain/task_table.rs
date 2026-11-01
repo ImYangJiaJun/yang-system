@@ -79,7 +79,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("聚合组键")
                 .max_length(64)
                 .filterable(true),
-            // 组内序号：`load_members` 按它升序取成员，`sortable` 是 fail-closed 的。
+            // 组内序号：组维护按它升序取成员（明细行序），`sortable` 是 fail-closed 的。
             group_seq => Int::new()
                 .title("组内序号")
                 .require(true)
@@ -320,7 +320,7 @@ mod tests {
     }
 
     /// 聚合组的两列与 `paused` 状态必须落在声明里：`group_seq` 的 `sortable`
-    /// 是 `load_members` 升序读取的硬依赖，`paused` 不进候选值会让组暂停写不进去。
+    /// 是设计 §4.2 的固定要求（组内明细行序），`paused` 不进候选值会让组暂停写不进去。
     #[test]
     fn group_columns_and_paused_state_are_declared() {
         let definition = definition();
@@ -329,10 +329,7 @@ mod tests {
             .field("group_seq")
             .unwrap_or_else(|| panic!("group_seq 字段必须存在"));
         assert!(group_seq.is_required());
-        assert!(
-            group_seq.is_sortable(),
-            "load_members 按 group_seq 排序依赖该位"
-        );
+        assert!(group_seq.is_sortable(), "设计 §4.2：组内明细行序依赖该位");
         assert_eq!(group_seq.default_value(), Some(&serde_json::json!(0)));
         let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
         let state = spec

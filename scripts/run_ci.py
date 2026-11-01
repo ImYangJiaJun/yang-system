@@ -271,6 +271,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::dissolve_removes_member_rows_and_applicant_rows", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合组维护租约与阶段复检集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_maintenance_rechecks_lease_state_and_phase", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Legacy task record index guard integration",
         ("cargo", "test", "--lib", "--locked", "infrastructure::schema::tests::real_mysql_legacy_task_record_index_guard_blocks_startup", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
