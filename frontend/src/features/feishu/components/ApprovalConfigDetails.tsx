@@ -347,9 +347,15 @@ export function ApprovalConfigDetails({
           </div>
           <div>
             <p className="text-xs text-muted-foreground">如何生成审批</p>
-            <p className="mt-2 text-sm font-medium">每条记录单独发起</p>
+            <p className="mt-2 text-sm font-medium">
+              {item.aggregateBatch
+                ? "同批聚合（明细多行）"
+                : "每条记录单独发起"}
+            </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              不同数据表可以共用同一个审批模板。
+              {item.aggregateBatch
+                ? "同一批勾选内除明细外内容一致的记录合成一个审批。"
+                : "不同数据表可以共用同一个审批模板。"}
             </p>
           </div>
           <div>
@@ -686,6 +692,11 @@ export function ApprovalConfigDetails({
                     item.batchScopeFieldName ??
                       item.batchScopeField ??
                       "未启用",
+                    false,
+                  ],
+                  [
+                    "同批聚合派发",
+                    item.aggregateBatch ? "已开启" : "未开启",
                     false,
                   ],
                   ["配置时区", item.baseTimezone, false],

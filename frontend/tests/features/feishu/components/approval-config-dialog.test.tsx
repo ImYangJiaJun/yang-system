@@ -43,6 +43,7 @@ const SAVED_CONFIG: ApprovalConfigItem = {
   approvalCode: "CODE-TRAVEL",
   applicantField: "fldApp",
   backfillField: "fldBack",
+  aggregateBatch: false,
   baseTimezone: "Asia/Shanghai",
   enabled: true,
   formSnapshotAt: null,
@@ -1057,6 +1058,111 @@ describe("建配置向导 · 第四步（提交）", () => {
     expect(within(alert).getByText(/该多维表格已配置/)).toBeInTheDocument();
     expect(onCancel).not.toHaveBeenCalled();
   });
+});
+
+describe("同批聚合派发开关", () => {
+  /// 走到第三步（第二步预览控件后必填映射已按名预选，可直接下一步）。
+  async function driveToStep3(
+    user: ReturnType<typeof userEvent.setup>,
+    client: ApprovalWizardClient,
+  ) {
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+  }
+
+  async function fillRequiredFields(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("combobox", { name: "申请人员字段" }));
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+  }
+
+  it("未选批量范围列时禁用，选中后可勾选，清空范围列后自动关闭", async () => {
+    const user = userEvent.setup();
+    await driveToStep3(user, stubClient());
+
+    const aggregate = screen.getByRole("checkbox", { name: "同批聚合派发" });
+    expect(aggregate).not.toBeChecked();
+    expect(aggregate).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("combobox", { name: "批量范围复选框列（可选）" }),
+    );
+    await user.click(await screen.findByRole("option", { name: /纳入批量/ }));
+    expect(aggregate).toBeEnabled();
+    await user.click(aggregate);
+    expect(aggregate).toBeChecked();
+
+    // 清空范围列后开关不能再保持勾选：后端会拒绝「聚合开启但没有范围列」。
+    const wrapper = screen
+      .getByRole("combobox", { name: "批量范围复选框列（可选）" })
+      .closest("div") as HTMLElement;
+    await user.click(
+      within(wrapper).getByRole("button", { name: "列表没有想要的列？手填" }),
+    );
+    await user.clear(screen.getByPlaceholderText("field_id 或列名"));
+    expect(aggregate).not.toBeChecked();
+    expect(aggregate).toBeDisabled();
+  });
+
+  it("创建时勾选开关随 create_config 发送 aggregate_batch", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToStep3(user, client);
+
+    await user.click(
+      screen.getByRole("combobox", { name: "批量范围复选框列（可选）" }),
+    );
+    await user.click(await screen.findByRole("option", { name: /纳入批量/ }));
+    await user.click(screen.getByRole("checkbox", { name: "同批聚合派发" }));
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(
+      await screen.findByText("已开启（明细每条记录一行）"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建配置" }));
+
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          batchScopeField: "fldBatch",
+          aggregateBatch: true,
+        }),
+      ),
+    );
+  }, 15000);
+
+  it("编辑时切换开关以补丁发送 aggregate_batch", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <ApprovalConfigDialog
+        client={client}
+        onCancel={vi.fn()}
+        initialConfig={{ ...SAVED_CONFIG, batchScopeField: "fldBatch" }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    const aggregate = screen.getByRole("checkbox", { name: "同批聚合派发" });
+    expect(aggregate).toBeEnabled();
+    expect(aggregate).not.toBeChecked();
+    await user.click(aggregate);
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(await screen.findByRole("button", { name: "保存配置" }));
+
+    await waitFor(() =>
+      expect(client.updateConfig).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ aggregateBatch: true }),
+      ),
+    );
+  }, 15000);
 });
 
 describe("审批定义 id（详情页跳转）", () => {

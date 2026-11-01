@@ -200,7 +200,15 @@ describe("派发记录页 · 行展开", () => {
             instance_code: null,
             serial_number: null,
           }),
-          taskWire({ id: 5, record_id: "rec-future", state: "future_state" }),
+          taskWire({
+            id: 5,
+            record_id: "rec-paused",
+            state: "paused",
+            last_error: "明细为空，整组已暂停",
+            instance_code: null,
+            serial_number: null,
+          }),
+          taskWire({ id: 6, record_id: "rec-future", state: "future_state" }),
         ]),
     });
     renderRequests();
@@ -234,6 +242,9 @@ describe("派发记录页 · 行展开", () => {
       screen.getByText("外部写入结果未知，请核查飞书记录"),
     ).toBeInTheDocument();
     expect(screen.queryByText("review")).not.toBeInTheDocument();
+    // 聚合组整组暂停：中文标签必须与「待人工核查」区分开。
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+    expect(screen.queryByText("paused")).not.toBeInTheDocument();
     expect(screen.getByText("future_state")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /重试|重放/ })).toBeNull();
     expect(screen.getAllByText("inst-1").length).toBeGreaterThan(0);

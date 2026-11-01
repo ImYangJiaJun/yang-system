@@ -2516,6 +2516,11 @@
                 },
                 "description": "创建配置的输入契约：审批信息必填，完整链接包含 table 参数时可省略 `table_id`。",
                 "properties": {
+                  "aggregate_batch": {
+                    "default": false,
+                    "description": "同批聚合派发开关（设计 §4.2）：默认关闭。打开时必须同时配置批量范围 复选框列，组合校验在 `build_plan` 之后进行。",
+                    "type": "boolean"
+                  },
                   "applicant_field": {
                     "description": "申请人员字段（`field_id` **或**列名都接受，落库统一存 id）。",
                     "type": "string"
@@ -3879,6 +3884,14 @@
                 },
                 "description": "可更新字段均可省略，至少给一个。",
                 "properties": {
+                  "aggregate_batch": {
+                    "default": null,
+                    "description": "同批聚合派发开关（设计 §4.2）；省略即不改。",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
                   "approval_id": {
                     "default": null,
                     "description": "审批定义的数字 ID（只用于控制台「打开审批定义」跳转）；省略即不改， `Some(\"\")` = 清空。",

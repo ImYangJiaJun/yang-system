@@ -4468,6 +4468,11 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
+                    /**
+                     * @description 同批聚合派发开关（设计 §4.2）：默认关闭。打开时必须同时配置批量范围 复选框列，组合校验在 `build_plan` 之后进行。
+                     * @default false
+                     */
+                    aggregate_batch?: boolean;
                     /** @description 申请人员字段（`field_id` **或**列名都接受，落库统一存 id）。 */
                     applicant_field: string;
                     /** @description 审批定义 code。 */
@@ -5196,6 +5201,11 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
+                    /**
+                     * @description 同批聚合派发开关（设计 §4.2）；省略即不改。
+                     * @default null
+                     */
+                    aggregate_batch?: boolean | null;
                     /**
                      * @description 审批定义的数字 ID（只用于控制台「打开审批定义」跳转）；省略即不改， `Some("")` = 清空。
                      * @default null

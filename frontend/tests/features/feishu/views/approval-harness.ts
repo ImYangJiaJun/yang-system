@@ -221,6 +221,7 @@ export function approvalConfigWire(
     backfill_field: "fldBack",
     base_timezone: "Asia/Shanghai",
     enabled: true,
+    aggregate_batch: false,
     config_key: null,
     token_rotated_at: null,
     form_snapshot_at: 1758000000,

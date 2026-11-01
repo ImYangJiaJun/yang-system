@@ -40,6 +40,7 @@ async function mockApprovalConfigs(page: Page) {
     backfill_field: "fldNumber",
     base_timezone: "Asia/Shanghai",
     enabled: index % 2 === 0,
+    aggregate_batch: false,
     updated_at: 1791780000,
     form_snapshot_at: null,
     maps: [

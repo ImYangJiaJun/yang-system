@@ -380,7 +380,8 @@ function JsonBlock({ title, text }: { title: string; text: string | null }) {
 ///
 /// 状态列是运维扫这张表的第一眼，英文原值读不出来。`unnotified`（未通知）与
 /// `terminal`（终止）必须分开显示；`review` 表示外部写入结果未知或重试耗尽，
-/// 需要人工核查，不能当作确定失败或提示自动重放。
+/// 需要人工核查，不能当作确定失败或提示自动重放；`paused` 是聚合组整组暂停，
+/// 只能由人重新批量点击恢复，轮询不会自动重试。
 const TASK_STATE_LABELS: Record<string, string> = {
   pending: "待处理",
   creating: "创建中",
@@ -389,6 +390,7 @@ const TASK_STATE_LABELS: Record<string, string> = {
   terminal: "终止",
   unnotified: "未通知",
   review: "待人工核查",
+  paused: "已暂停",
 };
 
 function taskStateLabel(state: string): string {
