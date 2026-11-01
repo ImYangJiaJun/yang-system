@@ -51,16 +51,17 @@ use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
+use crate::addon::feishu::domain::approval::GetOutcome;
 use crate::addon::feishu::domain::approval_aggregation::{
-    self, group_uuid, members_all_selected, plan_groups, GroupCandidate,
+    self, group_uuid, members_all_selected, plan_groups, signature_hash, GroupCandidate,
 };
-use crate::addon::feishu::domain::approval_attachment::source_identities;
+use crate::addon::feishu::domain::approval_attachment::{preflight, source_identities, transfer};
 use crate::addon::feishu::domain::approval_convert::{
     amount_currency, build_signature, format_local, FixedOffset, FormInput, WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
-    backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
-    DispatchInput as OrchestrationInput, DispatchResult,
+    backfill_in_chunks, dispatch_group, dispatch_one, widget_maps_from_rows, BitableBackfill,
+    DispatchInput as OrchestrationInput, DispatchResult, GroupDispatchInput, GroupMemberInput,
 };
 use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback;
@@ -702,13 +703,20 @@ async fn run_round(
             let task_started = std::time::Instant::now();
             runner.heartbeat.mark("process", Some(task.id));
             let processed = process_one(runner, task).await;
-            runner.heartbeat.mark("record_outcome", Some(task.id));
-            let edit = record_outcome(runner, task, &processed).await;
+            // 组分支自己完成了落库与通知（`persisted`）：通用 `record_outcome`
+            // 的阶段白名单收不了 `lookup`/`creating` 的组尾，还会把 `paused`
+            // 经 `Waiting→pending` 拉回轮询（设计 §4.6 第 10 步）。
+            let edit = if processed.persisted {
+                None
+            } else {
+                runner.heartbeat.mark("record_outcome", Some(task.id));
+                record_outcome(runner, task, &processed).await
+            };
             tracing::debug!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
                 "审批任务本轮处理结束"
             );
-            (processed.result, edit)
+            (processed, edit)
         }
         .instrument(
             tracing::info_span!("approval_task", task_id = task.id, config_id = task.config_id,
@@ -718,6 +726,8 @@ async fn run_round(
         if let Some(edit) = edit {
             row_edits.push(edit);
         }
+        let group_size = outcome.group_size;
+        let outcome = outcome.result;
         counts[match outcome {
             DispatchResult::Backfilled { .. } => 0,
             DispatchResult::Waiting { .. } => 1,
@@ -730,7 +740,7 @@ async fn run_round(
             if task.config_id == *config_id {
                 entries.push((
                     task.record_id.clone(),
-                    round_result_label(task.existing_serial.as_deref(), &outcome),
+                    round_result_label(task.existing_serial.as_deref(), &outcome, group_size),
                 ));
             }
         }
@@ -815,6 +825,15 @@ struct ClaimedTask {
     /// 任务行已有的审批编号（`serial_number`）。用户清空表格编号后重新点击时，
     /// 本轮结论是 `Backfilled` 但这是一次**人工重发**，通知要说明「已发起过」。
     existing_serial: Option<String>,
+    /// 聚合组键（`None` = 普通单条任务）。非空即走 [`process_group`]。
+    group_id: Option<String>,
+    /// 组内序号：0 = leader（执行权持有者），`>=1` = 成员。
+    group_seq: i64,
+    /// 任务行的外部写入阶段。组处理用它判断「是否曾尝试创建 / 是否需要回捞」。
+    effect_phase: String,
+    /// 任务行的实例码。**组 leader 恒为 `None`**——组实例码只落组行（设计 §4.1）；
+    /// 这里保留是为了单条任务的通知与「已发起过」判定沿用原语义。
+    instance_code: Option<String>,
 }
 
 /// 单条配置的播种结果。
@@ -2024,7 +2043,14 @@ fn already_initiated(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
 }
 
 /// 轮末汇总里一条记录的结果描述（约 80 字符内）。抽成纯函数以便离线钉住措辞。
-fn round_result_label(existing_serial: Option<&str>, outcome: &DispatchResult) -> String {
+///
+/// `group_size` 非空（且大于 1）时在结尾补「N 条合 1 单」：一组 N 条只被认领
+/// 一次，汇总里也只出现 leader 那一条，不写清楚会让人以为漏处理了成员。
+fn round_result_label(
+    existing_serial: Option<&str>,
+    outcome: &DispatchResult,
+    group_size: Option<usize>,
+) -> String {
     let text = match outcome {
         DispatchResult::Backfilled { serial_number, .. } => {
             if existing_serial.is_some() {
@@ -2039,6 +2065,10 @@ fn round_result_label(existing_serial: Option<&str>, outcome: &DispatchResult) -
             format!("待重试：{message}")
         }
         DispatchResult::Terminal { message } => format!("失败：{message}"),
+    };
+    let text = match group_size.filter(|size| *size > 1) {
+        Some(size) => format!("{text}（{size} 条合 1 单）"),
+        None => text,
     };
     approval_feedback::one_line(&text, 80)
 }
@@ -2605,6 +2635,14 @@ async fn load_task(
         existing_serial: row
             .optional::<String>("serial_number")?
             .filter(|value| !value.trim().is_empty()),
+        group_id: row
+            .optional::<String>("group_id")?
+            .filter(|value| !value.trim().is_empty()),
+        group_seq: row.require("group_seq")?,
+        effect_phase: row.require("effect_phase")?,
+        instance_code: row
+            .optional::<String>("instance_code")?
+            .filter(|value| !value.trim().is_empty()),
     }))
 }
 
@@ -2617,6 +2655,15 @@ struct TaskOutcome {
     /// 发起人本身不在这里：它是任务的属性（`task.applicant_open_id`），只来自
     /// 点击人，**不再回退读表格申请人列**。
     creator_open_id: Option<String>,
+    /// 组分支已经自己完成落库、通知、审计与指标（设计 §4.6 第 10 步）。
+    ///
+    /// 置位时 [`run_round`] 跳过通用 [`record_outcome`]——那条路径用单条的
+    /// `finish`（阶段白名单 `ready/created`）收尾，会把 `lookup`/`creating` 的组
+    /// 卡死，并把 `paused` 经 `Waiting→pending` 重新拉回轮询。
+    persisted: bool,
+    /// 聚合组内条数（`None` = 普通单条任务）。轮末汇总据此写明「N 条合 1 单」，
+    /// 否则一组 N 条只显示成 1 条，点击人会以为漏处理。
+    group_size: Option<usize>,
 }
 
 impl TaskOutcome {
@@ -2625,6 +2672,8 @@ impl TaskOutcome {
         Self {
             result,
             creator_open_id: None,
+            persisted: false,
+            group_size: None,
         }
     }
 }
@@ -2657,6 +2706,12 @@ fn record_read_failure(
 
 /// 处理一条记录。
 async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
+    // 聚合组必须排在 missing-initiator 早退**之前**（设计 §4.6 第 11 步）：
+    // 组缺身份落组级暂停（可被重新点击拉起），而单条 `Waiting` 会把 leader 留成
+    // `pending` 让它在轮询里反复空转，成员则永远停在原地。
+    if task.group_id.is_some() {
+        return process_group(runner, task).await;
+    }
     // 没有发起人身份就不该出站：不读表结构、不读记录、不碰飞书。
     // 来源只有两种——上线前的存量任务行，以及受理与落库之间的窄窗口。
     // 落 `Waiting`（`outcome_record` 映射成 `pending`）是为了让「有人再点一次
@@ -2820,6 +2875,1174 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
     TaskOutcome {
         result,
         creator_open_id,
+        persisted: false,
+        group_size: None,
+    }
+}
+
+/// 组内一条待参与表单的成员记录。
+struct GroupMemberCells {
+    record_id: String,
+    /// 已按 `field_id` 重映射的单元格。
+    cells: serde_json::Map<String, serde_json::Value>,
+    /// 已搬运好的附件 code（空 = 该成员没有媒体控件）。
+    attachment_codes: BTreeMap<String, Vec<String>>,
+}
+
+/// 处理一个聚合组：组行是身份唯一来源，leader 只承载执行簿记（设计 §4.6）。
+///
+/// # 为什么不能复用单条的 `process_one`
+///
+/// 单条路径的收尾是通用 `record_outcome` + `finish`（阶段白名单 `ready/created`），
+/// 而组在 `60012` 之后停在 `lookup`、创建前停在 `creating`——照抄会让组永远收不了
+/// 尾；单条把中间态写成 `pending` 也会把暂停组重新拉回轮询。所以组分支自己完成
+/// 落库、通知、审计与指标，返回 `persisted=true` 让 `run_round` 跳过通用路径。
+///
+/// # 恢复顺序（设计 §4.6 第 2-5 步）
+///
+/// 1. 组行有实例码 → 直接回填，不做签名复核、不重新创建；
+/// 2. 组行 `lookup` → 按**组 uuid** 回捞，命中即落实例码；`1390003` 未命中把阶段
+///    写回 `ready` 再退避重发；
+/// 3. 否则按成员逐条读记录、解析外部选项（并集）、搬运附件，组装多行明细表单；
+/// 4. 签名复核**仅当组行 `effect_phase='ready'`**——那时还从没尝试过创建。
+async fn process_group(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
+    let Some(group_key) = task.group_id.clone() else {
+        return TaskOutcome::early(DispatchResult::Terminal {
+            message: "任务声称属于聚合组但缺少组键".into(),
+        });
+    };
+    tracing::debug!(
+        stage = "group",
+        task_id = task.id,
+        group_key,
+        group_seq = task.group_seq,
+        task_phase = %task.effect_phase,
+        "开始处理聚合组"
+    );
+    // 只有 leader 承载执行副作用：成员行被认领（批量认领已按 `group_seq=0` 过滤，
+    // 单条点击走摘组）说明组结构异常，不动它，等下一轮摘组或重新点击。
+    if task.group_seq != 0 {
+        tracing::warn!(
+            task_id = task.id,
+            group_key,
+            "聚合组成员行被认领，跳过本轮处理"
+        );
+        return TaskOutcome::early(DispatchResult::Retryable {
+            message: "聚合组成员行被认领，等待重新点击".into(),
+        });
+    }
+    let mut outcome = group_once(runner, task, &group_key).await;
+    outcome.persisted = true;
+    outcome
+}
+
+/// [`process_group`] 的实现：拿结论、落库、发通知、写审计与指标。
+async fn group_once(runner: &RoundRunner, task: &ClaimedTask, group_key: &str) -> TaskOutcome {
+    // 1. 组行：组实例身份的唯一来源。
+    let group = match approval_aggregation::repository::load_group(
+        &runner.context,
+        task.config_id,
+        group_key,
+    )
+    .await
+    {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            // 组行不见了：成员行留着也拼不出任何东西，按暂停报出来等人处理，
+            // 不静默丢。
+            return settle_group(
+                runner,
+                task,
+                group_key,
+                GroupSettlement::paused("聚合组行不存在（可能被手工清理），已暂停"),
+                1,
+            )
+            .await;
+        }
+        Err(error) => {
+            return settle_group(
+                runner,
+                task,
+                group_key,
+                GroupSettlement::retryable(format!("读取聚合组失败：{error}")),
+                1,
+            )
+            .await
+        }
+    };
+    let instance_code = group
+        .optional::<String>("instance_code")
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let group_phase: String = group.require("effect_phase").unwrap_or_default();
+    let group_uuid: String = group.require("uuid").unwrap_or_default();
+    let group_serial: Option<String> = group
+        .optional::<String>("serial_number")
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty());
+
+    // 2. 成员行（按 `group_seq` 升序）：
+    let members = match approval_aggregation::repository::load_members(
+        &runner.context,
+        task.config_id,
+        group_key,
+    )
+    .await
+    {
+        Ok(members) => members,
+        Err(error) => {
+            return settle_group(
+                runner,
+                task,
+                group_key,
+                GroupSettlement::retryable(format!("读取聚合组成员失败：{error}")),
+                1,
+            )
+            .await
+        }
+    };
+    let member_count = members.len();
+    if members.is_empty() {
+        return settle_group(
+            runner,
+            task,
+            group_key,
+            GroupSettlement::paused("聚合组没有成员记录，已暂停"),
+            1,
+        )
+        .await;
+    }
+
+    // 3. 已建实例：恢复回填，跳过签名复核与创建（设计 §4.6 第 2 步）。
+    if let Some(code) = instance_code {
+        return run_group_dispatch(
+            runner,
+            task,
+            group_key,
+            &group_uuid,
+            Some(code.as_str()),
+            &members,
+            member_count,
+            group_serial,
+            None,
+        )
+        .await;
+    }
+
+    // 4. 组行停在 `lookup`（上一轮 create 响应丢失，本地没拿到实例码）：
+    //    先按**组 uuid** 回捞，命中即落实例码；`1390003` 未命中把组行与 leader
+    //    阶段一起写回 `ready`，下一轮才允许重新创建（设计 §4.6 第 3 步、§6.4）。
+    if group_phase == "lookup" && group_uuid.trim().is_empty() {
+        // 组 uuid 缺失 = 组行损坏：不猜 uuid，直接暂停。
+        return settle_group(
+            runner,
+            task,
+            group_key,
+            GroupSettlement::paused("聚合组缺少 uuid，无法按 uuid 回捞实例，已暂停"),
+            member_count,
+        )
+        .await;
+    }
+    if group_phase == "lookup" {
+        tracing::info!(stage = "recover", group_key, "按组 uuid 回捞审批实例");
+        let found = crate::addon::feishu::domain::approval::get_instance(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            &group_uuid,
+        )
+        .await;
+        match found {
+            Ok(GetOutcome::Found(detail)) => {
+                let code = detail.instance_code.clone();
+                if let Err(error) = approval_execution::confirm_group_effect(
+                    &runner.context,
+                    &task.claim,
+                    group_key,
+                    "created",
+                    Some(&code),
+                )
+                .await
+                {
+                    return settle_group(
+                        runner,
+                        task,
+                        group_key,
+                        GroupSettlement::paused(format!(
+                            "按 uuid 回捞到实例但组行确认失败：{error}"
+                        )),
+                        member_count,
+                    )
+                    .await;
+                }
+                return run_group_dispatch(
+                    runner,
+                    task,
+                    group_key,
+                    &group_uuid,
+                    Some(code.as_str()),
+                    &members,
+                    member_count,
+                    group_serial,
+                    None,
+                )
+                .await;
+            }
+            Ok(GetOutcome::NotFound) => {
+                // 实例确实不存在：组行阶段复位为 `ready` 才能重发 create（组行阶段
+                // 是唯一事实，重试不会自己复位）。
+                if let Err(error) = approval_execution::confirm_group_effect(
+                    &runner.context,
+                    &task.claim,
+                    group_key,
+                    "ready",
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(group_key, error = %error, "聚合组阶段复位失败");
+                }
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::retryable("按组 uuid 查不到实例，已复位待重新创建"),
+                    member_count,
+                )
+                .await;
+            }
+            Err(failure) => {
+                let settlement = match failure.kind {
+                    FailureKind::Fatal { .. } => {
+                        GroupSettlement::paused(format!("按组 uuid 回捞失败：{}", failure.message))
+                    }
+                    _ => GroupSettlement::retryable(format!(
+                        "按组 uuid 回捞失败：{}",
+                        failure.message
+                    )),
+                };
+                return settle_group(runner, task, group_key, settlement, member_count).await;
+            }
+        }
+    }
+
+    // 5. 发起人：组缺身份 = 整组暂停（不落 single `Waiting`，设计 §4.6 第 11 步）。
+    if task.applicant_open_id.is_none() {
+        tracing::info!(
+            stage = "initiator",
+            task_id = task.id,
+            group_key,
+            outcome = "paused",
+            "聚合组没有发起人身份，整组暂停"
+        );
+        return settle_group(
+            runner,
+            task,
+            group_key,
+            GroupSettlement::paused(
+                crate::addon::feishu::domain::approval_dispatch::MISSING_INITIATOR_REASON,
+            ),
+            member_count,
+        )
+        .await;
+    }
+
+    // 5. 签名复核只在「从未尝试创建」时做（组行阶段是外部副作用的唯一事实）。
+    //    比较用的是处理期本来就要读的那份记录，不额外拉一遍表。
+    let signature_check = if group_phase == "ready" {
+        group
+            .optional::<String>("signature_hash")
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
+    run_group_dispatch(
+        runner,
+        task,
+        group_key,
+        &group_uuid,
+        None,
+        &members,
+        member_count,
+        group_serial,
+        signature_check.as_deref(),
+    )
+    .await
+}
+
+/// 组签名复核：成员的非明细签名是否仍与组行 `signature_hash` 一致。
+///
+/// 只在组行 `effect_phase='ready'`（从未尝试创建）时调用——那时数据变了还能安全
+/// 地整组暂停重来；已经尝试过创建的组必须续跑，不能因为签名漂移丢弃实例。
+///
+/// 返回 `Some(原因)` 表示不一致。签名用**这条记录自己的**已解析控件集合算，
+/// 与播种期同一函数（`build_signature`）同一输入，可比。
+fn verify_group_signature(
+    widgets: &[WidgetMap],
+    form_snapshot: &str,
+    cells: &serde_json::Map<String, serde_json::Value>,
+    timezone_offset: FixedOffset,
+    stored: &str,
+    signatures: &mut Vec<String>,
+) -> Option<String> {
+    let Ok(identities) = source_identities(widgets, cells) else {
+        return Some("组内记录的附件结构非法，无法复核一致性。请核对后重新点击。".into());
+    };
+    let signature = match build_signature(&FormInput {
+        widgets,
+        form_snapshot,
+        cells,
+        attachment_codes: &identities,
+        timezone_offset,
+    }) {
+        Ok(signature) => signature,
+        Err(error) => {
+            return Some(format!(
+                "组内记录无法生成一致性签名：{error}。请核对后重新点击。"
+            ))
+        }
+    };
+    signatures.push(signature_hash(&signature));
+    if signatures.iter().all(|hash| *hash == signatures[0]) {
+        if signatures[0] == stored {
+            return None;
+        }
+        return Some(
+            "组内记录的非明细字段在排队期间被修改，与分组时不一致。请核对后重新批量点击。".into(),
+        );
+    }
+    Some("组内记录的非明细字段不再一致，无法合成同一个审批实例。请核对后重新批量点击。".into())
+}
+
+/// 逐成员读记录 → 解析外部选项（并集）→ 搬运附件 → 交给 `dispatch_group`。
+#[allow(clippy::too_many_arguments)] // 组派发的要素逐个平铺，收结构体只是挪位置。
+async fn run_group_dispatch(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    group_key: &str,
+    group_uuid: &str,
+    instance_code: Option<&str>,
+    members: &[Record],
+    member_count: usize,
+    group_serial: Option<String>,
+    // 复核签名用的组行 signature_hash；`None` = 不复核（已尝试过创建或已恢复
+    // 实例的组必须续跑，不能因为签名漂移丢掉真实存在的外部实例）。
+    signature_check: Option<&str>,
+) -> TaskOutcome {
+    let coordinates = BitableCoordinates {
+        app_token: task.base_token.clone(),
+        table_id: task.table_id.clone(),
+        view_id: None,
+    };
+    let fields = match bitable::list_all_fields(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+    )
+    .await
+    {
+        Ok(fields) => fields,
+        Err(failure) => {
+            let settlement = match failure.kind {
+                FailureKind::Fatal { .. } => {
+                    GroupSettlement::Paused(format!("读取表结构失败：{}", failure.message))
+                }
+                _ => GroupSettlement::Retryable(format!("读取表结构失败：{}", failure.message)),
+            };
+            return settle_group(runner, task, group_key, settlement, member_count).await;
+        }
+    };
+    let backfill_field_name = match bitable::resolve_field_name(&fields, &task.backfill_field) {
+        Ok(name) => name,
+        Err(error) => {
+            return settle_group(
+                runner,
+                task,
+                group_key,
+                GroupSettlement::paused(format!("回填列不可用：{error}")),
+                member_count,
+            )
+            .await
+        }
+    };
+
+    // 成员记录：(record_id, cells)。已建实例时仍要读：扩展字段要按成员写。
+    let mut rows: Vec<GroupMemberCells> = Vec::with_capacity(members.len());
+    let mut missing: Vec<(i64, String)> = Vec::new();
+    // 已建实例的组里，记录不可读的成员被摘出并落终态（设计 §5 Fatal 分支）。
+    let mut detached = 0usize;
+    let mut pooled = task.widgets.clone();
+    let mut signature_hashes: Vec<String> = Vec::with_capacity(members.len());
+    for member in members.iter() {
+        let task_id: i64 = match member.require("id") {
+            Ok(id) => id,
+            Err(error) => {
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::paused(format!("聚合组成员行缺少 id：{error}")),
+                    member_count,
+                )
+                .await
+            }
+        };
+        let record_id: String = match member.require("record_id") {
+            Ok(record_id) => record_id,
+            Err(error) => {
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::paused(format!("聚合组成员行缺少记录 id：{error}")),
+                    member_count,
+                )
+                .await
+            }
+        };
+        let found = bitable::get_records_by_ids(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            &coordinates,
+            std::slice::from_ref(&record_id),
+        )
+        .await;
+        let record = match found {
+            Ok(items) => items.into_iter().next(),
+            Err(failure) => {
+                let settlement = match failure.kind {
+                    // 记录被删/无权限：组已建实例时该成员退出本组（设计 §5 Fatal 分支），
+                    // 否则整组暂停（还没建单，暂停可重试）。
+                    //
+                    // **leader 不能摘**：`finish_group` 按 leader 定位组，摘掉它就再也
+                    // 收不了尾。leader 记录不可读时整组暂停，等人处理。
+                    FailureKind::Fatal { .. } if instance_code.is_some() && task_id != task.id => {
+                        if let Err(error) =
+                            approval_aggregation::repository::detach_member_as_terminal(
+                                &runner.context,
+                                task_id,
+                                &failure.message,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %error, task_id, "聚合组成员摘出失败");
+                        }
+                        tracing::warn!(
+                            task_id,
+                            record_id = %record_id,
+                            "聚合组成员记录不可读，已摘出本组并落终态"
+                        );
+                        detached += 1;
+                        continue;
+                    }
+                    FailureKind::Fatal { .. } => {
+                        GroupSettlement::paused(format!("读取记录失败：{}", failure.message))
+                    }
+                    _ => GroupSettlement::Retryable(format!("读取记录失败：{}", failure.message)),
+                };
+                return settle_group(runner, task, group_key, settlement, member_count).await;
+            }
+        };
+        let Some(record) = record else {
+            missing.push((task_id, record_id));
+            continue;
+        };
+        let cells = match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
+            Ok(cells) => cells,
+            Err(error) => {
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::paused(format!("解析记录字段失败：{error}")),
+                    member_count,
+                )
+                .await
+            }
+        };
+        // 外部选项映射按**成员并集**：每个成员各自解析一遍，冲突（同 label 映射到
+        // 不同 option_id）判暂停，避免把别人的选择写进组实例。
+        let mut widgets = task.widgets.clone();
+        match resolve_external_options(
+            &runner.context,
+            &task.form_snapshot,
+            &mut widgets,
+            &cells,
+            &fields,
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(conflict) = merge_option_maps(&mut pooled, &widgets) {
+                    return settle_group(
+                        runner,
+                        task,
+                        group_key,
+                        GroupSettlement::paused(conflict),
+                        member_count,
+                    )
+                    .await;
+                }
+            }
+            Err(error) => {
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::paused(format!("外部选项解析失败：{error}")),
+                    member_count,
+                )
+                .await
+            }
+        }
+        // 签名复核（设计 §4.6 第 5 步）：用**该成员自己**已解析的控件集合算，
+        // 与播种期 `build_signature` 同一输入，所以可比。
+        if let Some(stored) = signature_check {
+            if let Some(reason) = verify_group_signature(
+                &widgets,
+                &task.form_snapshot,
+                &cells,
+                task.timezone_offset,
+                stored,
+                &mut signature_hashes,
+            ) {
+                tracing::info!(
+                    stage = "signature",
+                    group_key,
+                    "聚合组签名复核不一致，整组暂停"
+                );
+                return settle_group(
+                    runner,
+                    task,
+                    group_key,
+                    GroupSettlement::paused(reason),
+                    member_count,
+                )
+                .await;
+            }
+        }
+        // 附件：已建实例时不再搬运（只要编号回填，附件早已在实例里）。
+        let attachment_codes = if instance_code.is_some() {
+            BTreeMap::new()
+        } else {
+            match preflight(&widgets, &cells) {
+                Ok(_) => {
+                    match transfer(
+                        runner.transport(),
+                        runner.sleeper.as_ref(),
+                        &runner.tokens,
+                        &coordinates,
+                        &record_id,
+                        &widgets,
+                        &cells,
+                    )
+                    .await
+                    {
+                        Ok(codes) => codes,
+                        Err(failure) => {
+                            let settlement = match failure.kind {
+                                FailureKind::Fatal { .. } => GroupSettlement::Paused(format!(
+                                    "附件搬运失败：{}",
+                                    failure.message
+                                )),
+                                _ => GroupSettlement::Retryable(format!(
+                                    "附件搬运失败：{}",
+                                    failure.message
+                                )),
+                            };
+                            return settle_group(runner, task, group_key, settlement, member_count)
+                                .await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    return settle_group(
+                        runner,
+                        task,
+                        group_key,
+                        GroupSettlement::paused(format!("附件结构非法：{error}")),
+                        member_count,
+                    )
+                    .await
+                }
+            }
+        };
+        rows.push(GroupMemberCells {
+            record_id,
+            cells,
+            attachment_codes,
+        });
+    }
+
+    // 记录被删：已建实例 → 摘出成员并落终态（上面已逐个处理）；未建实例 → 整组暂停。
+    if !missing.is_empty() {
+        let list = missing
+            .iter()
+            .map(|(_, record_id)| record_id.as_str())
+            .collect::<Vec<_>>()
+            .join("、");
+        return settle_group(
+            runner,
+            task,
+            group_key,
+            GroupSettlement::paused(format!("多维表格里已找不到组成员记录：{list}")),
+            member_count,
+        )
+        .await;
+    }
+    if rows.is_empty() {
+        return settle_group(
+            runner,
+            task,
+            group_key,
+            GroupSettlement::paused("聚合组已无可用成员记录，已暂停"),
+            member_count,
+        )
+        .await;
+    }
+    if detached > 0 {
+        tracing::info!(
+            task_id = task.id,
+            group_key,
+            detached,
+            "聚合组处理前摘出了不可读的成员"
+        );
+    }
+
+    let guarded = approval_execution::GroupExecutionTransport {
+        inner: runner.transport(),
+        context: &runner.context,
+        claim: &task.claim,
+        group_key,
+    };
+    let backfill = BitableBackfill {
+        transport: &guarded,
+        sleeper: runner.sleeper.as_ref(),
+        tokens: &runner.tokens,
+        coordinates: &coordinates,
+        fields: &fields,
+    };
+    let member_inputs: Vec<GroupMemberInput<'_>> = rows
+        .iter()
+        .map(|row| GroupMemberInput {
+            record_id: row.record_id.as_str(),
+            cells: &row.cells,
+            attachment_codes: row.attachment_codes.clone(),
+        })
+        .collect();
+    let result = dispatch_group(
+        &guarded,
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &backfill,
+        &GroupDispatchInput {
+            fields: &fields,
+            context: Some(&runner.context),
+            execution: Some(&task.claim),
+            coordinates: &coordinates,
+            group_key,
+            group_uuid,
+            instance_code,
+            backfill_field_name: &backfill_field_name,
+            status_field: task.status_field.as_deref(),
+            flow_field: task.flow_field.as_deref(),
+            start_time_field: task.start_time_field.as_deref(),
+            end_time_field: task.end_time_field.as_deref(),
+            department_field: task.department_field.as_deref(),
+            handler_field: task.handler_field.as_deref(),
+            approval_code: &task.approval_code,
+            widgets: &pooled,
+            form_snapshot: &task.form_snapshot,
+            timezone_offset: task.timezone_offset,
+            applicant_field: &task.applicant_field,
+            applicant_open_id: task.applicant_open_id.as_deref(),
+            members: &member_inputs,
+        },
+    )
+    .await;
+    let settlement = match result {
+        DispatchResult::Backfilled { serial_number, .. } => {
+            GroupSettlement::Succeeded(serial_number, group_serial.clone())
+        }
+        DispatchResult::Terminal { message } => GroupSettlement::Paused(message),
+        DispatchResult::CreatedPendingBackfill { message, .. } => {
+            GroupSettlement::RetryableWithSerial(message, group_serial)
+        }
+        _ => {
+            let message = match &result {
+                DispatchResult::Waiting { reason } => reason.clone(),
+                DispatchResult::Retryable { message } => message.clone(),
+                _ => "聚合组本轮未完成".to_string(),
+            };
+            GroupSettlement::Retryable(message)
+        }
+    };
+    settle_group(runner, task, group_key, settlement, member_count).await
+}
+
+/// 把成员解析出的选项映射并入整组的并集。
+///
+/// 同一控件同一文案映射到不同 `option_id` 说明两位成员选了**不同**的业务选项，
+/// 合成一张单时必须暂停：随便取一个会把别人的选择写进组实例（设计 §4.6 第 4 步）。
+fn merge_option_maps(pooled: &mut [WidgetMap], member: &[WidgetMap]) -> Result<(), String> {
+    for widget in member {
+        let Some(target) = pooled
+            .iter_mut()
+            .find(|target| target.widget_id == widget.widget_id)
+        else {
+            continue;
+        };
+        for (label, option_id) in &widget.option_map {
+            match target.option_map.get(label) {
+                None => {
+                    target.option_map.insert(label.clone(), option_id.clone());
+                }
+                Some(existing) if existing == option_id => {}
+                Some(_) => {
+                    return Err(format!(
+                        "同一批记录里控件「{}」的选项「{label}」对应了不同的审批选项，无法合成一个审批实例。请核对后重新点击。",
+                        widget.widget_id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 组成员行的状态（组专用收尾的唯一输入）。
+enum GroupSettlement {
+    /// 编号已回填全部成员。第二项是处理前**组行**已有的编号（`None` = 首次回填），
+    /// 用于把「清空编号后重新点击」的回执与首次成功区分开——对应单条的
+    /// `already_initiated` 判定（组编号只落组行，leader 永远没有 `existing_serial`）。
+    Succeeded(String, Option<String>),
+    /// 整组暂停：`paused` 落 leader 与全体成员，不写回填列（设计 §5）。
+    Paused(String),
+    /// 可重试：leader 保持 `pending`，按既有退避与 attempts 预算。
+    Retryable(String),
+    /// 可重试但已知编号：用于「实例已确认、回填未完成」，组行仍有编号可写。
+    RetryableWithSerial(String, Option<String>),
+}
+
+impl GroupSettlement {
+    fn paused(message: impl Into<String>) -> Self {
+        Self::Paused(message.into())
+    }
+    fn retryable(message: impl Into<String>) -> Self {
+        Self::Retryable(message.into())
+    }
+}
+
+/// 组收尾：`finish_group` 一个事务写 leader + 成员 + 组行，再发通知、写审计与指标。
+///
+/// 这里取代通用 `record_outcome`：组通知按组渲染一次（`group_notification`），
+/// 请求日志去重对组不适用（组没有按后的 HTTP 记录），去重靠 leader 的
+/// `last_error` 变化（`should_notify` 的语义）。
+async fn settle_group(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    group_key: &str,
+    settlement: GroupSettlement,
+    member_count: usize,
+) -> TaskOutcome {
+    if !approval_execution::is_owned(&runner.context, &task.claim)
+        .await
+        .unwrap_or(false)
+    {
+        tracing::warn!(task_id = task.id, "聚合组执行权已失效，拒绝通知与结果写回");
+        return TaskOutcome {
+            result: DispatchResult::Retryable {
+                message: "聚合组执行权已失效".into(),
+            },
+            creator_open_id: None,
+            persisted: true,
+            group_size: Some(member_count),
+        };
+    }
+
+    let (state, result, reason, serial, retry) = match &settlement {
+        GroupSettlement::Succeeded(serial, _) => (
+            "backfilled",
+            DispatchResult::Backfilled {
+                serial_number: serial.clone(),
+                instance_code: task.instance_code.clone().unwrap_or_default(),
+            },
+            None,
+            Some(serial.clone()),
+            false,
+        ),
+        GroupSettlement::Paused(message) => (
+            "paused",
+            DispatchResult::Terminal {
+                message: message.clone(),
+            },
+            Some(message.clone()),
+            None,
+            false,
+        ),
+        GroupSettlement::Retryable(message) => (
+            "pending",
+            DispatchResult::Retryable {
+                message: message.clone(),
+            },
+            Some(message.clone()),
+            None,
+            true,
+        ),
+        GroupSettlement::RetryableWithSerial(message, serial) => (
+            "pending",
+            DispatchResult::CreatedPendingBackfill {
+                message: message.clone(),
+                instance_code: task.instance_code.clone().unwrap_or_default(),
+                serial_number: serial.clone(),
+            },
+            Some(message.clone()),
+            serial.clone(),
+            true,
+        ),
+    };
+
+    // 通知：结论变化才发（暂停消息含行号与原因，靠 `last_error` 去重）。
+    let notified = if should_notify_group(task, &settlement) {
+        let open_id = task.applicant_open_id.as_deref();
+        match open_id {
+            Some(open_id) => {
+                group_notification(runner, task, group_key, open_id, &settlement, member_count)
+                    .await
+            }
+            None => {
+                metrics::counter!("feishu_approval_notify_total", "result" => "no_recipient")
+                    .increment(1);
+                false
+            }
+        }
+    } else {
+        true
+    };
+    let reason = if state == "pending" && !notified {
+        reason.map(|reason| format!("通知未送达：{reason}"))
+    } else {
+        reason
+    };
+
+    match approval_execution::finish_group(
+        &runner.context,
+        &task.claim,
+        group_key,
+        state,
+        serial.as_deref(),
+        reason.as_deref(),
+        retry,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(task_id = task.id, group_key, "聚合组收尾被拒：执行权已失效");
+            return TaskOutcome {
+                result,
+                creator_open_id: None,
+                persisted: true,
+                group_size: Some(member_count),
+            };
+        }
+        Err(error) => {
+            tracing::error!(%error, task_id = task.id, group_key, "聚合组收尾未能持久确认");
+            return TaskOutcome {
+                result,
+                creator_open_id: None,
+                persisted: true,
+                group_size: Some(member_count),
+            };
+        }
+    }
+
+    metrics::counter!(
+        "feishu_approval_dispatch_total",
+        "outcome" => match (&settlement, state) {
+            (GroupSettlement::Succeeded(_, _), _) => "backfilled",
+            (_, "paused") => "terminal",
+            (_, _) => "retryable",
+        }
+    )
+    .increment(member_count as u64);
+
+    if let GroupSettlement::Succeeded(serial, _) = &settlement {
+        append_group_audit(runner, task, serial).await;
+    }
+
+    TaskOutcome {
+        result,
+        creator_open_id: None,
+        persisted: true,
+        group_size: Some(member_count),
+    }
+}
+
+/// 组通知去重：结论相对上一轮是否变化。
+///
+/// 组没有按 `record_id` 的 HTTP 请求记录，`http_path_notified` 那套去重不适用；
+/// 判据与单条一致——本轮原因 == leader 的 `last_error` 即「上一轮已通知」。
+/// 成功是终态（组退出认领集），只在「回填完成」这一轮出现一次，一律通知；
+/// 清空编号后重新点击时用户也要拿到这次点击的回执。
+fn should_notify_group(task: &ClaimedTask, settlement: &GroupSettlement) -> bool {
+    let reason = match settlement {
+        GroupSettlement::Succeeded(_, _) => return true,
+        GroupSettlement::Paused(message) | GroupSettlement::Retryable(message) => message,
+        GroupSettlement::RetryableWithSerial(message, _) => message,
+    };
+    task.last_error.as_deref() != Some(reason.as_str())
+}
+
+/// 组通知正文里「成员行号摘要」的条数上限（超出折成「等 N 条」）。
+const GROUP_ROW_SUMMARY: usize = 5;
+
+/// 组暂停消息：失败成员行号 + 原因 + 重新点击提醒。
+///
+/// 行号是**表内行号**（用户能看到的那一列），不是 `record_id`：暂停通知的唯一
+/// 作用是「去表里修哪几行」，贴一串 `recXXXX` 用户无从下手。
+fn group_pause_message(size: usize, failing: &[(String, String)], reclick: bool) -> String {
+    let mut lines = vec![format!("本组共 {size} 条记录，整组未派发。")];
+    if failing.is_empty() {
+        lines.push("原因：本组数据未通过校验，详见派发记录。".to_string());
+    } else {
+        for (row, reason) in failing.iter().take(GROUP_ROW_SUMMARY) {
+            lines.push(format!(
+                "第 {row} 行：{}",
+                approval_feedback::one_line(reason, 120)
+            ));
+        }
+        if failing.len() > GROUP_ROW_SUMMARY {
+            lines.push(format!(
+                "等 {} 处问题（仅列前 {GROUP_ROW_SUMMARY} 条）。",
+                failing.len()
+            ));
+        }
+    }
+    if reclick {
+        lines.push("下一步：修好上述记录后，请重新勾选本批记录并再次点击批量派发。".to_string());
+    }
+    lines.join("\n")
+}
+
+/// 组通知：一次渲染、成员行号预解析后随正文出站（设计 §4.8）。
+///
+/// 与单条通知的差别：
+/// - 跳过 `http_path_notified` 去重（组没有按 `record_id` 的请求日志）；
+/// - 行号在**发送前**一次性扫描并写进正文，不用 `RowNumberEdit` 逐条编辑——
+///   那套编辑只能表达单个 `record_id`，同条消息多次编辑是覆盖式更新；
+/// - 发送成功返回 `true`，失败只告警（不影响组的执行结论）。
+async fn group_notification(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    group_key: &str,
+    open_id: &str,
+    settlement: &GroupSettlement,
+    member_count: usize,
+) -> bool {
+    let coordinates = BitableCoordinates {
+        app_token: task.base_token.clone(),
+        table_id: task.table_id.clone(),
+        view_id: None,
+    };
+    let members =
+        approval_aggregation::repository::load_members(&runner.context, task.config_id, group_key)
+            .await
+            .unwrap_or_default();
+    let record_ids: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.optional::<String>("record_id").ok().flatten())
+        .collect();
+    let rows = bitable::record_row_numbers(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+        &record_ids,
+    )
+    .await
+    .unwrap_or_default();
+
+    let (status, reason) = match settlement {
+        GroupSettlement::Succeeded(serial, prior) => {
+            let row_text = group_row_summary(&rows, &record_ids);
+            // 组行已有同一编号 = 清空编号后的人工重发，措辞要说明「已发起过」。
+            let lead = if prior.as_deref() == Some(serial.as_str()) {
+                format!("已发起过：编号 {serial}（已重新回填）")
+            } else {
+                format!("编号 {serial} 已回填")
+            };
+            (
+                approval_feedback::FeedbackStatus::Succeeded,
+                format!("{lead}本组 {member_count} 条记录。{row_text}"),
+            )
+        }
+        GroupSettlement::Paused(message) => {
+            // 暂停原因是**整组级**的（校验失败、签名漂移、缺发起人…），落到每个
+            // 成员行都是同一句；所以逐行列出成员行号 + 同一原因，用户照着行号去改。
+            let failing: Vec<(String, String)> = record_ids
+                .iter()
+                .map(|record_id| (row_label(&rows, record_id), message.clone()))
+                .collect();
+            (
+                approval_feedback::FeedbackStatus::Failed,
+                group_pause_message(member_count, &failing, true),
+            )
+        }
+        GroupSettlement::Retryable(message) => (
+            approval_feedback::FeedbackStatus::Retryable,
+            format!("本组 {member_count} 条记录本轮未完成：{message}"),
+        ),
+        GroupSettlement::RetryableWithSerial(message, _) => (
+            approval_feedback::FeedbackStatus::CreatedPendingBackfill,
+            format!("本组 {member_count} 条记录回填尚未完成：{message}"),
+        ),
+    };
+
+    let names = notification_names(runner, task).await;
+    let text = approval_feedback::render(
+        status,
+        &reason,
+        &names,
+        None,
+        None,
+        None,
+        &task.base_token,
+        &task.table_id,
+    );
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+    let result = crate::addon::feishu::domain::approval_notification::send_feedback(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &recipient,
+        &text,
+        &[],
+    )
+    .await;
+    match result.status {
+        crate::addon::feishu::domain::approval_notification::NotificationStatus::Sent => {
+            tracing::info!(
+                task_id = task.id,
+                group_key,
+                members = member_count,
+                "聚合组通知：IM 消息发送成功"
+            );
+            true
+        }
+        status => {
+            tracing::warn!(
+                task_id = task.id,
+                group_key,
+                status = ?status,
+                message = %result.message,
+                "聚合组通知：IM 消息发送失败（不影响审批结论）"
+            );
+            false
+        }
+    }
+}
+
+/// 通知头部的配置/多维表/数据表名称（读失败退化为「名称暂不可用」）。
+async fn notification_names(runner: &RoundRunner, task: &ClaimedTask) -> String {
+    let lookup = async {
+        runner
+            .context
+            .approval_configs()
+            .query()
+            .where_primary_key_eq(serde_json::json!(task.config_id))?
+            .optional()
+            .await
+    };
+    let config = match tokio::time::timeout(Duration::from_secs(2), lookup).await {
+        Ok(Ok(row)) => row,
+        _ => None,
+    };
+    let name = |field: &str| {
+        let value = config
+            .as_ref()
+            .and_then(|row| row.optional::<String>(field).ok().flatten());
+        approval_feedback::display_name(value.as_deref())
+    };
+    format!(
+        "配置：{}\n多维表：{}\n数据表：{}",
+        name("title"),
+        name("base_name"),
+        name("table_name")
+    )
+}
+
+/// 成员行号摘要：前 [`GROUP_ROW_SUMMARY`] 个，超出折成「等 N 条」。
+fn group_row_summary(rows: &HashMap<String, usize>, record_ids: &[String]) -> String {
+    if record_ids.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<String> = record_ids
+        .iter()
+        .take(GROUP_ROW_SUMMARY)
+        .map(|record_id| row_label(rows, record_id))
+        .collect();
+    if record_ids.len() > GROUP_ROW_SUMMARY {
+        format!(
+            "记录：第 {} 行等 {} 条",
+            labels.join("、"),
+            record_ids.len()
+        )
+    } else {
+        format!("记录：第 {} 行", labels.join("、"))
+    }
+}
+
+/// 行号文案：扫不到（20 页上限、视图外）时退化为「未知行」而不是猜。
+fn row_label(rows: &HashMap<String, usize>, record_id: &str) -> String {
+    match rows.get(record_id) {
+        Some(row) => row.to_string(),
+        None => "未知".to_string(),
+    }
+}
+
+/// 组成功审计：以系统身份落一条「谁、何时、对哪组、发了哪个实例」。
+async fn append_group_audit(runner: &RoundRunner, task: &ClaimedTask, serial: &str) {
+    let constructed: Result<_, BaseError> = (|| {
+        let config_entity = audit::entity("feishu_approval_config", task.config_id)?;
+        let task_entity = audit::entity("feishu_approval_task", task.id)?;
+        let summary = audit::summary([
+            ("outcome_code", serde_json::json!("created")),
+            ("record_id", serde_json::json!(task.record_id.clone())),
+            ("serial_number", serde_json::json!(serial.to_string())),
+        ])?;
+        audit::succeeded_system_event_without_ctx(
+            "feishu-approval-worker",
+            "feishu.approval_dispatch",
+            Some(config_entity),
+            task_entity,
+            summary,
+        )
+    })();
+    if let Err(error) = &constructed {
+        tracing::error!(error = %error, task_id = task.id, "聚合组审计事件构造失败");
+    }
+    if let Ok(event) = constructed {
+        match runner.tools.mysql() {
+            Ok(database) => {
+                if let Err(error) = audit::append_independent(database.pool(), &event).await {
+                    tracing::error!(error = %error, task_id = task.id, "聚合组审计写入失败");
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, task_id = task.id, "聚合组审计取库失败");
+            }
+        }
     }
 }
 
@@ -3804,6 +5027,10 @@ mod tests {
             form_snapshot: String::new(),
             last_error: last_error.map(str::to_string),
             existing_serial: None,
+            group_id: None,
+            group_seq: 0,
+            effect_phase: "ready".to_string(),
+            instance_code: None,
         }
     }
 
@@ -3835,22 +5062,154 @@ mod tests {
         );
     }
 
+    /// 选项并集：同 label 同 option_id 合并，冲突判暂停（否则会把别人的选择写进组实例）。
+    #[test]
+    fn option_union_merges_and_rejects_conflicting_labels() {
+        let widget = |option_map: &[(&str, &str)]| WidgetMap {
+            widget_id: "wSel".to_string(),
+            widget_type: "radioV2".to_string(),
+            required: false,
+            bitable_field: "fldSel".to_string(),
+            interval_end_field: None,
+            converter: crate::addon::feishu::domain::approval_convert::Converter::Option,
+            option_map: option_map
+                .iter()
+                .map(|(label, id)| ((*label).to_string(), (*id).to_string()))
+                .collect(),
+            option_source_key: None,
+            currency: None,
+        };
+        let mut pooled = vec![widget(&[("差旅", "opt-1")])];
+        assert!(merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-1")])]).is_ok());
+        assert!(
+            merge_option_maps(&mut pooled, &[widget(&[("采购", "opt-2")])]).is_ok(),
+            "新文案必须并入并集"
+        );
+        assert_eq!(pooled[0].option_map.len(), 2);
+        let conflict = merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-9")])]);
+        assert!(
+            matches!(&conflict, Err(reason) if reason.contains("不同的审批选项")),
+            "{conflict:?}"
+        );
+    }
+
+    /// 组签名复核：同一签名的两名成员通过与组行一致；任一成员与播种摘要不同、
+    /// 或两名成员彼此不再一致，都判暂停（设计 §4.6 第 5 步）。
+    #[test]
+    fn group_signature_check_pauses_on_drift_or_mismatch() {
+        let widgets = aggregate_widgets();
+        let timezone =
+            FixedOffset::from_seconds(8 * 3600).unwrap_or_else(|error| panic!("{error}"));
+        let cells = |text: &str| {
+            serde_json::Map::from_iter([("fldText".to_string(), serde_json::json!(text))])
+        };
+        let stored = aggregate_signature_hash("报销");
+
+        // 两名成员都是「报销」：与组行摘要一致，不暂停。
+        let mut hashes = Vec::new();
+        for _ in 0..2 {
+            assert!(
+                verify_group_signature(
+                    &widgets,
+                    AGGREGATE_FORM_SNAPSHOT,
+                    &cells("报销"),
+                    timezone,
+                    &stored,
+                    &mut hashes,
+                )
+                .is_none(),
+                "同签名成员不得被判暂停"
+            );
+        }
+        assert_eq!(hashes.len(), 2);
+
+        // 与组行摘要不同（排队期间被改）：暂停。
+        let mut hashes = Vec::new();
+        let drift = verify_group_signature(
+            &widgets,
+            AGGREGATE_FORM_SNAPSHOT,
+            &cells("改了"),
+            timezone,
+            &stored,
+            &mut hashes,
+        );
+        assert!(
+            drift
+                .as_deref()
+                .is_some_and(|reason| reason.contains("排队期间被修改")),
+            "{drift:?}"
+        );
+
+        // 两名成员彼此不一致：暂停。
+        let mut hashes = Vec::new();
+        assert!(verify_group_signature(
+            &widgets,
+            AGGREGATE_FORM_SNAPSHOT,
+            &cells("报销"),
+            timezone,
+            &stored,
+            &mut hashes,
+        )
+        .is_none());
+        let mismatch = verify_group_signature(
+            &widgets,
+            AGGREGATE_FORM_SNAPSHOT,
+            &cells("另一批"),
+            timezone,
+            &stored,
+            &mut hashes,
+        );
+        assert!(
+            mismatch
+                .as_deref()
+                .is_some_and(|reason| reason.contains("不再一致")),
+            "{mismatch:?}"
+        );
+    }
+
+    /// 组暂停消息必须把「重新点击」这一步说清楚：暂停组不会被轮询自动重试，
+    /// 消息不说重试方式的话，用户只能看着失败记录等。
+    #[test]
+    fn pause_message_mentions_reclick() {
+        let message = group_pause_message(3, &[("7".to_string(), "明细为空".to_string())], true);
+        assert!(message.contains("3 条"), "{message}");
+        assert!(message.contains("第 7 行"), "{message}");
+        assert!(message.contains("明细为空"), "{message}");
+        assert!(message.contains("重新勾选"), "{message}");
+        assert!(message.contains("再次点击批量派发"), "{message}");
+
+        // 无明细原因时也要给出可执行提示，且不写「详见派发记录」以外的废话。
+        let generic = group_pause_message(1, &[], true);
+        assert!(generic.contains("未通过校验"), "{generic}");
+        assert!(generic.contains("重新勾选"), "{generic}");
+
+        // 失败项超过上限时折成「等 N 处问题」，不把正文撑爆。
+        let many: Vec<(String, String)> = (1..=9)
+            .map(|row| (row.to_string(), "原因".to_string()))
+            .collect();
+        let capped = group_pause_message(9, &many, false);
+        assert_eq!(capped.matches("第 ").count(), GROUP_ROW_SUMMARY, "{capped}");
+        assert!(capped.contains("等 9 处问题"), "{capped}");
+        assert!(!capped.contains("重新勾选"), "reclick=false 时不写重试提醒");
+    }
+
     #[test]
     fn round_result_labels_cover_every_outcome() {
         let success = DispatchResult::Backfilled {
             serial_number: "S1".into(),
             instance_code: "I".into(),
         };
-        assert_eq!(round_result_label(None, &success), "成功：编号 S1");
+        assert_eq!(round_result_label(None, &success, None), "成功：编号 S1");
         assert_eq!(
-            round_result_label(Some("S1"), &success),
+            round_result_label(Some("S1"), &success, None),
             "已发起过：编号 S1（已重新回填）"
         );
         assert!(round_result_label(
             None,
             &DispatchResult::Waiting {
                 reason: "缺少必填值".into()
-            }
+            },
+            None
         )
         .starts_with("待补齐："));
         for outcome in [
@@ -3863,13 +5222,14 @@ mod tests {
                 serial_number: None,
             },
         ] {
-            assert!(round_result_label(None, &outcome).starts_with("待重试："));
+            assert!(round_result_label(None, &outcome, None).starts_with("待重试："));
         }
         assert!(round_result_label(
             None,
             &DispatchResult::Terminal {
                 message: "映射坏了".into()
-            }
+            },
+            None
         )
         .starts_with("失败："));
         // 逐条结果截断到约 80 字符。
@@ -3878,6 +5238,7 @@ mod tests {
             &DispatchResult::Terminal {
                 message: "长".repeat(200),
             },
+            None,
         );
         assert_eq!(long.chars().count(), 80);
     }
@@ -4907,7 +6268,7 @@ mod tests {
                 "has_more": false,
                 "total": 3,
                 "items": [
-                    {"field_id": "fldNumber", "field_name": "审批编号", "type": 2},
+                    {"field_id": "fldNumber", "field_name": "审批编号", "type": 15},
                     {"field_id": "fldScope", "field_name": "纳入批量", "type": 7},
                     {"field_id": "fldText", "field_name": "事由", "type": 1},
                 ]
@@ -5845,6 +7206,802 @@ mod tests {
         assert_eq!(groups, 1, "守卫拒绝时组行必须保留");
 
         cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+    // -----------------------------------------------------------------------
+    // 组处理：认领、恢复、暂停、回填与组通知（真实 MySQL + 脚本传输）
+    // -----------------------------------------------------------------------
+
+    fn ok_body(code: i64) -> String {
+        // 回填与写扩展字段都要过 `decode_data`：缺 `data` 会被判成响应信封不合法。
+        serde_json::json!({"code": code, "msg": "", "data": {}}).to_string()
+    }
+
+    fn field_list_envelope() -> String {
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {
+                "has_more": false,
+                "total": 3,
+                "items": [
+                    // 编号回填是 `{text, link}` 对象：只有链接（15）与文本（1）收得住，
+                    // 配置里 `fldNumber` 的类型在这里决定回填成败。
+                    {"field_id": "fldNumber", "field_name": "审批编号", "type": 15},
+                    {"field_id": "fldText", "field_name": "事由", "type": 1},
+                    // 发起人列：成功回填后 `write_extended` 要逐成员覆盖成点击人。
+                    {"field_id": "fldPerson", "field_name": "发起人", "type": 11},
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    fn batch_get_envelope(items: &[(&str, &str)]) -> String {
+        let rows: Vec<serde_json::Value> = items
+            .iter()
+            .map(|(record_id, text)| {
+                serde_json::json!({
+                    "record_id": record_id,
+                    "fields": {"事由": text},
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "code": 0,
+            "msg": "",
+            "data": {"records": rows}
+        })
+        .to_string()
+    }
+
+    fn create_envelope(instance_code: &str) -> String {
+        serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "data": {"instance_code": instance_code}
+        })
+        .to_string()
+    }
+
+    fn detail_envelope(instance_code: &str, serial: &str) -> String {
+        serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "instance_code": instance_code,
+                "serial_number": serial,
+                "status": "PENDING"
+            }
+        })
+        .to_string()
+    }
+
+    /// 播种时签名用的控件（与 `insert_aggregate_field_map` 写的映射一一对应）。
+    fn aggregate_widgets() -> Vec<WidgetMap> {
+        vec![WidgetMap {
+            widget_id: "wName".to_string(),
+            widget_type: "input".to_string(),
+            required: false,
+            bitable_field: "fldText".to_string(),
+            interval_end_field: None,
+            converter: crate::addon::feishu::domain::approval_convert::Converter::Direct,
+            option_map: BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+        }]
+    }
+
+    /// 「事由」同为 `text` 的两条记录在播种期会算出的签名摘要。
+    fn aggregate_signature_hash(text: &str) -> String {
+        let cells = serde_json::Map::from_iter([("fldText".to_string(), serde_json::json!(text))]);
+        let signature = build_signature(&FormInput {
+            widgets: &aggregate_widgets(),
+            form_snapshot: AGGREGATE_FORM_SNAPSHOT,
+            cells: &cells,
+            attachment_codes: &BTreeMap::new(),
+            timezone_offset: FixedOffset::from_seconds(8 * 3600)
+                .unwrap_or_else(|error| panic!("{error}")),
+        })
+        .unwrap_or_else(|error| panic!("签名应可计算: {error}"));
+        signature_hash(&signature)
+    }
+
+    /// 组处理夹具：一行组行 + leader/member 两行任务行，配置与映射齐备。
+    struct GroupProcessingFixture {
+        url: String,
+        context: Arc<FeishuContext>,
+        pool: sqlx::MySqlPool,
+        config_id: i64,
+        group_key: String,
+        leader_id: i64,
+        member_id: i64,
+    }
+
+    impl GroupProcessingFixture {
+        async fn new(phase: &str, instance_code: Option<&str>) -> anyhow::Result<Self> {
+            let (_database, context) = real_mysql_context().await?;
+            let pool = context.approval_tasks().pool().clone();
+            let namespace = uuid::Uuid::new_v4().simple().to_string();
+            let config_id = insert_aggregate_config(&pool, &namespace, "g", false).await?;
+            insert_aggregate_field_map(&pool, config_id).await?;
+            let group_key = format!("gq{namespace}");
+            sqlx::query(
+                "INSERT INTO feishu_approval_group \
+                 (config_id,group_key,signature_hash,uuid,effect_phase,instance_code,created_at,updated_at) \
+                 VALUES (?,?,?,?,?,?,NOW(),NOW())",
+            )
+            .bind(config_id)
+            .bind(&group_key)
+            .bind(aggregate_signature_hash("报销"))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(phase)
+            .bind(instance_code)
+            .execute(&pool)
+            .await?;
+            let leader_record = format!("{namespace}-leader");
+            let member_record = format!("{namespace}-member");
+            let leader_id = insert_group_task_row(
+                &pool,
+                config_id,
+                &group_key,
+                0,
+                &leader_record,
+                "pending",
+                "ready",
+                None,
+            )
+            .await?;
+            let member_id = insert_group_task_row(
+                &pool,
+                config_id,
+                &group_key,
+                1,
+                &member_record,
+                "pending",
+                "ready",
+                None,
+            )
+            .await?;
+            sqlx::query("UPDATE feishu_approval_task SET last_error='等待发起人' WHERE id=?")
+                .bind(leader_id)
+                .execute(&pool)
+                .await?;
+            let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+            Ok(Self {
+                url,
+                context,
+                pool,
+                config_id,
+                group_key,
+                leader_id,
+                member_id,
+            })
+        }
+
+        async fn leader_record(&self) -> anyhow::Result<String> {
+            Ok(
+                sqlx::query_scalar("SELECT record_id FROM feishu_approval_task WHERE id=?")
+                    .bind(self.leader_id)
+                    .fetch_one(&self.pool)
+                    .await?,
+            )
+        }
+
+        async fn member_record(&self) -> anyhow::Result<String> {
+            Ok(
+                sqlx::query_scalar("SELECT record_id FROM feishu_approval_task WHERE id=?")
+                    .bind(self.member_id)
+                    .fetch_one(&self.pool)
+                    .await?,
+            )
+        }
+
+        /// 认领 leader 并读回完整任务（`process_group` 需要执行权与组身份）。
+        async fn claim_leader(&self, runner: &RoundRunner) -> anyhow::Result<ClaimedTask> {
+            sqlx::query("UPDATE feishu_approval_task SET available_at=NULL, worker_id=NULL, lease_until=NULL WHERE id=?")
+                .bind(self.leader_id)
+                .execute(&self.pool)
+                .await?;
+            let claim = crate::addon::feishu::domain::approval_execution::claim_ready(
+                &self.context,
+                self.leader_id - 1,
+                Some(self.leader_id),
+                1,
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("组 leader 未被认领"))?;
+            let row = self
+                .context
+                .approval_tasks()
+                .query()
+                .where_eq("id", serde_json::json!(self.leader_id))?
+                .optional()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("组 leader 任务行不存在"))?;
+            let task = load_task(runner, &row, claim)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("组 leader 任务无法加载配置"))?;
+            Ok(task)
+        }
+
+        /// 给 leader 落受理发起人（组缺身份会整组暂停，正常路径必须有）。
+        async fn with_applicant(&self, open_id: &str) -> anyhow::Result<&Self> {
+            sqlx::query(
+                "INSERT INTO feishu_approval_task_applicant (task_id,open_id) VALUES (?,?)                  ON DUPLICATE KEY UPDATE open_id=VALUES(open_id)",
+            )
+            .bind(self.leader_id)
+            .bind(open_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(self)
+        }
+
+        async fn states(&self) -> anyhow::Result<(String, String)> {
+            let leader: String =
+                sqlx::query_scalar("SELECT state FROM feishu_approval_task WHERE id=?")
+                    .bind(self.leader_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            let member: String =
+                sqlx::query_scalar("SELECT state FROM feishu_approval_task WHERE id=?")
+                    .bind(self.member_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            Ok((leader, member))
+        }
+
+        async fn cleanup(self) -> anyhow::Result<()> {
+            cleanup_aggregate_fixture(&self.pool, self.config_id).await
+        }
+    }
+
+    /// 组委派：`process_one` 必须把组行交给 `process_group`，且组分支排在
+    /// missing-initiator 早退之前——否则缺身份的组会落成单条 `Waiting`，
+    /// 永远等不到 `paused`（设计 §4.6 第 11 步）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_pause_marks_leader_and_members_paused() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("ready", None).await?;
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            Arc::new(SeedTransport::new(vec![])),
+        )
+        .await?;
+        let mut task = fixture.claim_leader(&runner).await?;
+        task.applicant_open_id = None;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(outcome.persisted, "组分支必须自己落库");
+        assert!(matches!(outcome.result, DispatchResult::Terminal { .. }));
+
+        let (leader, member) = fixture.states().await?;
+        assert_eq!(leader, "paused", "暂停必须落 leader");
+        assert_eq!(member, "paused", "暂停必须落全体成员");
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT last_error FROM feishu_approval_task WHERE id=?")
+                .bind(fixture.leader_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert!(
+            reason.unwrap_or_default().contains("发起人"),
+            "暂停原因必须写进 leader 的 last_error"
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 暂停组不参与轮询认领：`claim_ready` 只认 `state='pending'`。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_pause_is_not_reclaimed_by_poll() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("ready", None).await?;
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            Arc::new(SeedTransport::new(vec![])),
+        )
+        .await?;
+        let mut task = fixture.claim_leader(&runner).await?;
+        task.applicant_open_id = None;
+        process_one(&runner, &task).await;
+
+        let claims = crate::addon::feishu::domain::approval_execution::claim_ready(
+            &fixture.context,
+            0,
+            None,
+            CLAIM_BATCH,
+        )
+        .await?;
+        assert!(
+            claims.iter().all(|claim| claim.id != fixture.leader_id),
+            "暂停组不得被轮询认领"
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组成功：一次 create 两行明细、两名成员写同一编号、扩展列与发起人列逐成员写。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_success_backfills_same_serial_and_writes_extensions() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("ready", None).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "报销")]),
+            batch_get_envelope(&[(&member_record, "报销")]),
+            create_envelope("INST-GROUP"),
+            detail_envelope("INST-GROUP", "SERIAL-9"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            // 组通知：行号扫描一次 + 消息发送。
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_group"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            Arc::clone(&transport),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        let sent: Vec<String> = transport
+            .requests
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|request| format!("{:?} {}", request.method, request.url))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(outcome.persisted);
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "组成功必须返回 Backfilled，实际 {:?}；请求序列 {sent:?}",
+            outcome.result
+        );
+
+        let (leader, member) = fixture.states().await?;
+        assert_eq!(
+            (leader.as_str(), member.as_str()),
+            ("backfilled", "backfilled")
+        );
+        let leader_serial: Option<String> =
+            sqlx::query_scalar("SELECT serial_number FROM feishu_approval_task WHERE id=?")
+                .bind(fixture.leader_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert!(leader_serial.is_none(), "组编号只落组行，leader 不持有");
+        let group: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT effect_phase,instance_code,serial_number FROM feishu_approval_group \
+             WHERE config_id=? AND group_key=?",
+        )
+        .bind(fixture.config_id)
+        .bind(&fixture.group_key)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(
+            group,
+            (
+                "created".to_string(),
+                Some("INST-GROUP".to_string()),
+                Some("SERIAL-9".to_string())
+            ),
+            "实例码与编号必须落组行"
+        );
+
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        let serial_writes = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/records/batch_update"))
+            .filter_map(|request| request.json_body.as_ref())
+            .any(|body| {
+                body["records"]
+                    .as_array()
+                    .is_some_and(|rows| rows.len() == 2)
+            });
+        assert!(serial_writes, "编号回填必须一次覆盖两名成员");
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组通知只发一次，且正文含成员行号摘要（不逐成员编辑同一条消息）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_notification_is_sent_once_with_member_row_summary() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("created", Some("INST-DONE")).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "报销")]),
+            batch_get_envelope(&[(&member_record, "报销")]),
+            detail_envelope("INST-DONE", "SERIAL-7"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            // 行号扫描：两行成员都能定位到行号。
+            serde_json::json!({
+                "code": 0,
+                "data": {
+                    "has_more": false,
+                    "items": [
+                        {"record_id": leader_record, "fields": {}},
+                        {"record_id": member_record, "fields": {}}
+                    ]
+                }
+            })
+            .to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_once"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            Arc::clone(&transport),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(matches!(outcome.result, DispatchResult::Backfilled { .. }));
+
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        let sends: Vec<&crate::addon::feishu::domain::outbound::OutboundRequest> = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/im/v1/messages"))
+            .collect();
+        assert_eq!(sends.len(), 1, "每组只发一条通知");
+        let text = sends[0]
+            .json_body
+            .as_ref()
+            .map(|body| body.to_string())
+            .unwrap_or_default();
+        assert!(
+            text.contains("第 1、2 行"),
+            "正文必须含成员行号摘要（一次渲染、不逐条编辑）：{text}"
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组已建实例时成员记录被删：该成员摘出并落终态，其余成员继续回填同一编号。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn absent_member_in_created_group_is_detached_and_rest_backfilled() -> anyhow::Result<()>
+    {
+        let fixture = GroupProcessingFixture::new("created", Some("INST-PART")).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "报销")]),
+            // 成员记录已不存在：`absent_record_ids` 是 Fatal。
+            serde_json::json!({
+                "code": 0,
+                "msg": "",
+                "data": {"records": [], "absent_record_ids": [member_record]}
+            })
+            .to_string(),
+            detail_envelope("INST-PART", "SERIAL-3"),
+            ok_body(0),
+            ok_body(0),
+            // 组通知：行号扫描 + 发送。
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_part"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport,
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "剩余成员回填成功后应整体成功，实际 {:?}",
+            outcome.result
+        );
+
+        let member: (String, Option<String>, i64) =
+            sqlx::query_as("SELECT state,group_id,group_seq FROM feishu_approval_task WHERE id=?")
+                .bind(fixture.member_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(member.0, "terminal", "被删成员落终态");
+        assert_eq!(member.1, None, "被删成员必须摘出组");
+        assert_eq!(member.2, 0);
+
+        let serial: Option<String> =
+            sqlx::query_scalar("SELECT serial_number FROM feishu_approval_group WHERE group_key=?")
+                .bind(&fixture.group_key)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(serial.as_deref(), Some("SERIAL-3"), "组行编号照常落实");
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+    /// 组行 `effect_phase='ready'` 时签名复核生效：记录的非明细值从播种后被改过，
+    /// 整组暂停而不是建一张与分组时不一致的单。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn group_signature_drift_pauses_ready_group() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("ready", None).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        // 组行存的是「报销」的摘要，而表里两条记录已改成「另一批」。
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "另一批")]),
+            batch_get_envelope(&[(&member_record, "另一批")]),
+            // 组暂停通知：行号扫描 + 发送。
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_drift"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport.clone(),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(matches!(outcome.result, DispatchResult::Terminal { .. }));
+        let (leader, member) = fixture.states().await?;
+        assert_eq!((leader.as_str(), member.as_str()), ("paused", "paused"));
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.ends_with("/approval/v4/instances")),
+            "签名漂移时绝不创建实例"
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+    /// 签名复核**只在组行 `ready`**：已尝试过创建的组即使记录值变了也必须续跑
+    /// （外部实例已经存在，暂停等于把它丢成孤儿）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn created_group_skips_signature_check_and_continues() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("created", Some("INST-OLD")).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        // 两条记录都改成了「另一批」：与组行摘要不一致，但组已建实例。
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "另一批")]),
+            batch_get_envelope(&[(&member_record, "另一批")]),
+            detail_envelope("INST-OLD", "SERIAL-OLD"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_old"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport.clone(),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "已建实例的组不得因签名漂移暂停，实际 {:?}",
+            outcome.result
+        );
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.ends_with("/approval/v4/instances")),
+            "续跑不得重新创建实例"
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组行停在 `creating`（创建前已提交阶段、结果未知）时**不**复核签名：
+    /// 用同一个组 uuid 重发 create 是幂等的（冲突回 60012），而签名漂移不是
+    /// 放弃这次创建的正当理由（设计 §4.6 第 5 步）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn creating_group_skips_signature_check_and_retries_create() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("creating", None).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "另一批")]),
+            batch_get_envelope(&[(&member_record, "另一批")]),
+            create_envelope("INST-NEW"),
+            detail_envelope("INST-NEW", "SERIAL-N"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_new"}}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport,
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "creating 阶段必须续跑创建，实际 {:?}",
+            outcome.result
+        );
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组行 `lookup` 但按 uuid 查不到实例（`1390003`）：阶段复位为 `ready` 并留
+    /// 可重试，否则组会永久停在回捞死路（设计 §4.6 第 3 步、§6.4）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn lookup_miss_resets_group_phase_and_stays_retryable() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("lookup", None).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            // 按组 uuid 回捞：实例不存在。
+            serde_json::json!({"code": 1390003, "msg": "instance not found"}).to_string(),
+        ]));
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport.clone(),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(matches!(outcome.result, DispatchResult::Retryable { .. }));
+        let phase: String =
+            sqlx::query_scalar("SELECT effect_phase FROM feishu_approval_group WHERE group_key=?")
+                .bind(&fixture.group_key)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(phase, "ready", "回捞未命中必须把组行阶段复位为 ready");
+        let leader: String =
+            sqlx::query_scalar("SELECT state FROM feishu_approval_task WHERE id=?")
+                .bind(fixture.leader_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(leader, "pending", "回捞未命中保持可重试（pending + 退避）");
+
+        fixture.cleanup().await?;
+        Ok(())
+    }
+
+    /// 组行 `lookup` 且按组 uuid 回捞命中：落实例码后直接回填，不再重发 create。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn lookup_hit_recovers_instance_code_and_backfills() -> anyhow::Result<()> {
+        let fixture = GroupProcessingFixture::new("lookup", None).await?;
+        fixture.with_applicant("ou_clicker").await?;
+        let leader_record = fixture.leader_record().await?;
+        let member_record = fixture.member_record().await?;
+        let transport = Arc::new(SeedTransport::new(vec![
+            // 按组 uuid 回捞命中（详情响应同时带回编号）。
+            detail_envelope("INST-LOOKUP", "SERIAL-L"),
+            field_list_envelope(),
+            batch_get_envelope(&[(&leader_record, "报销")]),
+            batch_get_envelope(&[(&member_record, "报销")]),
+            detail_envelope("INST-LOOKUP", "SERIAL-L"),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            ok_body(0),
+            serde_json::json!({"code":0,"data":{"has_more":false,"items":[]}}).to_string(),
+            serde_json::json!({"code":0,"data":{"message_id":"om_lookup"}}).to_string(),
+        ]));
+        let group_uuid: String =
+            sqlx::query_scalar("SELECT uuid FROM feishu_approval_group WHERE group_key=?")
+                .bind(&fixture.group_key)
+                .fetch_one(&fixture.pool)
+                .await?;
+        let runner = build_seed_runner(
+            yang_db::Database::connect(&fixture.url).await?,
+            Arc::clone(&fixture.context),
+            transport.clone(),
+        )
+        .await?;
+        let task = fixture.claim_leader(&runner).await?;
+
+        let outcome = process_one(&runner, &task).await;
+        assert!(
+            matches!(outcome.result, DispatchResult::Backfilled { .. }),
+            "回捞命中必须直接回填，实际 {:?}",
+            outcome.result
+        );
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.url.ends_with(&format!("/instances/{group_uuid}"))),
+            "必须按**组 uuid** 回捞：{requests:?}"
+        );
+        assert!(
+            requests.iter().all(|request| !(request.method
+                == crate::addon::feishu::domain::outbound::OutboundMethod::Post
+                && request.url.ends_with("/approval/v4/instances"))),
+            "回捞命中后不得重发 create"
+        );
+        let group: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT effect_phase,instance_code,serial_number FROM feishu_approval_group WHERE group_key=?",
+        )
+        .bind(&fixture.group_key)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(
+            group,
+            (
+                "created".to_string(),
+                Some("INST-LOOKUP".to_string()),
+                Some("SERIAL-L".to_string())
+            )
+        );
+
+        fixture.cleanup().await?;
         Ok(())
     }
 }

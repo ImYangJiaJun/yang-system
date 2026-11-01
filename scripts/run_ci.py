@@ -275,6 +275,46 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_maintenance_rechecks_lease_state_and_phase", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合组暂停落 leader 与成员集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_pause_marks_leader_and_members_paused", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合暂停组不被轮询认领集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_pause_is_not_reclaimed_by_poll", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组成功同编号回填与扩展列集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_success_backfills_same_serial_and_writes_extensions", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合组通知一次渲染集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_notification_is_sent_once_with_member_row_summary", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合已建组缺成员摘出集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::absent_member_in_created_group_is_detached_and_rest_backfilled", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合签名漂移整组暂停集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::group_signature_drift_pauses_ready_group", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合已建组跳过签名复核集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::created_group_skips_signature_check_and_continues", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合创建中阶段跳过签名复核集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::creating_group_skips_signature_check_and_retries_create", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合回捞未命中复位阶段集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::lookup_miss_resets_group_phase_and_stays_retryable", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "聚合回捞命中直接回填集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::lookup_hit_recovers_instance_code_and_backfills", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "聚合批量认领跳过成员集成测试",
         ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::claim_ready_skips_group_members_in_batch_mode", "--", "--ignored", "--exact", "--test-threads=1"),
     ),

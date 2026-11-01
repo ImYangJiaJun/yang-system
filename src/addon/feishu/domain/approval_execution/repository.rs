@@ -322,8 +322,6 @@ pub(crate) async fn finish(
     Ok(result.rows_affected() == 1)
 }
 
-// 组执行原语先落地并自带真实库测试；消费者（组派发、组处理）在后续任务接入。
-#[allow(dead_code)]
 /// 组 leader 所属的配置 id（执行权校验一体）。
 ///
 /// # 为什么组函数都要先读它
@@ -351,7 +349,6 @@ async fn leader_config_id_in_tx(
     Ok(row)
 }
 
-#[allow(dead_code)]
 /// 组副作用开始：**组行阶段与 leader 阶段同一事务**推进，并顺延 leader 租约。
 ///
 /// 组行阶段是外部副作用的唯一事实（`reopen` 不会重置它），leader 的阶段只是认领
@@ -392,7 +389,6 @@ pub(crate) async fn begin_group_effect(
     Ok(())
 }
 
-#[allow(dead_code)]
 /// 组副作用确认：**实例码只写组行**，leader 只写阶段。
 ///
 /// 这条分配是设计 §4.1 的核心不变量：leader 任务行会随单条点击摘组保留，若把组
@@ -431,7 +427,6 @@ pub(crate) async fn confirm_group_effect(
     Ok(())
 }
 
-#[allow(dead_code)]
 /// 组收尾：**一个事务**内更新 leader（状态/退避/清租约）、全体成员状态、组行编号与阶段。
 ///
 /// # 为什么不能复用单条 `finish`

@@ -412,6 +412,68 @@ pub(crate) async fn list_groups_for_config(
     Ok(rows)
 }
 
+/// 把「已建实例」组里一条记录已不存在的成员行摘出组并置 `terminal`。
+///
+/// 设计 §5 的 Fatal 分支：组行**已有实例码**时，记录被删/无权限的成员不能再参与
+/// 回填（写它必然失败，还会把整组拖进重试预算），把它摘出并落终态，其余成员继续
+/// 用同一编号回填；否则整组会因为一条毒记录永久停在可重试。
+///
+/// # 只摘成员，不摘 leader
+///
+/// `finish_group` 按 `group_id + group_seq=0` 定位组，leader 摘掉就再也收不了尾。
+/// 调用方必须先判断「这一行不是本次持有的 leader」；leader 记录不可读时整组暂停。
+pub(crate) async fn detach_member_as_terminal(
+    context: &FeishuContext,
+    task_id: i64,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    let row = Record::new()
+        .set("state", "terminal")
+        .set("last_error", reason)
+        .set("group_id", Value::Null)
+        .set("group_seq", 0)
+        .set("worker_id", Value::Null)
+        .set("lease_until", Value::Null);
+    let updated = context
+        .approval_tasks()
+        .query()
+        .where_eq("id", serde_json::json!(task_id))?
+        .update(row)
+        .await?;
+    Ok(updated == 1)
+}
+
+/// 读一个组的全部任务行（按 `group_seq` 升序），供处理期取成员与明细行序。
+///
+/// 与 [`lock_group_members_in_tx`] 的区别只在**不锁**：处理期已经持有 leader 的
+/// 执行租约，成员集合在这里只用于组装表单与回填，不参与「可不可以写」的判定
+/// （那由 `finish_group` / 认领 SQL 自己保证）。
+pub(crate) async fn load_members(
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+) -> anyhow::Result<Vec<Record>> {
+    let rows = context
+        .approval_tasks()
+        .query()
+        .select_fields(&[
+            "id",
+            "record_id",
+            "group_seq",
+            "state",
+            "effect_phase",
+            "instance_code",
+            "serial_number",
+        ])?
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("group_id", serde_json::json!(group_key))?
+        .order_by("group_seq", yang_base::table::SortOrder::Asc)?
+        .order_by("id", yang_base::table::SortOrder::Asc)?
+        .all()
+        .await?;
+    Ok(rows)
+}
+
 /// 在调用方事务内锁住一个组的**全部任务行**（`FOR UPDATE`，按 `group_seq` 升序）。
 ///
 /// # 为什么必须锁而不只是读
