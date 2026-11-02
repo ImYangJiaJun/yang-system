@@ -795,7 +795,7 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         .await
         .context("单条派发不应冒泡为 Err")?;
 
-        let (got_config, applicant, record_id) = receiver
+        let (got_config, applicant, record_id, aggregate) = receiver
             .try_recv()
             .context("单条派发必须唤醒 worker（信号进通道）")?;
         ensure!(
@@ -805,6 +805,10 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         ensure!(
             record_id.as_deref() == Some("recSignal"),
             "单条点击的唤醒信号必须携带被点记录 id，否则发起人会被广播: {record_id:?}"
+        );
+        ensure!(
+            !aggregate,
+            "单条点击恒不聚合（独立建单），信号里的聚合意图必须为 false: {aggregate}"
         );
         ensure!(
             applicant.is_none(),

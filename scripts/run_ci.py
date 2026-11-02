@@ -259,6 +259,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_off_keeps_one_instance_per_record", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "聚合需请求参数集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_requires_request_flag_even_when_config_is_on", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "聚合组全选解散集成测试",
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_dissolves_only_fully_selected_ready_groups", "--", "--ignored", "--exact", "--test-threads=1"),
     ),

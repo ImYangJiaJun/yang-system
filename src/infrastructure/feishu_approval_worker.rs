@@ -156,11 +156,12 @@ impl ResumeCursor {
     }
 }
 
-/// 手动受理信号：`(config_id, 受理发起人 open_id, 单条点击的记录 id)`。
+/// 手动受理信号：`(config_id, 受理发起人 open_id, 单条点击的记录 id, 请求是否要求聚合)`。
 ///
 /// 第三项 `Some` 表示单条点击，发起人只落到被点的那一行；批量受理为 `None`，
 /// 落到本轮播种/重开的所有行（见 [`persist_applicant`]）。
-pub type ApprovalDispatchRequest = (i64, Option<String>, Option<String>);
+/// 第四项是请求体里的聚合意图：它与配置开关同时为真才新建组（见 [`seed_config`]）。
+pub type ApprovalDispatchRequest = (i64, Option<String>, Option<String>, bool);
 
 /// 手动触发的共享句柄。
 ///
@@ -192,6 +193,9 @@ impl ApprovalDispatchHandle {
     /// 写到它自己；批量受理为 `None`，写到本轮播种/重开的所有行。取值越界会把
     /// 一个点击人的身份广播给该配置下所有跨轮待处理的任务（见 [`persist_applicant`]）。
     ///
+    /// `aggregate` 是请求体里的聚合意图：只决定本轮能否**新建**组，与配置开关
+    /// 是「与」的关系（见 [`seed_config`]）。单条点击恒为 `false`。
+    ///
     /// 接收端已消失（worker 没起或正在退出）时返回错误——静默丢弃会让按钮
     /// 显示「已受理」而实际什么都没发生。
     pub(crate) fn request_dispatch(
@@ -199,9 +203,10 @@ impl ApprovalDispatchHandle {
         config_id: i64,
         applicant: Option<String>,
         record_id: Option<String>,
+        aggregate: bool,
     ) -> Result<(), BaseError> {
         self.trigger
-            .send((config_id, applicant, record_id))
+            .send((config_id, applicant, record_id, aggregate))
             .map_err(|_| {
                 BaseError::ConfigError("审批派发 Worker 未在运行，无法受理全表派发".to_string())
             })
@@ -537,13 +542,15 @@ async fn run_loop(
             }
             // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
-            // 第三个字段是单条点击的记录 id（批量为 None），用来限定落库作用域。
-            Some((config_id, applicant, record_id)) = requests.recv() => {
+            // 第三个字段是单条点击的记录 id（批量为 None），用来限定落库作用域；
+            // 第四个字段是请求体里的聚合意图（单条点击恒 false）。
+            Some((config_id, applicant, record_id, aggregate)) = requests.recv() => {
                 let round = run_round(
                     &runner,
                     &mut cursor,
                     applicant.map(|open_id| (config_id, open_id, record_id)),
                     RoundTrigger::Manual(config_id),
+                    aggregate,
                 );
                 if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
                     tracing::info!("审批派发 Worker 收到关闭信号，已取消进行中的轮次");
@@ -551,7 +558,7 @@ async fn run_loop(
                 }
             }
             _ = ticker.tick() => {
-                let round = run_round(&runner, &mut cursor, None, RoundTrigger::Poll);
+                let round = run_round(&runner, &mut cursor, None, RoundTrigger::Poll, false);
                 if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
                     tracing::info!("审批派发 Worker 收到关闭信号，已取消进行中的轮次");
                     return;
@@ -567,6 +574,10 @@ async fn run_loop(
 /// `None` 表示本轮由自动轮询触发，不落发起人。第三项 `record_id` 为 `Some` 时是
 /// 单条点击，发起人只落到被点的那一行；为 `None` 时是批量受理，落到本轮播种/重开
 /// 的所有行（见 [`persist_applicant`]）。
+///
+/// `requested_aggregate` 是请求体的聚合意图（批量模板里的 `aggregate=true`）。
+/// 与配置开关是**与**的关系：两者都真才新建组（见 [`seed_config`]）；轮询恒为
+/// `false`，所以不会因为「配置开着」就在没人点击时聚合。
 ///
 /// # 播种是这条链路的地基
 ///
@@ -590,6 +601,7 @@ async fn run_round(
     cursor: &mut ResumeCursor,
     applicant: Option<(i64, String, Option<String>)>,
     trigger: RoundTrigger,
+    requested_aggregate: bool,
 ) {
     let started = std::time::Instant::now();
     tracing::Span::current().record("trigger", trigger.as_str());
@@ -605,6 +617,7 @@ async fn run_round(
         trigger,
         applicant.as_ref().map(|(_, open_id, _)| open_id.as_str()),
         clicked_record_id,
+        requested_aggregate,
     )
     .await
     {
@@ -939,11 +952,15 @@ fn note_seed_success(failures: &Mutex<HashMap<i64, String>>, config_id: i64) -> 
 /// 「用 A 表的 Token 触发 B 表建单」的越权面。
 ///
 /// 轮询轮（`Poll`）照旧扫全部启用配置，但只服务**已有**任务行，不建新行。
+///
+/// `requested_aggregate` 是本轮受理请求的聚合意图，原样交给 [`seed_config`] 与配置
+/// 开关取「与」：请求没说要聚合，配置开着也不新建组。
 async fn seed_tasks(
     runner: &RoundRunner,
     trigger: RoundTrigger,
     applicant: Option<&str>,
     clicked_record_id: Option<&str>,
+    requested_aggregate: bool,
 ) -> anyhow::Result<SeedReport> {
     let configs = runner
         .context
@@ -982,7 +999,16 @@ async fn seed_tasks(
                 continue;
             }
         }
-        match seed_config(runner, &config, trigger, applicant, clicked_record_id).await {
+        match seed_config(
+            runner,
+            &config,
+            trigger,
+            applicant,
+            clicked_record_id,
+            requested_aggregate,
+        )
+        .await
+        {
             Ok(outcome) => {
                 if note_seed_success(&runner.seed_failures, config_id) {
                     tracing::info!(config_id, "审批派发播种恢复");
@@ -1224,12 +1250,17 @@ fn resolve_batch_scope_field_name(
 ///
 /// 任务行的存在性用 [`load_tasks_by_record`] 按**本轮待处理记录**定向查询，
 /// 不再读该配置的全量任务历史——行数与本轮待处理记录同量级。
+///
+/// `requested_aggregate` 与配置列 `aggregate_batch` 取「与」后才新建组：配置开关是
+/// 「允许聚合」，请求参数 `aggregate=true` 是「这次要聚合」，两者缺一整轮退回逐条。
+/// 组维护与开关、请求参数都无关——已存在的组必须能收尾。
 async fn seed_config(
     runner: &RoundRunner,
     config: &Record,
     trigger: RoundTrigger,
     applicant: Option<&str>,
     clicked_record_id: Option<&str>,
+    requested_aggregate: bool,
 ) -> anyhow::Result<SeedOutcome> {
     let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
@@ -1316,7 +1347,9 @@ async fn seed_config(
 
     // 批量点击（`clicked_record_id=None`）走组维护与聚合播种；单条点击与轮询保持
     // 原语义（单条点击不维护组、不新建组，见设计 §4.4）。
+    // 新建组要求「配置开关 + 请求参数」同时为真；组维护不看这两位。
     let aggregate_batch: bool = config.optional("aggregate_batch")?.unwrap_or(false);
+    let aggregate_now = aggregate_batch && requested_aggregate;
     let batch_click = reopens_on_click(trigger, config_id) && clicked_record_id.is_none();
     let outcome = if batch_click {
         seed_batch_click(
@@ -1325,7 +1358,7 @@ async fn seed_config(
             &pending_records,
             &fields,
             &by_record,
-            aggregate_batch,
+            aggregate_now,
             applicant,
         )
         .await?
@@ -1392,6 +1425,9 @@ async fn seed_config(
         reopened = outcome.reopened,
         // 轮询轮里这些是「没人点过、这轮不建行」的记录——不静默，留在日志里。
         skipped = outcome.skipped,
+        aggregate_batch,
+        aggregate_requested = requested_aggregate,
+        aggregate_now,
         duration_ms = started.elapsed().as_millis() as u64,
         "审批配置播种完成"
     );
@@ -1407,6 +1443,8 @@ async fn seed_config(
 /// - `reopen` 只碰 `group_id` 为空的行；组 leader 的复位只属于 [`maintain_groups`]；
 /// - 组维护之后**在事务内**重算「没有任务行」的记录：解散删掉的行对本事务可见，
 ///   用连接池读会读到事务开始前的快照，把刚解散的成员继续当成「已有行」。
+///
+/// `aggregate_batch` 是**已经取过「与」**的判定（配置开关 ∧ 请求参数），这里只认它。
 async fn seed_batch_click(
     runner: &RoundRunner,
     config: &Record,
@@ -6489,6 +6527,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            true,
         )
         .await?;
 
@@ -6547,6 +6586,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             Some(&r1),
+            true,
         )
         .await?;
 
@@ -6564,6 +6604,54 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(row, (r1, None), "单条任务不得带组键");
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 请求参数没要求聚合时，即使配置开关开着也逐条建行、不建组。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn aggregate_requires_request_flag_even_when_config_is_on() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", true).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            records_envelope(&[(&r1, "报销"), (&r2, "报销")]),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+            false,
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 2);
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(groups, 0, "请求没要求聚合时不得建组（开关只是允许）");
+        let rows: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT group_id FROM feishu_approval_task WHERE config_id=? ORDER BY record_id",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(rows, vec![None, None], "每条记录各自一条单条任务");
 
         cleanup_aggregate_fixture(&pool, config_id).await?;
         Ok(())
@@ -6594,6 +6682,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            true,
         )
         .await?;
 
@@ -6652,6 +6741,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            false,
         )
         .await?;
 
@@ -6736,6 +6826,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            false,
         )
         .await?;
 
@@ -6808,6 +6899,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            false,
         )
         .await?;
 
@@ -6875,6 +6967,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            true,
         )
         .await?;
 
@@ -6931,6 +7024,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            false,
         )
         .await?;
 
@@ -7004,6 +7098,7 @@ mod tests {
             RoundTrigger::Manual(config_id),
             Some("ou_click"),
             None,
+            false,
         )
         .await?;
 

@@ -131,8 +131,9 @@ const CODE_CONTACT_SCOPE_MISSING: i32 = 99991672;
 /// # 为什么没有 `base_token` / `table_id` / `approval_code` 等配置字段
 ///
 /// 配置只在控制台建（`create_config` 向导）。请求体只带运行时参数：`token`（鉴权）、
-/// `record_id`（可选）、`applicant`（**必填**，兼容别名 `requested_by`）。工作流不再
-/// 携带任何配置数据——那是本次契约改形的核心（见模块文档）。
+/// `record_id`（可选）、`applicant`（**必填**，兼容别名 `requested_by`）、
+/// `aggregate`（可选，本次点击是否要求同批聚合）。工作流不再携带任何配置数据——
+/// 那是本次契约改形的核心（见模块文档）。
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DispatchInput {
@@ -159,6 +160,12 @@ pub(super) struct DispatchInput {
     /// 明确指定通知接收人的 ID 类型与 ID/邮箱；不从姓名或申请人推断。
     #[serde(default)]
     pub(super) notification_recipient: Option<NotificationRecipient>,
+    /// 本次请求是否要求同批聚合（批量模板里的 `aggregate`）。
+    ///
+    /// 与配置开关 `aggregate_batch` 是**与**的关系：两者都真才新建聚合组。
+    /// 省略等价于 `false`（保持逐条派发），所以存量工作流模板不改也安全。
+    #[serde(default)]
+    pub(super) aggregate: bool,
 }
 
 impl ParamInput for DispatchInput {
@@ -673,8 +680,9 @@ async fn handle_dispatch(
                     config_id,
                     outcome.applicant_open_id.clone(),
                     // 单条点击：发起人只落到被点的那一行，不能广播给同配置的
-                    // 其它跨轮待处理任务。
+                    // 其它跨轮待处理任务。单条恒不聚合（决策 7：独立建单）。
                     Some(record_id.to_string()),
+                    false,
                 ) {
                     tracing::warn!(config_id, error = %error, "审批派发唤醒 Worker 失败");
                 }
@@ -719,7 +727,9 @@ async fn handle_dispatch(
             // `resolved` 另留一份给 outcome：受理回执要发给点击人（见
             // `fallback_recipient_of` 对 `Accepted` 的放行）。
             let clicker = Some(resolved.clone());
-            if let Err(error) = handle.request_dispatch(config_id, Some(resolved), None) {
+            if let Err(error) =
+                handle.request_dispatch(config_id, Some(resolved), None, input.aggregate)
+            {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
             tracing::debug!(
@@ -1911,7 +1921,27 @@ mod tests {
             requested_by: None,
             applicant: Some("测试发起人".to_string()),
             notification_recipient: None,
+            aggregate: false,
         }
+    }
+
+    #[test]
+    fn aggregate_defaults_to_off_and_is_accepted_as_true() {
+        // 省略 = 不聚合（存量工作流模板不改也安全）。
+        let absent: DispatchInput = serde_json::from_str(r#"{"token":"t","applicant":"张三"}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!absent.aggregate, "省略 aggregate 必须落 false");
+        assert!(absent.validate().is_ok(), "省略 aggregate 不得被拒");
+
+        let on: DispatchInput =
+            serde_json::from_str(r#"{"token":"t","applicant":"张三","aggregate":true}"#)
+                .unwrap_or_else(|error| panic!("{error}"));
+        assert!(on.aggregate);
+        let body = redacted_request_body(&on).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            body.contains(r#""aggregate":true"#),
+            "请求记录要留下这次点击是否要求聚合: {body}"
+        );
     }
 
     #[test]
