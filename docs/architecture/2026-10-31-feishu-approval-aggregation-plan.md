@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给审批派发配置加一个默认关闭的开关，打开后把同一次批量勾选内、除明细字段外转换值完全一致的记录合成一个审批实例，明细每条记录一行，同编号回填、每组一条通知。
+**Goal:** 给审批派发配置加一个默认关闭的开关，并要求批量请求体同时带 `"aggregate": true`；两者都真时把同一次批量勾选内、除明细字段外转换值完全一致的记录合成一个审批实例，明细每条记录一行，同编号回填、每组一条通知。
 
-**Architecture:** 组行持有组实例身份（uuid/instance_code/serial/effect_phase），leader 任务行只做租约与认领；播种先做组维护再按当前勾选新建；处理走组专用确认/收尾，事件先查组表；开关关闭只停止新建组，已有组仍能收尾。
+**Architecture:** 组行持有组实例身份（uuid/instance_code/serial/effect_phase），leader 任务行只做租约与认领；播种先做组维护再按当前勾选新建；处理走组专用确认/收尾，事件先查组表；开关关闭或请求不带 `aggregate` 都只停止新建组，已有组仍能收尾。开关入口在配置详情「接入数据」tab。
 
 **Tech Stack:** Rust 2021（axum + sqlx/MySQL + Redis）、React 19 + TypeScript、飞书审批 OpenAPI、`scripts/run_ci.py` 门禁。
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 仓库禁止新增 SQL 迁移文件；schema 由声明式同步驱动，只增不删。
-- 配置列 `aggregate_batch` 必须 `Switch::new().require(true).default(false)`；`group_seq` 必须 `require(true).default(0).sortable(true)`；`group_id` 可空；组表 `effect_phase` 必须 `require(true).default("ready")`。
+- 配置列 `aggregate_batch` 必须 `Switch::new().require(true).default(false)`；**新建组要求它与派发请求体的 `aggregate=true` 同时为真**（`seed_tasks → seed_config → seed_batch_click` 一路透传，中间层不许自行取反或默认 true）；`group_seq` 必须 `require(true).default(0).sortable(true)`；`group_id` 可空；组表 `effect_phase` 必须 `require(true).default("ready")`。
 - 组实例身份（`uuid/instance_code/serial_number`）**只写组行**；leader/成员任务行禁止写组 instance_code。
 - 新表必须遵循「一张表 = 一个 module」，并接入 `FeishuContext` 与全部构造点。
 - 生产 Rust 禁止 `unsafe`/`unwrap()`/`expect()`；错误用 `anyhow` 传播；文档与注释用中文。
@@ -694,8 +694,9 @@ git commit -m "feat(feishu): 组事件优先与 uuid 兜底"
 - [ ] **Step 1: 写失败测试**
 
 ```ts
-it("does not allow aggregate without a batch scope column", async () => {});
-it("sends aggregate_batch on create and as a patch on update", async () => {});
+it("requires a batch scope column before the aggregate toggle can be used", async () => {});
+it("toggles aggregate_batch from the access tab via update_config", async () => {});
+it("renders aggregate: true in the batch template once the switch is on", async () => {});
 it("renders paused tasks with a Chinese label", async () => {});
 ```
 
@@ -707,7 +708,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现**
 
-对话框加复选框（未选范围列时禁用）；create/update 映射；类型与详情页；任务列表补 `paused` 标签；E2E 夹具补字段。000a1a3 已把 `approval-configs-page.test.tsx` 改成去掉 `requested_by` 的精确请求体断言；新增 `aggregate_batch` 时同步该 `expect(single).toEqual({...})` 与批量模板断言。
+开关入口放配置详情「接入数据」tab（与派发模板同屏），可写用户直接勾选，走 `update_config { aggregate_batch }`；没有范围列时禁用并提示先去向导第 3 步选列。批量模板按开关渲染 `aggregate`，向导不再放这个开关。类型与详情页同步；任务列表补 `paused` 标签；E2E 夹具补字段。000a1a3 已把 `approval-configs-page.test.tsx` 改成去掉 `requested_by` 的精确请求体断言；新增 `aggregate_batch` 时同步该 `expect(single).toEqual({...})` 与批量模板断言。
 
 - [ ] **Step 4: 生成契约并跑检查**
 

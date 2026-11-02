@@ -220,11 +220,13 @@ Content-Type: application/json
 
 #### 同批聚合派发开关 `aggregate_batch`（2026-10-31 追加）
 
-配置表另有 `aggregate_batch`（Switch，必填、默认 `false`）。打开后，同一次批量勾选内
-「除明细控件子树外所有已映射字段的转换值完全一致」的记录合成一个审批实例：明细每条
-记录一行、组内回填同一编号、每组只发一条通知。开启时必须已配置 `batch_scope_field`
-（建/改配置都会校验）。开关关闭只停止**新建**组；已存在的组仍由 leader 收尾。组身份、
-播种顺序、暂停与回滚语义见
+配置表另有 `aggregate_batch`（Switch，必填、默认 `false`，入口在配置详情「接入数据」tab）。
+它与**请求参数**是「与」的关系：批量请求体带 `"aggregate": true` **且**开关打开，才把同一次
+批量勾选内「除明细控件子树外所有已映射字段的转换值完全一致」的记录合成一个审批实例：
+明细每条记录一行、组内回填同一编号、每组只发一条通知。请求省略 `aggregate` 等价于
+`false`（存量工作流不改也安全）；单条点击恒不聚合。开启开关时必须已配置
+`batch_scope_field`（建/改配置都会校验）。两个条件任一不满足都只停止**新建**组；
+已存在的组仍由 leader 收尾。组身份、播种顺序、暂停与回滚语义见
 `docs/architecture/2026-10-31-feishu-approval-aggregation-design.md`（§4、§十）。
 
 ### 5.2 处理状态表 `feishu_approval_task`

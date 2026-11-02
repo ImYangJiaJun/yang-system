@@ -3,6 +3,7 @@
 - 文档性质：设计（决策记录 + 实施约束 + 验证清单）
 - 撰写日期：2026-10-31
 - 修订：2026-10-31 v2，按第一性原理对抗性复核重写副作用归属、播种顺序、暂停持久化、单条点击与测试设施
+- 修订：2026-11-02 v3，改为「配置开关 ∧ 请求参数 `aggregate=true`」双条件生效；开关入口移到配置详情「接入数据」tab
 - 需求来源：运营反馈「同批多条记录逐条建单太吵」，产品负责人明确要求实现
 - 状态：待实施
 - 关联：
@@ -12,11 +13,11 @@
 
 ## 一、目标
 
-在审批派发配置上新增一个开关 `aggregate_batch`（默认关闭）。开关打开后：
+同批聚合需要**两把钥匙同时打开**：配置级开关 `aggregate_batch`（在控制台「接入数据」tab 维护，默认关闭）**且**本次派发请求体带 `"aggregate": true`。两者同时为真时：
 
 1. 同一次批量勾选（同一配置、复选框列为 true、回填列为空）的记录中，**除明细控件子树外的所有已映射字段，按转换后的表单值完全一致**的记录，合成为一个审批实例。
 2. 明细控件内每条记录一行；组内所有记录回填同一个审批编号；每组只发一条通知。
-3. 开关关闭时行为与现状逐字节一致；已存在的组仍由 leader 收尾，不因关开关而卡死。
+3. 任一条件不满足时行为与现状逐字节一致；已存在的组仍由 leader 收尾，不因关开关或请求不带 `aggregate` 而卡死。
 
 非目标：
 
@@ -28,7 +29,8 @@
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 1 | 开关位置与默认值 | 配置级开关，默认关闭；开启时必须已配置批量范围复选框列，否则保存拒绝 |
+| 1 | 开关位置与默认值 | 配置级开关，默认关闭；**入口在配置详情「接入数据」tab**（与工作流模板同屏，便于对照）；开启时必须已配置批量范围复选框列，否则保存拒绝 |
+| 1b | 生效条件 | **开关 ∧ 请求参数**：批量请求体带 `"aggregate": true` 才新建组；省略等价 `false`（存量工作流不改也安全）。单条点击恒不聚合 |
 | 2 | 聚合范围 | 同一次批量勾选内的记录；每次批量点击按**当时的勾选**重新分组尚未提交的组（已建实例的组不动） |
 | 3 | 一致性口径 | 比较转换后的表单值：选项按解析结果、日期/数字按转换结果、`{type,value}` 包装归一；附件按源文件 `file_token+name+size`（保持源顺序） |
 | 4 | 组内校验失败 | 整组暂停、不派发、不写任何成员的回填列；飞书通知提醒「修好后重新点击」 |
@@ -131,7 +133,7 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
    - `group.effect_phase ∈ {creating, lookup}` 或 leader `state='review'` 且组行无实例码 → `reopen` leader 保留组 uuid，走 `60012`/按 uuid 回捞。
    - `group.effect_phase='ready'`、leader 无未过期租约、且**全组成员都在本次勾选集合内** → 解散：先删 `task_applicant` 行，再删成员行与组行；组内已有自身 `instance_code` 或回填的行摘除 `group_id/group_seq`，保留为单条任务。
    - 任何成员不在本次勾选集合内的组**保持不动**（用户没重新勾选，系统不替他撤回）。
-4. **新建组**（仅 `aggregate_batch=true`）：候选 = 本次勾选 + 回填列为空 + 任务表无行的记录；在解散之后计算。逐条签名 → `plan_groups` → 一个事务插入组行 + leader/member 行。
+4. **新建组**（仅 `aggregate_batch=true` **且** 本次请求 `aggregate=true`）：候选 = 本次勾选 + 回填列为空 + 任务表无行的记录；在解散之后计算。逐条签名 → `plan_groups` → 一个事务插入组行 + leader/member 行。
 5. 签名失败：单独成组（`group_key=hash(config|record|错误摘要)`），让处理期照常暂停报错。
 6. 发起人：批量点击的点击人只落到本轮 `touched` 的行（leader 与成员）。
 
@@ -226,10 +228,11 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 
 ## 八、前端与契约
 
-- 配置向导第 3 步新增复选框「同批聚合派发」，仅在已选批量范围列时可勾选。
-- `api.ts`/`types.ts`/`ApprovalConfigDetails.tsx` 同步字段；`dump_openapi.py` 重新生成契约。
+- 开关入口在配置详情「接入数据」tab（与工作流模板同屏）：可写用户直接勾选/取消，走 `update_config { aggregate_batch }`；没有批量范围列时禁用并提示先去编辑向导第 3 步选列。建配置向导**不再**出现该开关（保留范围列选择）。
+- 批量请求体模板随开关渲染 `aggregate: true/false`，并说明「请求不带 aggregate 时仍按逐条派发」。
+- `api.ts`/`types.ts`/`ApprovalConfigDetails.tsx` 同步字段；`dump_openapi.py` 重新生成契约（配置侧 schema 变，派发端点不在 OpenAPI 内）。
 - 任务列表 `ApprovalRequestsPage.tsx` 的 `TASK_STATE_LABELS` 增加 `paused: "已暂停"`（前端不读 Radio 标题）。
-- 对话框 Vitest：默认关、未选范围列时禁用、create/update 载荷。
+- 页面 Vitest：接入数据 tab 默认关 + 勾选发 `update_config`、无范围列时禁用；请求体模板含 `aggregate`。
 
 ## 九、测试与验证
 
@@ -257,9 +260,9 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 ## 十、上线与兼容
 
 - 纯增量 schema：`aggregate_batch require+default(false)`、`group_seq require+default(0)+sortable`、`group_id` 可空、组表新表含 `effect_phase default("ready")`；无需手工 ALTER。
-- 开关关闭：不新建组；已有组继续由 leader 收尾（组维护与开关无关）；下一次批量点击会把「全组在本次勾选内、`effect_phase=ready`、无租约」的未提交组解散，随后按逐条派发（回滚），已提交组不动。非组任务行行为不变。
+- 开关关闭（或批量请求不带 `aggregate`）：不新建组；已有组继续由 leader 收尾（组维护与两者无关）；下一次批量点击会把「全组在本次勾选内、`effect_phase=ready`、无租约」的未提交组解散，随后按逐条派发（回滚），已提交组不动。非组任务行行为不变。
 - `delete_config`：未提交的暂停组（组行无 `instance_code`）不再阻塞删除，随配置一起清理；已建实例的暂停组仍算在途，必须先通过重试/人工核查收尾，避免留下孤儿审批。
-- 回滚：关开关即停止新增聚合；已建组实例照常回填、事件 fan-out 与人工重试。
+- 回滚：关开关（或把工作流模板里的 `aggregate` 改回 `false`/删掉）即停止新增聚合；已建组实例照常回填、事件 fan-out 与人工重试。两个开关任一为假都能回滚，互不依赖。
 - 部署只需重启应用完成加列/建表。
 
 ## 十一、已知限制
