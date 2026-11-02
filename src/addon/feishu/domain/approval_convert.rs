@@ -1161,17 +1161,21 @@ pub(crate) fn labels_equivalent(left: &str, right: &str) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
-/// 多维表格单元格取文本。多态单元格（`[{"text": …}]`）取第一个 text。
+/// 多维表格单元格取文本。
+///
+/// **数组是一段文本的富文本分段，不是多个值**：文本列里出现 URL 时，接口把
+/// `Amazon.com Services LLC` 拆成
+/// `[{"link":"http://Amazon.com","text":"Amazon.com","type":"url"},
+/// {"text":" Services LLC","type":"text"}]`（2026-11-02 真机，申请编号
+/// 202611020064）。取第一个非空段会把链接后面的正文整段丢掉，审批里只剩一个
+/// 可点击的 `Amazon.com`。分段之间原样拼接（段自带前置空格），不加分隔符。
+/// 多选列→文本控件这类「真的多个值」由配置期的 `MultiValueColumn` 拦下。
 fn text_from_cell(cell: &Value) -> String {
     match unwrap_typed_cell(cell) {
         Value::String(text) => text.clone(),
         Value::Number(number) => number.to_string(),
         Value::Bool(value) => value.to_string(),
-        Value::Array(items) => items
-            .iter()
-            .map(text_from_cell)
-            .find(|text| !text.is_empty())
-            .unwrap_or_default(),
+        Value::Array(items) => items.iter().map(text_from_cell).collect(),
         Value::Object(map) => map
             .get("text")
             .or_else(|| map.get("name"))
@@ -2157,6 +2161,45 @@ mod tests {
         assert_eq!(
             labels_from_cell(&json!([{"text": "USD 美元\r\n"}])),
             vec!["USD 美元"]
+        );
+    }
+
+    #[test]
+    fn text_is_split_into_rich_text_segments_and_all_segments_are_kept() {
+        // 2026-11-02 真机（申请编号 202611020064）：文本列里出现 URL 时，接口把
+        // 「Amazon.com Services LLC」拆成 link 段 + text 段。取第一段会让审批里
+        // 只剩一个可点击的 `Amazon.com`，后面的正文全丢。
+        let widgets = [widget("w1", "input")];
+        assert_eq!(
+            render(
+                &widgets,
+                &cells(&[(
+                    "fld_src",
+                    json!([
+                        {"link": "http://Amazon.com", "text": "Amazon.com", "type": "url"},
+                        {"text": " Services LLC", "type": "text"}
+                    ])
+                )])
+            )
+            .unwrap_or_else(|e| panic!("{e}"))[0]["value"],
+            json!("Amazon.com Services LLC")
+        );
+        // 地址列同理：多段折行原样拼接。
+        assert_eq!(
+            render(
+                &widgets,
+                &cells(&[(
+                    "fld_src",
+                    json!([
+                        {"link": "http://Amazon.com", "text": "Amazon.com", "type": "url"},
+                        {"text": " Services LLC \n", "type": "text"},
+                        {"text": "PO Box 84974 \n", "type": "text"},
+                        {"text": "Seattle, WA 98124-6274", "type": "text"}
+                    ])
+                )])
+            )
+            .unwrap_or_else(|e| panic!("{e}"))[0]["value"],
+            json!("Amazon.com Services LLC \nPO Box 84974 \nSeattle, WA 98124-6274")
         );
     }
 
