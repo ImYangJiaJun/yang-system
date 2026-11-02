@@ -17,7 +17,6 @@
 import { useState } from "react";
 
 import { Button } from "@/shared/ui/button";
-import { Checkbox } from "@/shared/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -194,10 +193,6 @@ export function ApprovalConfigDialog({
     initialConfig?.batchScopeField ?? "",
   );
   const [batchScopeManual, setBatchScopeManual] = useState(false);
-  // 同批聚合派发开关：默认关闭；没有批量范围列时不可勾选（后端也会拒）。
-  const [aggregateBatch, setAggregateBatch] = useState(
-    initialConfig?.aggregateBatch === true,
-  );
   // 六个可选回填扩展列：空串 = 不回填。
   const [extendedFields, setExtendedFields] = useState<Record<string, string>>(
     () => ({
@@ -269,8 +264,6 @@ export function ApprovalConfigDialog({
 
   // 第 4 步摘要与提交共用：新建非空才发；编辑态与原值不同才发（清空发空串，后端写 NULL）。
   const batchScope = batchScopeField.trim();
-  // 范围列被清空时开关不生效（也自动关掉），避免提交「聚合开启但无范围列」。
-  const aggregateEnabled = aggregateBatch && batchScope !== "";
 
   async function loadTables() {
     setTablesPending(true);
@@ -399,7 +392,6 @@ export function ApprovalConfigDialog({
       applicantField,
       backfillField,
       ...(batchScope ? { batchScopeField: batchScope } : {}),
-      ...(aggregateEnabled ? { aggregateBatch: true } : {}),
       baseTimezone: timezone,
       ...extended,
       maps: Object.entries(maps)
@@ -427,10 +419,6 @@ export function ApprovalConfigDialog({
             : {}),
           ...(batchScope !== savedBatchScope
             ? { batchScopeField: batchScope }
-            : {}),
-          // 只在与库内值不同时发：省略 = 不改。
-          ...(aggregateEnabled !== (initialConfig.aggregateBatch === true)
-            ? { aggregateBatch: aggregateEnabled }
             : {}),
           ...extended,
         });
@@ -950,30 +938,8 @@ export function ApprovalConfigDialog({
               value={batchScopeField}
               manual={batchScopeManual}
               onManualChange={setBatchScopeManual}
-              onChange={(value) => {
-                setBatchScopeField(value);
-                // 范围列被清空时一并不再勾选聚合，避免提交后端必拒的组合。
-                if (value.trim() === "") setAggregateBatch(false);
-              }}
+              onChange={setBatchScopeField}
             />
-            <div className="flex items-start gap-2">
-              <Checkbox
-                id="approval-aggregate-batch"
-                aria-label="同批聚合派发"
-                className="mt-0.5"
-                checked={aggregateBatch}
-                disabled={batchScope === ""}
-                onCheckedChange={(checked) =>
-                  setAggregateBatch(checked === true)
-                }
-              />
-              <div className="space-y-1">
-                <Label htmlFor="approval-aggregate-batch">同批聚合派发</Label>
-                <p className="text-xs text-muted-foreground">
-                  同一次批量勾选内、除明细外转换值完全一致的记录合成一个审批，明细每条记录一行、同一编号回填、每组只发一条通知。需先选择批量范围复选框列；组内校验失败会整组暂停，修好后重新批量点击即可。
-                </p>
-              </div>
-            </div>
             {EXTENDED_BACKFILL_FIELDS.map((field) => (
               <FieldPick
                 key={field.key}
@@ -1049,12 +1015,6 @@ export function ApprovalConfigDialog({
                     fields.find((f) => f.fieldId === batchScope)?.fieldName ??
                     batchScope
                   }
-                />
-              ) : null}
-              {aggregateEnabled ? (
-                <SummaryRow
-                  label="同批聚合派发"
-                  value="已开启（明细每条记录一行）"
                 />
               ) : null}
               {EXTENDED_BACKFILL_FIELDS.map((field) => {

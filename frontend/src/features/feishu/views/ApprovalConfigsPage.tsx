@@ -205,6 +205,25 @@ export default function ApprovalConfigsPage() {
     toast.success(editTarget ? "配置更新成功" : "配置创建成功");
     void refreshList();
   }
+  /// 「接入数据」tab 的聚合开关：与配置详情页同一条 `update_config`（受 `canWrite`
+  /// 门控），成功后回读，让模板与摘要一起刷新。
+  async function changeAggregate(next: boolean) {
+    if (!detail) return;
+    setPending(true);
+    try {
+      await actions.updateConfig(detail.id, { aggregateBatch: next });
+      toast.success(
+        next
+          ? "已开启同批聚合；批量工作流模板请带 aggregate: true"
+          : "已关闭同批聚合；已存在的组仍会收尾",
+      );
+      await refreshList();
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      setPending(false);
+    }
+  }
   const filtered = search.trim() !== "" || status !== "all";
   if (!actions.canRead)
     return (
@@ -252,6 +271,7 @@ export default function ApprovalConfigsPage() {
               onRefreshNames={() => void refreshNames([detail.id])}
               onOpenConfig={openDetail}
               onRequests={() => changeParams({ tab: "requests" })}
+              onAggregateChange={(next) => void changeAggregate(next)}
             />
           )}
         </>

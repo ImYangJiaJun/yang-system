@@ -115,9 +115,13 @@ describe("审批派发配置页 · 列表", () => {
     expect(batch).toEqual({
       token: single.token,
       applicant: single.applicant,
+      aggregate: false,
     });
     expect(content.getByText(/Content-Type/)).toBeInTheDocument();
     expect(content.getByText(/当前配置的全部待处理记录/)).toBeInTheDocument();
+    expect(
+      content.getByText(/请求不带 aggregate 时仍按逐条派发/),
+    ).toBeInTheDocument();
 
     // jsdom 不实现 navigator.clipboard（见 @test/helpers/clipboard 的说明），
     // 不装桩就只会走到「无法自动复制」那条分支。
@@ -130,6 +134,81 @@ describe("审批派发配置页 · 列表", () => {
     expect(writeText).toHaveBeenCalledWith(
       `${window.location.origin}/api/v1/feishu/approval/dispatch/cfg-issued`,
     );
+  });
+
+  it("接入数据 tab：聚合开关走 update_config，开了之后批量模板带 aggregate: true", async () => {
+    const calls = stubApprovalApi({
+      configList: () =>
+        listPage([
+          approvalConfigWire({
+            config_key: "cfg-issued",
+            batch_scope_field: "fldBatch",
+            aggregate_batch: false,
+          }),
+        ]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+
+    const toggle = content.getByRole("checkbox", { name: "同批聚合派发" });
+    expect(toggle).not.toBeChecked();
+    await userEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(bodiesOf(calls, CONFIG_UPDATE_PATH)).toEqual([
+        { config_id: 1, aggregate_batch: true },
+      ]),
+    );
+  });
+
+  it("接入数据 tab：配置已开启聚合时批量模板渲染 aggregate: true", async () => {
+    stubApprovalApi({
+      configList: () =>
+        listPage([
+          approvalConfigWire({
+            config_key: "cfg-issued",
+            batch_scope_field: "fldBatch",
+            aggregate_batch: true,
+          }),
+        ]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+    expect(
+      content.getByRole("checkbox", { name: "同批聚合派发" }),
+    ).toBeChecked();
+    const batch = JSON.parse(
+      content.getByLabelText("批量派发请求体").textContent!,
+    );
+    expect(batch.aggregate).toBe(true);
+  });
+
+  it("接入数据 tab：没有批量范围列时聚合开关不可勾选", async () => {
+    stubApprovalApi({
+      configList: () =>
+        listPage([approvalConfigWire({ config_key: "cfg-issued" })]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+    expect(
+      content.getByRole("checkbox", { name: "同批聚合派发" }),
+    ).toBeDisabled();
+    expect(content.getByText(/还没有配置批量范围复选框列/)).toBeInTheDocument();
   });
 
   it("已签发的配置：可以回显当前 Token（纯读，不必轮换）", async () => {

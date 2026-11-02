@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { ArrowRight, ExternalLink } from "lucide-react";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import {
   Dialog,
@@ -70,10 +71,13 @@ const SINGLE_TEMPLATE = {
   record_id: "<触发记录 ID>",
   applicant: "<发起人姓名>",
 } as const;
-const BATCH_TEMPLATE = {
+/// 批量模板的 `aggregate` 是**每次点击的聚合意图**：只有它和配置开关同时为真
+/// 才新建聚合组。模板直接按开关渲染——开关打开时给 `true`，否则 `false`。
+const batchTemplate = (aggregate: boolean) => ({
   token: "<访问 Token>",
   applicant: "<发起人姓名>",
-} as const;
+  aggregate,
+});
 
 export function ApprovalConfigDetails({
   item,
@@ -85,6 +89,7 @@ export function ApprovalConfigDetails({
   onRefreshNames,
   onOpenConfig,
   onRequests,
+  onAggregateChange,
 }: {
   item: ApprovalConfigItem;
   canWrite: boolean;
@@ -95,6 +100,9 @@ export function ApprovalConfigDetails({
   onRefreshNames: () => void;
   onOpenConfig: (id: number) => void;
   onRequests: () => void;
+  /// 「接入数据」tab 里的聚合开关：与配置详情页同一条 `update_config`，
+  /// 只是把入口放到工作流接入这一页（开启后模板才该带 `aggregate: true`）。
+  onAggregateChange: (next: boolean) => void;
 }) {
   const [tab, setTab] = useState("maps");
   const [search, setSearch] = useState("");
@@ -144,7 +152,7 @@ export function ApprovalConfigDetails({
     ? `${window.location.origin}/api/v1/feishu/approval/dispatch/${item.configKey}`
     : undefined;
   const singleBody = JSON.stringify(SINGLE_TEMPLATE, null, 2);
-  const batchBody = JSON.stringify(BATCH_TEMPLATE, null, 2);
+  const batchBody = JSON.stringify(batchTemplate(item.aggregateBatch), null, 2);
   async function copy(label: string, value: string) {
     const outcome = await copyText(value);
     if (outcome === "copied") toast.success(`${label}已复制`);
@@ -349,12 +357,12 @@ export function ApprovalConfigDetails({
             <p className="text-xs text-muted-foreground">如何生成审批</p>
             <p className="mt-2 text-sm font-medium">
               {item.aggregateBatch
-                ? "同批聚合（明细多行）"
+                ? "允许同批聚合（明细多行）"
                 : "每条记录单独发起"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {item.aggregateBatch
-                ? "同一批勾选内除明细外内容一致的记录合成一个审批。"
+                ? "同批聚合：批量请求还需带 aggregate=true 才会建组。"
                 : "不同数据表可以共用同一个审批模板。"}
             </p>
           </div>
@@ -621,6 +629,39 @@ export function ApprovalConfigDetails({
               省略 record_id
               只处理当前配置的全部待处理记录（配置了批量范围复选框列时，仅处理已勾选的记录），不会触发其它配置的派发。批量按钮请仅在需要处理这批待处理记录时使用。
             </p>
+            <div className="space-y-3 rounded-md border border-border p-4">
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="approval-access-aggregate"
+                  aria-label="同批聚合派发"
+                  className="mt-0.5"
+                  checked={item.aggregateBatch}
+                  disabled={!canWrite || pending || !item.batchScopeField}
+                  onCheckedChange={(checked) =>
+                    onAggregateChange(checked === true)
+                  }
+                />
+                <div className="space-y-1">
+                  <label
+                    htmlFor="approval-access-aggregate"
+                    className="text-sm font-medium"
+                  >
+                    同批聚合派发
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    打开后，批量模板带 <code>aggregate: true</code>{" "}
+                    且本次勾选内除明细外内容一致的记录才会合成一个审批（明细每条记录一行、同一编号回填、每组一条通知）。请求不带
+                    aggregate 时仍按逐条派发。
+                  </p>
+                  {!item.batchScopeField ? (
+                    <p className="text-xs text-destructive">
+                      还没有配置批量范围复选框列，无法开启。请先在「编辑配置 →
+                      第 3 步」里选择批量范围列。
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
             <p className="text-xs text-muted-foreground">
               若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token
               无效」，说明轮换过 Token
