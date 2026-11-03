@@ -34,7 +34,7 @@ use super::approval::get_approval_definition;
 use super::approval_convert::{Converter, FixedOffset, WidgetMap};
 use super::approval_match::{
     columns_from_fields, match_fields, resolve_field_coord, Column, FieldMapping, FormWidget,
-    MatchOutcome,
+    MatchOutcome, WidgetOptions,
 };
 use super::bitable::{list_all_fields, BitableCoordinates, FieldItem};
 use super::context::FeishuContext;
@@ -1079,69 +1079,130 @@ pub(crate) async fn resolve_external_options(
         })
         .collect();
     let sources = load_option_sources(context, &form, Some(&mapped_ids), &explicit_sources).await?;
-    for definition in form
+    let by_widget_id: BTreeMap<&str, &FormWidget> = form
+        .iter()
+        .flat_map(|widget| widget.walk())
+        .map(|widget| (widget.id.as_str(), widget))
+        .collect();
+    // 级联必须**父先于子**解析：父的 option_map 决定子该限定在哪个父选项下。
+    // 定义的数组顺序不保证父子先后，所以这里按依赖推进，直到没有新进展。
+    let eager: Vec<&FormWidget> = form
         .iter()
         .flat_map(|w| w.walk())
         .filter(|w| w.links_to_our_options())
-    {
-        let Some(widget) = widgets.iter_mut().find(|w| w.widget_id == definition.id) else {
-            continue;
-        };
-        let Some(cell) = cells.get(&widget.bitable_field) else {
-            continue;
-        };
-        tracing::debug!(stage = "external_options", widget_id = %widget.widget_id,
-            bitable_field = %widget.bitable_field, "解析外部选项控件的当前选择");
-        let source = sources.get(&definition.id).ok_or_else(|| {
-            ProvisionError::Invalid(vec![format!(
-                "外部选项控件「{}」缺少数据源绑定",
-                definition.name
-            )])
-        })?;
-        widget.option_map.clear();
-        for label in super::approval_convert::labels_from_cell(cell)
-            .into_iter()
-            .filter(|l| !l.trim().is_empty())
-        {
-            let rows = option_rows_for_label(context, source, &label).await?;
-            let option_id = match pick_option(&rows, source, &label) {
-                Ok(id) => {
-                    // 同名重复不再阻塞，但这是数据质量问题：排进日志提醒清理。
-                    // 展示与用户填的都是文案，任一 option_id 渲染出的文本相同，
-                    // 取排序最前不改变任何可见结果。查询只取 2 行抽样，所以日志
-                    // 只报「多条」不报具体条数（page(1,2) 截断后的数会低估）。
-                    if rows.len() > 1 {
-                        tracing::warn!(
-                            stage = "external_options",
-                            widget_id = %widget.widget_id,
-                            bitable_field = %widget.bitable_field,
-                            source_key = source,
-                            label = %label,
-                            option_id = %id,
-                            "外部选项文案命中多条启用选项，取排序最前（建议清理同名重复）"
-                        );
-                    }
-                    id
-                }
-                Err(ProvisionError::Invalid(_)) => {
-                    tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
-                    bitable_field = %widget.bitable_field, source_key = source,
-                    reason = "当前文案没有匹配的启用选项",
-                    "审批外部选项匹配失败");
-                    let source_name = option_source_name(context, source).await;
-                    return Err(ProvisionError::Invalid(vec![option_match_feedback(
-                        &form,
-                        widget,
-                        fields,
-                        &source_name,
-                        source,
-                        &label,
-                    )]));
-                }
-                Err(error) => return Err(error),
+        .collect();
+    let mut resolved: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    loop {
+        let mut progress = false;
+        for definition in &eager {
+            if resolved.contains(&definition.id) {
+                continue;
+            }
+            let parent_id = definition
+                .parent_widget_ids()
+                .into_iter()
+                .next()
+                .map(str::to_string);
+            let parent_is_external = parent_id
+                .as_deref()
+                .is_some_and(|id| widgets.iter().any(|w| w.widget_id == id));
+            if parent_is_external && !resolved.contains(parent_id.as_deref().unwrap_or_default()) {
+                continue;
+            }
+            let parent_key = parent_option_key(&by_widget_id, widgets, cells, definition)?;
+            let Some(index) = widgets
+                .iter()
+                .position(|widget| widget.widget_id == definition.id)
+            else {
+                resolved.insert(definition.id.clone());
+                continue;
             };
-            widget.option_map.insert(label, option_id);
+            resolve_one(
+                context,
+                &mut widgets[index],
+                definition,
+                cells,
+                &sources,
+                parent_key,
+                &form,
+                fields,
+            )
+            .await?;
+            resolved.insert(definition.id.clone());
+            progress = true;
         }
+        if !progress {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// 解析单个外部选项控件，写入 `option_map`。
+///
+/// 参数逐个平铺：来源、父键、反馈文案（表单/字段）分属不同层，合结构体只是把
+/// 同一批字段挪个位置（与 `run_after_tools_created` 同款处置）。
+#[allow(clippy::too_many_arguments)]
+async fn resolve_one(
+    context: &FeishuContext,
+    widget: &mut WidgetMap,
+    definition: &FormWidget,
+    cells: &serde_json::Map<String, Value>,
+    sources: &BTreeMap<String, String>,
+    parent_key: Option<String>,
+    form: &[FormWidget],
+    fields: &[FieldItem],
+) -> Result<(), ProvisionError> {
+    let Some(cell) = cells.get(&widget.bitable_field) else {
+        return Ok(());
+    };
+    tracing::debug!(stage = "external_options", widget_id = %widget.widget_id,
+        bitable_field = %widget.bitable_field, "解析外部选项控件的当前选择");
+    let source = sources.get(&definition.id).ok_or_else(|| {
+        ProvisionError::Invalid(vec![format!(
+            "外部选项控件「{}」缺少数据源绑定",
+            definition.name
+        )])
+    })?;
+    widget.option_map.clear();
+    for label in super::approval_convert::labels_from_cell(cell)
+        .into_iter()
+        .filter(|l| !l.trim().is_empty())
+    {
+        let rows = option_rows_for_label(context, source, &label).await?;
+        let option_id = match pick_option(&rows, source, &label, parent_key.as_deref()) {
+            Ok(id) => {
+                if rows.len() > 1 {
+                    tracing::warn!(
+                        stage = "external_options",
+                        widget_id = %widget.widget_id,
+                        bitable_field = %widget.bitable_field,
+                        source_key = source,
+                        label = %label,
+                        option_id = %id,
+                        "外部选项文案命中多条启用选项，取排序最前（建议清理同名重复）"
+                    );
+                }
+                id
+            }
+            Err(ProvisionError::Invalid(_)) => {
+                tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
+                bitable_field = %widget.bitable_field, source_key = source,
+                reason = "当前文案没有匹配的启用选项",
+                "审批外部选项匹配失败");
+                let source_name = option_source_name(context, source).await;
+                return Err(ProvisionError::Invalid(vec![option_match_feedback(
+                    form,
+                    widget,
+                    fields,
+                    &source_name,
+                    source,
+                    &label,
+                )]));
+            }
+            Err(error) => return Err(error),
+        };
+        widget.option_map.insert(label, option_id);
     }
     Ok(())
 }
@@ -1239,7 +1300,8 @@ async fn option_rows_matching(
     let mut query = context
         .options()
         .query()
-        .select_fields(&["option_id", "label"])?
+        // `parent_key` 供 `pick_option` 在级联里限定当前父级。
+        .select_fields(&["option_id", "label", "parent_key"])?
         .where_eq("source_key", serde_json::json!(source))?
         .where_eq("enabled", serde_json::json!(true))?;
     if let Some(label) = exact {
@@ -1261,13 +1323,74 @@ async fn option_rows_matching(
         .map_err(|e| ProvisionError::Store(e.to_string()))
 }
 
+/// 本控件当前级联分支的父选项键；无父、父值空或父值解析不到时返回 `None`。
+///
+/// 父值来自来源控件**在本记录里的文案**（真机形态），父选项键必须是父数据源下的
+/// `option_id`——不是文案。父控件可能是本系统的外部选项控件（已解析进它的
+/// `option_map`），也可能是定义里的静态单选（用 `option[].text → value`）。
+fn parent_option_key(
+    by_widget_id: &BTreeMap<&str, &FormWidget>,
+    widgets: &[WidgetMap],
+    cells: &serde_json::Map<String, Value>,
+    definition: &FormWidget,
+) -> Result<Option<String>, ProvisionError> {
+    let Some(parent_widget_id) = definition.parent_widget_ids().into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(parent_definition) = by_widget_id.get(parent_widget_id) else {
+        return Ok(None);
+    };
+    let Some(parent_mapping) = widgets
+        .iter()
+        .find(|widget| widget.widget_id == parent_widget_id)
+    else {
+        return Ok(None);
+    };
+    let Some(parent_cell) = cells.get(&parent_mapping.bitable_field) else {
+        return Ok(None);
+    };
+    let parent_label = super::approval_convert::labels_from_cell(parent_cell)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    if parent_label.trim().is_empty() {
+        return Ok(None);
+    }
+    if let Some(option_id) = parent_mapping.option_map.get(&parent_label) {
+        return Ok(Some(option_id.clone()));
+    }
+    if let Some(WidgetOptions::Fixed(options)) = parent_definition.option.as_ref() {
+        return Ok(options
+            .iter()
+            .find(|option| option.text == parent_label)
+            .map(|option| option.value.clone()));
+    }
+    Ok(None)
+}
+
 /// 从「与当前文案等价的启用选项」里确定性挑一个。
 ///
-/// 2026-10-16 决策：同名重复不再阻塞。控件展示与用户看到的就是**文案**，option_id
-/// 只是背后载体——同一个文案配多条启用选项时，任一 id 渲染出的文本都相同，取
-/// 排序最前（`sort_order` 升序、`option_id` 决胜，见调用点的 order_by）。只有
-/// 「一个都匹配不上」才失败。
-fn pick_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
+/// 级联控件（`parent_key` 非空）**只能取当前父级下的那条**：同名文案在不同支行下
+/// 是不同选项，取错父级会把「手动录入」记到另一家银行名下（2026-11-03 真机
+/// `202611030042`）。当前父级下没有同文案时才回退原规则，不让成功单子被误判死。
+fn pick_option(
+    rows: &[Record],
+    source: &str,
+    label: &str,
+    parent_key: Option<&str>,
+) -> Result<String, ProvisionError> {
+    if let Some(parent_key) = parent_key {
+        for row in rows {
+            let stored = row.require::<String>("label")?;
+            if !super::approval_convert::labels_equivalent(&stored, label) {
+                continue;
+            }
+            let stored_parent: Option<String> = row.optional("parent_key")?;
+            if stored_parent.as_deref() == Some(parent_key) {
+                return Ok(row.require("option_id")?);
+            }
+        }
+    }
     // 查询已按文案过滤，这里再比一次是防御 DB 比较宽松（大小写/排序规则）
     // 导致的「返回了但不完全相等」；数字文案按数值等价（`9.1330` == `9.133`）。
     // LIKE 粗筛可能带回同前缀的邻值，所以挑**第一条等价**的，而不是第一条。
@@ -1383,34 +1506,152 @@ mod tests {
                 .set("option_id", option_id)
         };
         assert_eq!(
-            pick_option(&[row("银行", "id1")], "source", "银行").unwrap_or_else(|e| panic!("{e}")),
+            pick_option(&[row("银行", "id1")], "source", "银行", None)
+                .unwrap_or_else(|e| panic!("{e}")),
             "id1"
         );
         assert_eq!(
-            pick_option(&[row("银行", "id1"), row("银行", "id2")], "source", "银行")
-                .unwrap_or_else(|e| panic!("{e}")),
+            pick_option(
+                &[row("银行", "id1"), row("银行", "id2")],
+                "source",
+                "银行",
+                None
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
             "id1",
             "同名重复取排序最前，不再判为歧义"
         );
         // 数字文案按数值等价：固定小数位（查找/公式列的 9.1330）对上最短表示
         // （选项台账的 9.133）。
         assert_eq!(
-            pick_option(&[row("9.133", "id1")], "source", "9.1330")
+            pick_option(&[row("9.133", "id1")], "source", "9.1330", None)
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1"
         );
         assert_eq!(
-            pick_option(&[row("9.1330", "id1")], "source", "9.133")
+            pick_option(&[row("9.1330", "id1")], "source", "9.133", None)
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1",
             "反向口径（选项侧带尾零）也必须命中"
         );
         assert!(
-            pick_option(&[row("9.1335", "id1")], "source", "9.1330").is_err(),
+            pick_option(&[row("9.1335", "id1")], "source", "9.1330", None).is_err(),
             "同前缀但数值不同不能命中"
         );
-        assert!(pick_option(&[], "source", "银行").is_err());
-        assert!(pick_option(&[row("银行 ", "id1")], "source", "银行").is_err());
+        assert!(pick_option(&[], "source", "银行", None).is_err());
+        assert!(pick_option(&[row("银行 ", "id1")], "source", "银行", None).is_err());
+    }
+
+    /// 级联：同名文案在多个父级下存在时，**只能取当前父级下的那条**。
+    ///
+    /// 2026-11-03 真机 `202611030042`：`手动录入` 在 7 条支行下都叫这个名字，
+    /// 旧规则「取排序最前」把 Airwallex Pay 支行下的 id 填进了 BPI 支行那一单。
+    #[test]
+    fn pick_option_prefers_the_row_under_the_current_parent() {
+        let row = |label: &str, option_id: &str, parent: Option<&str>| {
+            let mut record = Record::new()
+                .set("label", label)
+                .set("option_id", option_id);
+            if let Some(parent) = parent {
+                record = record.set("parent_key", parent);
+            }
+            record
+        };
+        let rows = [
+            row("手动录入", "other-branch", Some("branch-a")),
+            row("手动录入", "current-branch", Some("branch-b")),
+        ];
+        assert_eq!(
+            pick_option(&rows, "source", "手动录入", Some("branch-b"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            "current-branch",
+            "当前父级下的同文案必须优先于排序更前的其它父级"
+        );
+        // 当前父级下没有同名项：仍然回退排序最前，不把可用的单子判死。
+        assert_eq!(
+            pick_option(&rows, "source", "手动录入", Some("branch-c"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            "other-branch"
+        );
+    }
+
+    /// 父值由**父控件在本记录的文案**折回父数据源的 `option_id`：
+    /// 外部选项父用父 `option_map`，静态单选父用定义里的 `text → value`。
+    #[test]
+    fn parent_option_key_maps_the_parent_label_to_our_option_id() {
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([
+            {"id":"parent","name":"归属银行","type":"radioV2","option":[],
+             "externalData":{"externalDataLinkage":true}},
+            {"id":"child","name":"联行号","type":"radioV2","option":[],
+             "externalData":{"externalDataLinkage":true,
+               "linkageConfigs":[{"linkageWidgetID":"widgetGroup.parent","key":"fldEnnmvnA"}]}}
+        ]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let by_widget_id: BTreeMap<&str, &FormWidget> = form
+            .iter()
+            .map(|widget| (widget.id.as_str(), widget))
+            .collect();
+        let widget = |id: &str, field: &str| WidgetMap {
+            widget_id: id.into(),
+            widget_type: "radioV2".into(),
+            bitable_field: field.into(),
+            interval_end_field: None,
+            required: false,
+            converter: Converter::Option,
+            option_map: BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+        };
+        let mut parent = widget("parent", "fldBank");
+        parent.option_map.insert("BPI".into(), "bank:bpi".into());
+        let widgets = vec![parent, widget("child", "fldRouting")];
+        let cells = serde_json::json!({"fldBank":"BPI","fldRouting":"手动录入"});
+        let cells = serde_json::Map::from_iter(
+            cells
+                .as_object()
+                .unwrap_or_else(|| panic!("对象"))
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert_eq!(
+            parent_option_key(&by_widget_id, &widgets, &cells, &form[1])
+                .unwrap_or_else(|error| panic!("{error}")),
+            Some("bank:bpi".to_string()),
+            "父是外部选项控件时必须用它的 option_id，而不是父的文案"
+        );
+
+        // 静态单选父：定义里的 option[].text → value。
+        let static_form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([
+            {"id":"parent","name":"收款方类型","type":"radioV2",
+             "option":[{"text":"个人","value":"mpuvnw0h-0"}]},
+            {"id":"child","name":"开户行","type":"radioV2","option":[],
+             "externalData":{"externalDataLinkage":true,
+               "linkageConfigs":[{"linkageWidgetID":"parent"}]}}
+        ]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let static_by_widget: BTreeMap<&str, &FormWidget> = static_form
+            .iter()
+            .map(|widget| (widget.id.as_str(), widget))
+            .collect();
+        let static_widgets = vec![widget("parent", "fldPayee"), widget("child", "fldBank")];
+        let static_cells = serde_json::json!({"fldPayee":"个人"});
+        let static_cells = serde_json::Map::from_iter(
+            static_cells
+                .as_object()
+                .unwrap_or_else(|| panic!("对象"))
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        assert_eq!(
+            parent_option_key(
+                &static_by_widget,
+                &static_widgets,
+                &static_cells,
+                &static_form[1]
+            )
+            .unwrap_or_else(|error| panic!("{error}")),
+            Some("mpuvnw0h-0".to_string())
+        );
     }
 
     /// 取出失败值。不用 `unwrap_err()`：clippy 的 `unwrap_used` 是 deny，

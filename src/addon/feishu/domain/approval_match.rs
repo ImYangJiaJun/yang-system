@@ -215,6 +215,27 @@ fn option_flag_is_one(value: Option<&serde_json::Value>) -> bool {
 }
 
 impl FormWidget {
+    /// 级联声明的来源控件 id：`linkageConfigs[].linkageWidgetID`。
+    ///
+    /// `linkageWidgetID` 实测可带点号前缀（如 `widgetParent.widgetChild`），只取最后一段
+    /// 才是实际来源控件。声明为空/缺失时返回空集合（无父）。
+    pub(crate) fn parent_widget_ids(&self) -> Vec<&str> {
+        self.external_data
+            .as_ref()
+            .and_then(|external| external.get("linkageConfigs"))
+            .and_then(serde_json::Value::as_array)
+            .map(|configs| {
+                configs
+                    .iter()
+                    .filter_map(|config| config.get("linkageWidgetID"))
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|id| id.rsplit('.').next())
+                    .filter(|id| !id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 返回关联审批允许的定义 Code；`None` 表示定义明确声明不限制范围。
     pub(crate) fn connect_definition_codes(&self) -> Result<Option<Vec<String>>, String> {
         if self.r#type != "connect" {
@@ -1135,6 +1156,35 @@ mod tests {
             interval_end_field: None,
             option_source_key: None,
         }
+    }
+
+    /// `linkageWidgetID` 可能带「控件组.子控件」点号前缀，父控件只认最后一段。
+    #[test]
+    fn parent_widget_ids_take_the_last_segment_of_a_dotted_linkage_id() {
+        let widget = |external: serde_json::Value| FormWidget {
+            id: "child".into(),
+            name: "联行号".into(),
+            r#type: "radioV2".into(),
+            required: true,
+            option: Some(WidgetOptions::Fixed(vec![])),
+            external_data: Some(external),
+            value: serde_json::Value::Null,
+            children: Vec::new(),
+        };
+        assert_eq!(
+            widget(serde_json::json!({
+                "externalDataLinkage": true,
+                "linkageConfigs": [
+                    {"linkageWidgetID": "widgetGroup.parent"},
+                    {"linkageWidgetID": "other"}
+                ]
+            }))
+            .parent_widget_ids(),
+            vec!["parent", "other"]
+        );
+        assert!(widget(serde_json::json!({"externalDataLinkage": true}))
+            .parent_widget_ids()
+            .is_empty());
     }
 
     #[test]
