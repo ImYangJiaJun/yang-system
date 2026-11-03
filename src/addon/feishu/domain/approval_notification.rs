@@ -143,6 +143,35 @@ pub(crate) struct FeedbackReference {
     pub(crate) href: Option<String>,
 }
 
+/// 审批编号引用：编号本身作为链接文本，href 只来自已确认的实例 Code。
+///
+/// 缺实例 Code 时保持纯文本（`post_content` 自动退化为 text 节点）；已有实例
+/// 但编号未生成时退化为「编号待生成」，仍然可点进实例详情。
+pub(crate) fn approval_reference(
+    approval_name: &str,
+    serial_number: Option<&str>,
+    instance_code: Option<&str>,
+) -> FeedbackReference {
+    let href = instance_code.and_then(|code| super::approval::instance_applink(code).ok());
+    match (serial_number, href.is_some()) {
+        (Some(serial), _) => FeedbackReference {
+            label: "审批编号",
+            text: serial.to_string(),
+            href,
+        },
+        (None, true) => FeedbackReference {
+            label: "审批",
+            text: format!("{approval_name} / 编号待生成"),
+            href,
+        },
+        (None, false) => FeedbackReference {
+            label: "审批",
+            text: approval_name.to_string(),
+            href: None,
+        },
+    }
+}
+
 pub(crate) async fn send_feedback(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
@@ -477,6 +506,69 @@ mod tests {
                 {"tag":"text","text":"审批：","style":["bold"]},
                 {"tag":"a","text":"付款审批 / SN-001","href":"https://applink.feishu.cn/client/mini_program/open?appId=test&path=example"}
             ])
+        );
+    }
+
+    /// 审批编号本身作为链接文本：href 只来自已确认的实例 Code，缺 Code 时保持纯文本。
+    #[test]
+    fn approval_reference_links_the_serial_and_falls_back_to_text() {
+        let link = super::super::approval::instance_applink("INST-1")
+            .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"));
+
+        let linked = approval_reference("付款审批", Some("202610290001"), Some("INST-1"));
+        assert_eq!(linked.label, "审批编号");
+        assert_eq!(linked.text, "202610290001");
+        assert_eq!(linked.href.as_deref(), Some(link.as_str()));
+
+        let plain = approval_reference("付款审批", Some("202610290001"), None);
+        assert_eq!(plain.label, "审批编号");
+        assert_eq!(plain.text, "202610290001");
+        assert_eq!(plain.href, None);
+
+        let pending = approval_reference("付款审批", None, Some("INST-1"));
+        assert_eq!(pending.label, "审批");
+        assert_eq!(pending.text, "付款审批 / 编号待生成");
+        assert_eq!(pending.href.as_deref(), Some(link.as_str()));
+
+        let unnamed = approval_reference("付款审批", None, None);
+        assert_eq!(unnamed.label, "审批");
+        assert_eq!(unnamed.text, "付款审批");
+        assert_eq!(unnamed.href, None);
+
+        // 实例 Code 不合法时链接失效，编号仍保持纯文本，绝不把内容拼进 href。
+        let invalid = approval_reference("付款审批", Some("202610290001"), Some("../evil"));
+        assert_eq!(invalid.href, None);
+        assert_eq!(invalid.text, "202610290001");
+    }
+
+    /// 正文里的「审批编号：…」仍是 text 节点；只有 references 传入的编号才变成 a 节点。
+    #[test]
+    fn post_content_links_only_the_trusted_serial_reference() {
+        let text = "【审批实例已确认】\n记录：付款申请\n说明：审批编号：202610290001";
+        let references = [approval_reference(
+            "付款审批",
+            Some("202610290001"),
+            Some("INST-1"),
+        )];
+        let post = post_content(text, &references);
+        let rows = post["zh_cn"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("缺少段落"));
+        assert_eq!(rows.len(), 3, "{post}");
+        // 业务正文原样保留为 text。
+        assert_eq!(rows[1][1]["tag"], "text");
+        assert_eq!(rows[1][1]["text"], "审批编号：202610290001");
+        // 可信引用才是链接，且链接文本就是编号本身。
+        assert_eq!(rows[2][0]["text"], "审批编号：");
+        assert_eq!(rows[2][1]["tag"], "a");
+        assert_eq!(rows[2][1]["text"], "202610290001");
+        assert_eq!(
+            rows[2][1]["href"].as_str(),
+            Some(
+                super::super::approval::instance_applink("INST-1")
+                    .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"))
+                    .as_str()
+            )
         );
     }
 

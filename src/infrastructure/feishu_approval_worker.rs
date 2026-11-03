@@ -52,7 +52,6 @@ use yang_runtime::shutdown::OwnedTask;
 use crate::addon::feishu::approval::domain::task_applicant_table::{
     fill_task_applicant, upsert_task_applicant,
 };
-use crate::addon::feishu::domain::approval::instance_applink;
 use crate::addon::feishu::domain::approval::GetOutcome;
 use crate::addon::feishu::domain::approval_aggregation::{
     self, group_uuid, members_all_selected, plan_groups, signature_hash, GroupCandidate,
@@ -69,7 +68,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
-    FeedbackReference, NotificationRecipient, ReceiveIdType,
+    approval_reference, FeedbackReference, NotificationRecipient, ReceiveIdType,
 };
 use crate::addon::feishu::domain::approval_provision::resolve_external_options;
 use crate::addon::feishu::domain::approval_row_edit;
@@ -697,7 +696,7 @@ async fn run_round(
     let mut idled = false;
     let mut row_edits = Vec::new();
     // 被点击配置的逐条结果，供轮末汇总使用（见 [`notify_round_summary`]）。
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries: Vec<RoundEntry> = Vec::new();
     for task in &claimed {
         if idled {
             break;
@@ -754,9 +753,10 @@ async fn run_round(
         // 记录与他这次点击无关。
         if let Some((config_id, _, _)) = click.as_ref() {
             if task.config_id == *config_id {
-                entries.push((
-                    task.record_id.clone(),
+                entries.push(RoundEntry::new(
+                    &task.record_id,
                     round_result_label(task.existing_serial.as_deref(), &outcome, group_size),
+                    &outcome,
                 ));
             }
         }
@@ -847,9 +847,6 @@ struct ClaimedTask {
     group_seq: i64,
     /// 任务行的外部写入阶段。组处理用它判断「是否曾尝试创建 / 是否需要回捞」。
     effect_phase: String,
-    /// 任务行的实例码。**组 leader 恒为 `None`**——组实例码只落组行（设计 §4.1）；
-    /// 这里保留是为了单条任务的通知与「已发起过」判定沿用原语义。
-    instance_code: Option<String>,
 }
 
 /// 单条配置的播种结果。
@@ -2211,6 +2208,77 @@ fn round_result_label(
     approval_feedback::one_line(&text, 80)
 }
 
+/// 轮末汇总的逐条结果：正文标签 + 本次结论的审批坐标（用于末尾的可信编号链接）。
+struct RoundEntry {
+    record_id: String,
+    label: String,
+    serial_number: Option<String>,
+    instance_code: Option<String>,
+}
+
+impl RoundEntry {
+    fn new(record_id: &str, label: String, outcome: &DispatchResult) -> Self {
+        let (serial_number, instance_code) = match outcome {
+            DispatchResult::Backfilled {
+                serial_number,
+                instance_code,
+            } => (Some(serial_number.clone()), Some(instance_code.clone())),
+            DispatchResult::CreatedPendingBackfill {
+                serial_number,
+                instance_code,
+                ..
+            } => (serial_number.clone(), Some(instance_code.clone())),
+            DispatchResult::Waiting { .. }
+            | DispatchResult::Retryable { .. }
+            | DispatchResult::Terminal { .. } => (None, None),
+        };
+        Self {
+            record_id: record_id.to_string(),
+            label,
+            serial_number,
+            instance_code,
+        }
+    }
+}
+
+/// 轮末汇总末尾的审批编号引用：只取正文实际展示的前 8 条，按**实例**去重。
+///
+/// 空实例 Code 不能确认唯一实例，不生成引用；同一编号对应不同实例时各自保留。
+/// 扫描失败时正文不列逐条结果，页脚也不能列编号。
+fn round_summary_references(
+    entries: &[RoundEntry],
+    approval_name: &str,
+    scan_failure: Option<&str>,
+) -> Vec<FeedbackReference> {
+    let mut seen = HashSet::new();
+    let mut references = Vec::new();
+    if scan_failure.is_some() {
+        return references;
+    }
+    for entry in entries
+        .iter()
+        .filter(|entry| !entry.label.is_empty())
+        .take(8)
+    {
+        let Some(instance_code) = entry
+            .instance_code
+            .as_deref()
+            .filter(|code| !code.is_empty())
+        else {
+            continue;
+        };
+        if !seen.insert(instance_code) {
+            continue;
+        }
+        references.push(approval_reference(
+            approval_name,
+            entry.serial_number.as_deref(),
+            Some(instance_code),
+        ));
+    }
+    references
+}
+
 /// 轮末汇总正文（首行是卡片标题）。
 ///
 /// 逐条结果最多列 8 条，其余折成「等 N 条」；积压与主因来自任务行
@@ -2304,7 +2372,7 @@ async fn notify_round_summary(
     trigger: RoundTrigger,
     click: Option<&(i64, String, Option<String>)>,
     report: &SeedReport,
-    entries: &[(String, String)],
+    entries: &[RoundEntry],
 ) {
     let Some(config_id) = trigger.manual_config() else {
         return;
@@ -2367,8 +2435,8 @@ async fn notify_round_summary(
 
     let filtered: Vec<(String, String)> = entries
         .iter()
-        .filter(|(_, label)| !label.is_empty())
-        .cloned()
+        .filter(|entry| !entry.label.is_empty())
+        .map(|entry| (entry.record_id.clone(), entry.label.clone()))
         .collect();
     let text = round_summary_text(
         &title,
@@ -2390,11 +2458,20 @@ async fn notify_round_summary(
         ))
     })()
     .ok();
-    let references = vec![FeedbackReference {
-        label: "多维表",
-        text: format!("{base_name} / {table_name}"),
-        href: table_url,
-    }];
+    let references = {
+        let mut references = vec![FeedbackReference {
+            label: "多维表",
+            text: format!("{base_name} / {table_name}"),
+            href: table_url,
+        }];
+        let approval_name = approval_feedback::display_name(field("approval_name").as_deref());
+        references.extend(round_summary_references(
+            entries,
+            &approval_name,
+            scan_failure,
+        ));
+        references
+    };
     let recipient = NotificationRecipient {
         receive_id_type: ReceiveIdType::OpenId,
         receive_id: open_id.to_string(),
@@ -2785,9 +2862,6 @@ async fn load_task(
             .filter(|value| !value.trim().is_empty()),
         group_seq: row.require("group_seq")?,
         effect_phase: row.require("effect_phase")?,
-        instance_code: row
-            .optional::<String>("instance_code")?
-            .filter(|value| !value.trim().is_empty()),
     }))
 }
 
@@ -3713,13 +3787,21 @@ async fn run_group_dispatch(
     )
     .await;
     let settlement = match result {
-        DispatchResult::Backfilled { serial_number, .. } => {
-            GroupSettlement::Succeeded(serial_number, group_serial.clone())
-        }
+        DispatchResult::Backfilled {
+            serial_number,
+            instance_code,
+        } => GroupSettlement::Succeeded(serial_number, group_serial.clone(), Some(instance_code)),
         DispatchResult::Terminal { message } => GroupSettlement::Paused(message),
-        DispatchResult::CreatedPendingBackfill { message, .. } => {
-            GroupSettlement::RetryableWithSerial(message, group_serial)
-        }
+        DispatchResult::CreatedPendingBackfill {
+            message,
+            instance_code,
+            serial_number,
+        } => GroupSettlement::RetryableWithSerial {
+            message,
+            serial_number,
+            group_serial,
+            instance_code: Some(instance_code),
+        },
         _ => {
             let message = match &result {
                 DispatchResult::Waiting { reason } => reason.clone(),
@@ -3767,13 +3849,21 @@ enum GroupSettlement {
     /// 编号已回填全部成员。第二项是处理前**组行**已有的编号（`None` = 首次回填），
     /// 用于把「清空编号后重新点击」的回执与首次成功区分开——对应单条的
     /// `already_initiated` 判定（组编号只落组行，leader 永远没有 `existing_serial`）。
-    Succeeded(String, Option<String>),
+    /// 第三项是本次派发确认的实例 Code，用于生成编号链接。
+    Succeeded(String, Option<String>, Option<String>),
     /// 整组暂停：`paused` 落 leader 与全体成员，不写回填列（设计 §5）。
     Paused(String),
     /// 可重试：leader 保持 `pending`，按既有退避与 attempts 预算。
     Retryable(String),
-    /// 可重试但已知编号：用于「实例已确认、回填未完成」，组行仍有编号可写。
-    RetryableWithSerial(String, Option<String>),
+    /// 可重试但实例已确认：`serial_number` 是本次派发确认的编号，只用于通知与
+    /// 汇总链接展示；写库仍用 `group_serial`（处理前组行已有编号），保持自动
+    /// 重试后 `prior`/「已发起过」的原语义。
+    RetryableWithSerial {
+        message: String,
+        serial_number: Option<String>,
+        group_serial: Option<String>,
+        instance_code: Option<String>,
+    },
 }
 
 impl GroupSettlement {
@@ -3782,6 +3872,40 @@ impl GroupSettlement {
     }
     fn retryable(message: impl Into<String>) -> Self {
         Self::Retryable(message.into())
+    }
+}
+
+/// 组结论里的审批实例坐标 → 通知末尾的审批编号引用（无实例坐标时不生成）。
+fn settlement_approval_reference(
+    settlement: &GroupSettlement,
+    approval_name: &str,
+) -> Option<FeedbackReference> {
+    match settlement {
+        GroupSettlement::Succeeded(serial, _, instance_code) => Some(approval_reference(
+            approval_name,
+            Some(serial),
+            instance_code.as_deref(),
+        )),
+        GroupSettlement::RetryableWithSerial {
+            serial_number,
+            instance_code,
+            ..
+        } => Some(approval_reference(
+            approval_name,
+            serial_number.as_deref(),
+            instance_code.as_deref(),
+        )),
+        GroupSettlement::Paused(_) | GroupSettlement::Retryable(_) => None,
+    }
+}
+
+/// `finish_group` 的编号参数：成功写本次编号；待回填仍只写处理前组行的编号
+/// （本次新确认的编号只用于通知与汇总链接，不改变写库与 `prior` 判定）。
+fn group_persisted_serial(settlement: &GroupSettlement) -> Option<String> {
+    match settlement {
+        GroupSettlement::Succeeded(serial, _, _) => Some(serial.clone()),
+        GroupSettlement::RetryableWithSerial { group_serial, .. } => group_serial.clone(),
+        GroupSettlement::Paused(_) | GroupSettlement::Retryable(_) => None,
     }
 }
 
@@ -3812,15 +3936,14 @@ async fn settle_group(
         };
     }
 
-    let (state, result, reason, serial, retry) = match &settlement {
-        GroupSettlement::Succeeded(serial, _) => (
+    let (state, result, reason, retry) = match &settlement {
+        GroupSettlement::Succeeded(serial, _, instance_code) => (
             "backfilled",
             DispatchResult::Backfilled {
                 serial_number: serial.clone(),
-                instance_code: task.instance_code.clone().unwrap_or_default(),
+                instance_code: instance_code.clone().unwrap_or_default(),
             },
             None,
-            Some(serial.clone()),
             false,
         ),
         GroupSettlement::Paused(message) => (
@@ -3829,7 +3952,6 @@ async fn settle_group(
                 message: message.clone(),
             },
             Some(message.clone()),
-            None,
             false,
         ),
         GroupSettlement::Retryable(message) => (
@@ -3838,21 +3960,26 @@ async fn settle_group(
                 message: message.clone(),
             },
             Some(message.clone()),
-            None,
             true,
         ),
-        GroupSettlement::RetryableWithSerial(message, serial) => (
+        GroupSettlement::RetryableWithSerial {
+            message,
+            serial_number,
+            instance_code,
+            ..
+        } => (
             "pending",
             DispatchResult::CreatedPendingBackfill {
                 message: message.clone(),
-                instance_code: task.instance_code.clone().unwrap_or_default(),
-                serial_number: serial.clone(),
+                instance_code: instance_code.clone().unwrap_or_default(),
+                serial_number: serial_number.clone(),
             },
             Some(message.clone()),
-            serial.clone(),
             true,
         ),
     };
+    // 写库编号与展示编号分开：`CreatedPendingBackfill` 的本轮新编号只进通知/汇总。
+    let serial = group_persisted_serial(&settlement);
 
     // 通知：结论变化才发（暂停消息含行号与原因，靠 `last_error` 去重）。
     let notified = if should_notify_group(task, &settlement) {
@@ -3912,14 +4039,14 @@ async fn settle_group(
     metrics::counter!(
         "feishu_approval_dispatch_total",
         "outcome" => match (&settlement, state) {
-            (GroupSettlement::Succeeded(_, _), _) => "backfilled",
+            (GroupSettlement::Succeeded(..), _) => "backfilled",
             (_, "paused") => "terminal",
             (_, _) => "retryable",
         }
     )
     .increment(member_count as u64);
 
-    if let GroupSettlement::Succeeded(serial, _) = &settlement {
+    if let GroupSettlement::Succeeded(serial, _, _) = &settlement {
         append_group_audit(runner, task, serial).await;
     }
 
@@ -3939,9 +4066,9 @@ async fn settle_group(
 /// 清空编号后重新点击时用户也要拿到这次点击的回执。
 fn should_notify_group(task: &ClaimedTask, settlement: &GroupSettlement) -> bool {
     let reason = match settlement {
-        GroupSettlement::Succeeded(_, _) => return true,
+        GroupSettlement::Succeeded(..) => return true,
         GroupSettlement::Paused(message) | GroupSettlement::Retryable(message) => message,
-        GroupSettlement::RetryableWithSerial(message, _) => message,
+        GroupSettlement::RetryableWithSerial { message, .. } => message,
     };
     task.last_error.as_deref() != Some(reason.as_str())
 }
@@ -4016,7 +4143,7 @@ async fn group_notification(
     .unwrap_or_default();
 
     let (status, reason) = match settlement {
-        GroupSettlement::Succeeded(serial, prior) => {
+        GroupSettlement::Succeeded(serial, prior, _) => {
             let row_text = group_row_summary(&rows, &record_ids);
             // 组行已有同一编号 = 清空编号后的人工重发，措辞要说明「已发起过」。
             let lead = if prior.as_deref() == Some(serial.as_str()) {
@@ -4045,13 +4172,17 @@ async fn group_notification(
             approval_feedback::FeedbackStatus::Retryable,
             format!("本组 {member_count} 条记录本轮未完成：{message}"),
         ),
-        GroupSettlement::RetryableWithSerial(message, _) => (
+        GroupSettlement::RetryableWithSerial { message, .. } => (
             approval_feedback::FeedbackStatus::CreatedPendingBackfill,
             format!("本组 {member_count} 条记录回填尚未完成：{message}"),
         ),
     };
 
-    let names = notification_names(runner, task).await;
+    let (names, approval_name) = notification_names(runner, task).await;
+    let mut references = Vec::new();
+    if let Some(reference) = settlement_approval_reference(settlement, &approval_name) {
+        references.push(reference);
+    }
     let text = approval_feedback::render(
         status,
         &reason,
@@ -4072,7 +4203,7 @@ async fn group_notification(
         &runner.tokens,
         &recipient,
         &text,
-        &[],
+        &references,
     )
     .await;
     match result.status {
@@ -4098,8 +4229,8 @@ async fn group_notification(
     }
 }
 
-/// 通知头部的配置/多维表/数据表名称（读失败退化为「名称暂不可用」）。
-async fn notification_names(runner: &RoundRunner, task: &ClaimedTask) -> String {
+/// 通知头部的配置/多维表/数据表名称与审批名称（读失败退化为「名称暂不可用」）。
+async fn notification_names(runner: &RoundRunner, task: &ClaimedTask) -> (String, String) {
     let lookup = async {
         runner
             .context
@@ -4119,11 +4250,14 @@ async fn notification_names(runner: &RoundRunner, task: &ClaimedTask) -> String 
             .and_then(|row| row.optional::<String>(field).ok().flatten());
         approval_feedback::display_name(value.as_deref())
     };
-    format!(
-        "配置：{}\n多维表：{}\n数据表：{}",
-        name("title"),
-        name("base_name"),
-        name("table_name")
+    (
+        format!(
+            "配置：{}\n多维表：{}\n数据表：{}",
+            name("title"),
+            name("base_name"),
+            name("table_name")
+        ),
+        name("approval_name"),
     )
 }
 
@@ -4484,6 +4618,35 @@ struct WorkerNotification {
     edit: Option<approval_row_edit::RowNumberEdit>,
 }
 
+/// 单条结论里的审批实例坐标 → 通知末尾的审批编号引用（无实例坐标时不生成）。
+fn outcome_approval_reference(
+    outcome: &DispatchResult,
+    approval_name: &str,
+) -> Option<FeedbackReference> {
+    match outcome {
+        DispatchResult::Backfilled {
+            instance_code,
+            serial_number,
+        } => Some(approval_reference(
+            approval_name,
+            Some(serial_number),
+            Some(instance_code),
+        )),
+        DispatchResult::CreatedPendingBackfill {
+            instance_code,
+            serial_number,
+            ..
+        } => Some(approval_reference(
+            approval_name,
+            serial_number.as_deref(),
+            Some(instance_code),
+        )),
+        DispatchResult::Waiting { .. }
+        | DispatchResult::Retryable { .. }
+        | DispatchResult::Terminal { .. } => None,
+    }
+}
+
 /// Worker 路径的 IM 通知：向触发人发送审批派发结果。
 ///
 /// 返回**本轮结论是否已经送到人**（`notified`）与送达后待补行号的消息
@@ -4633,19 +4796,9 @@ async fn send_worker_notification(
         href: table_url,
     }];
 
-    // 成功时加审批实例链接
-    if let DispatchResult::Backfilled {
-        instance_code,
-        serial_number,
-    } = outcome
-    {
-        let approval_text = format!("{} / {}", name("approval_name"), serial_number.as_str());
-        let approval_href = instance_applink(instance_code).ok();
-        references.push(FeedbackReference {
-            label: "审批",
-            text: approval_text,
-            href: approval_href,
-        });
+    // 审批实例链接：成功回填与「实例已确认、编号/回填未完成」都要带实例坐标。
+    if let Some(reference) = outcome_approval_reference(outcome, &name("approval_name")) {
+        references.push(reference);
     }
 
     let recipient = NotificationRecipient {
@@ -4761,6 +4914,76 @@ mod tests {
         let field_type: fn(&RoundRunner) -> &Arc<dyn OutboundTransport> =
             |runner| &runner.transport;
         let _ = field_type;
+    }
+
+    /// 单条与聚合组共用同一份审批编号链接：编号是链接文本，href 只来自实例 Code；
+    /// 缺实例码时保持纯文本。
+    #[test]
+    fn single_and_group_share_the_same_approval_reference() {
+        let link = crate::addon::feishu::domain::approval::instance_applink("INST-1")
+            .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"));
+        let backfilled = DispatchResult::Backfilled {
+            serial_number: "SN-1".into(),
+            instance_code: "INST-1".into(),
+        };
+        let pending = DispatchResult::CreatedPendingBackfill {
+            message: "审批编号：SN-1；编号回填失败".into(),
+            instance_code: "INST-1".into(),
+            serial_number: Some("SN-1".into()),
+        };
+        let succeeded = GroupSettlement::Succeeded("SN-1".into(), None, Some("INST-1".into()));
+        let retryable = GroupSettlement::RetryableWithSerial {
+            message: "审批编号：SN-1；编号回填失败".into(),
+            serial_number: Some("SN-1".into()),
+            group_serial: None,
+            instance_code: Some("INST-1".into()),
+        };
+
+        let single: Vec<_> = [&backfilled, &pending]
+            .into_iter()
+            .map(|outcome| {
+                outcome_approval_reference(outcome, "付款审批")
+                    .unwrap_or_else(|| panic!("单条结论应生成审批引用: {outcome:?}"))
+            })
+            .collect();
+        let group: Vec<_> = [&succeeded, &retryable]
+            .into_iter()
+            .map(|settlement| {
+                settlement_approval_reference(settlement, "付款审批")
+                    .unwrap_or_else(|| panic!("组结论应生成审批引用"))
+            })
+            .collect();
+
+        for reference in single.iter().chain(group.iter()) {
+            assert_eq!(reference.label, "审批编号");
+            assert_eq!(reference.text, "SN-1");
+            assert_eq!(reference.href.as_deref(), Some(link.as_str()));
+        }
+
+        // 实例码缺失时编号保持纯文本，绝不生成链接。
+        let no_code = DispatchResult::CreatedPendingBackfill {
+            message: "审批编号：SN-1".into(),
+            instance_code: String::new(),
+            serial_number: Some("SN-1".into()),
+        };
+        let reference = outcome_approval_reference(&no_code, "付款审批")
+            .unwrap_or_else(|| panic!("仍应保留编号"));
+        assert_eq!(reference.text, "SN-1");
+        assert_eq!(reference.href, None);
+
+        // 没有实例坐标的结论不追加审批引用。
+        assert!(outcome_approval_reference(
+            &DispatchResult::Waiting {
+                reason: "缺少必填值".into()
+            },
+            "付款审批"
+        )
+        .is_none());
+        assert!(settlement_approval_reference(
+            &GroupSettlement::Paused("校验失败".into()),
+            "付款审批"
+        )
+        .is_none());
     }
 
     /// 点击重开时，创建结果未知或已有实例的行不能被本轮点击人改写身份。
@@ -5235,7 +5458,6 @@ mod tests {
             group_id: None,
             group_seq: 0,
             effect_phase: "ready".to_string(),
-            instance_code: None,
         }
     }
 
@@ -5530,6 +5752,119 @@ mod tests {
             .collect();
         let long = round_summary_text("t", "b", "t", 200, 0, &many, Some(999), None, None);
         assert_eq!(long.chars().count(), 1800, "整体截到 1800 字符");
+    }
+
+    /// 轮末汇总的审批引用：只覆盖正文明细的前 8 条，按**实例**去重；
+    /// 同编号不同实例各自保留，无实例或失败不生成链接。
+    #[test]
+    fn round_summary_references_follow_first_eight_and_dedup_by_instance() {
+        // 走生产同一条映射：`TaskOutcome.result` → `RoundEntry`。
+        let entry = |record_id: &str, outcome: DispatchResult| {
+            RoundEntry::new(
+                record_id,
+                round_result_label(None, &outcome, None),
+                &outcome,
+            )
+        };
+        let backfilled = |serial: &str, code: &str| DispatchResult::Backfilled {
+            serial_number: serial.into(),
+            instance_code: code.into(),
+        };
+        let pending = |serial: Option<&str>, code: &str| DispatchResult::CreatedPendingBackfill {
+            message: "编号回填失败".into(),
+            instance_code: code.into(),
+            serial_number: serial.map(str::to_string),
+        };
+        let entries = vec![
+            entry("rec0", backfilled("SN-A", "INST-1")),
+            entry("rec1", pending(Some("SN-B"), "INST-2")),
+            // 同一实例（同组重复出现）只保留一次引用。
+            entry("rec2", backfilled("SN-A", "INST-1")),
+            // 相同编号、不同实例：不得合并。
+            entry("rec3", backfilled("SN-A", "INST-3")),
+            // 实例已确认但编号尚未生成：仍可点进实例。
+            entry("rec4", pending(None, "INST-4")),
+            // 失败与空实例都不生成引用。
+            entry(
+                "rec5",
+                DispatchResult::Terminal {
+                    message: "映射坏了".into(),
+                },
+            ),
+            entry("rec6", pending(Some("SN-C"), "")),
+            entry("rec7", pending(None, "INST-7")),
+            // 第 9 条起超出正文明细范围，不生成引用。
+            entry("rec8", pending(None, "INST-8")),
+        ];
+        let link = |code: &str| {
+            crate::addon::feishu::domain::approval::instance_applink(code)
+                .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"))
+        };
+        let references = round_summary_references(&entries, "付款审批", None);
+        let actual: Vec<_> = references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.label,
+                    reference.text.clone(),
+                    reference.href.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("审批编号", "SN-A".into(), Some(link("INST-1"))),
+                ("审批编号", "SN-B".into(), Some(link("INST-2"))),
+                ("审批编号", "SN-A".into(), Some(link("INST-3"))),
+                ("审批", "付款审批 / 编号待生成".into(), Some(link("INST-4"))),
+                ("审批", "付款审批 / 编号待生成".into(), Some(link("INST-7"))),
+            ]
+        );
+        // 扫描失败时正文不列明细，页脚也不能挂编号。
+        assert!(round_summary_references(&entries, "付款审批", Some("扫描失败")).is_empty());
+    }
+
+    /// 组回填待完成时，写库编号仍只来自处理前的组行编号；本次新确认的编号
+    /// 只用于通知与汇总链接展示（HEAD 的 prior/「已发起过」语义不变）。
+    #[test]
+    fn group_persisted_serial_keeps_head_semantics() {
+        let retry = GroupSettlement::RetryableWithSerial {
+            message: "编号回填失败".into(),
+            serial_number: Some("SN-NEW".into()),
+            group_serial: Some("SN-OLD".into()),
+            instance_code: Some("INST-1".into()),
+        };
+        assert_eq!(group_persisted_serial(&retry), Some("SN-OLD".into()));
+        let reference = settlement_approval_reference(&retry, "付款审批")
+            .unwrap_or_else(|| panic!("组结论应生成审批引用"));
+        assert_eq!(reference.text, "SN-NEW");
+        assert_eq!(
+            reference.href.as_deref(),
+            Some(
+                crate::addon::feishu::domain::approval::instance_applink("INST-1")
+                    .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"))
+                    .as_str()
+            )
+        );
+
+        // 组行原本无编号时，不因本次新编号而写库。
+        let first = GroupSettlement::RetryableWithSerial {
+            message: "编号尚未生成".into(),
+            serial_number: Some("SN-NEW".into()),
+            group_serial: None,
+            instance_code: Some("INST-2".into()),
+        };
+        assert_eq!(group_persisted_serial(&first), None);
+
+        assert_eq!(
+            group_persisted_serial(&GroupSettlement::Succeeded(
+                "SN-OK".into(),
+                None,
+                Some("INST-3".into())
+            )),
+            Some("SN-OK".into())
+        );
     }
 
     /// 通知去重：**结论变化才发**。

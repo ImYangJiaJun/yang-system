@@ -1938,21 +1938,11 @@ fn feedback_references(
             href: record_url,
         });
     }
-    let (text, href) = match outcome.instance_code.as_deref() {
-        Some(code) => (
-            format!(
-                "{approval_name} / {}",
-                outcome.serial_number.as_deref().unwrap_or("编号待生成")
-            ),
-            crate::addon::feishu::domain::approval::instance_applink(code).ok(),
-        ),
-        None => (approval_name.to_string(), None),
-    };
-    references.push(FeedbackReference {
-        label: "审批",
-        text,
-        href,
-    });
+    references.push(approval_notification::approval_reference(
+        approval_name,
+        outcome.serial_number.as_deref(),
+        outcome.instance_code.as_deref(),
+    ));
     references
 }
 
@@ -2015,6 +2005,73 @@ mod tests {
             notification_recipient: None,
             aggregate: false,
         }
+    }
+
+    /// 同步通知的审批编号本身就是链接：href 来自已确认实例码；缺实例码保持纯文本。
+    #[test]
+    fn feedback_references_links_the_approval_serial() {
+        let mut outcome = DispatchOutcome::success(
+            Outcome::Succeeded,
+            None,
+            None,
+            None,
+            true,
+            FeedbackStatus::Succeeded,
+            "已创建审批实例，编号 SN-1".into(),
+            Some("SN-1".into()),
+        );
+        outcome.instance_code = Some("INST-1".into());
+        let references = feedback_references(
+            Some("rec1"),
+            &outcome,
+            "baseA",
+            "tblA",
+            "财务协作",
+            "付款表",
+            "付款审批",
+            None,
+        );
+        let approval = references
+            .iter()
+            .find(|reference| reference.label == "审批编号")
+            .unwrap_or_else(|| panic!("缺少审批编号引用: {references:?}"));
+        assert_eq!(approval.text, "SN-1");
+        assert_eq!(
+            approval.href.as_deref(),
+            Some(
+                crate::addon::feishu::domain::approval::instance_applink("INST-1")
+                    .unwrap_or_else(|error| panic!("实例链接生成失败: {error}"))
+                    .as_str()
+            )
+        );
+
+        // 没有实例码时不生成链接，编号保持纯文本。
+        let mut no_code = DispatchOutcome::success(
+            Outcome::Waiting,
+            None,
+            None,
+            None,
+            true,
+            FeedbackStatus::Waiting,
+            "本轮未处理".into(),
+            Some("SN-1".into()),
+        );
+        no_code.instance_code = None;
+        let references = feedback_references(
+            None,
+            &no_code,
+            "baseA",
+            "tblA",
+            "财务协作",
+            "付款表",
+            "付款审批",
+            None,
+        );
+        let approval = references
+            .iter()
+            .find(|reference| reference.label == "审批编号")
+            .unwrap_or_else(|| panic!("仍应保留编号"));
+        assert_eq!(approval.href, None);
     }
 
     #[test]
