@@ -7,7 +7,7 @@ mod transport;
 pub(crate) use repository::{
     admit, attach_initiator, begin_effect, begin_group_effect, claim_ready, confirm_effect,
     confirm_group_effect, detach_from_group, facts, finish, finish_group, is_owned, mark_unknown,
-    reopen, DetachOutcome, TaskClaim,
+    refresh_initiator, reopen, DetachOutcome, TaskClaim,
 };
 // `GroupExecutionTransport` 由 worker 的组处理接入（Task 9）；先随组派发落地。
 #[allow(unused_imports)]
@@ -71,6 +71,15 @@ impl DispatchSnapshot {
     }
 }
 
+/// 显式点击能否改写受理身份：只有**从未产生任何外部副作用**的任务可以。
+///
+/// `creating`/`lookup`/`backfilling` 都可能已经在飞书侧建出了实例；`reopen` 会把
+/// 这些阶段复位成 `ready`，所以调用方必须用**点击前**读到的阶段判断，不能等
+/// reopen 之后再查库。已有实例码的任务一律冻结。
+pub(crate) fn initiator_mutable(has_instance: bool, prior_phase: &str) -> bool {
+    !has_instance && !matches!(prior_phase, "creating" | "lookup" | "backfilling")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +91,28 @@ mod tests {
         Arc,
     };
     use yang_base::{table::Record, BaseError};
+
+    /// 身份冻结的判据必须用**点击前**的阶段：`reopen` 会把 `lookup`/`creating`
+    /// 复位成 `ready`，若在 reopen 之后再判断，第二个点击人就会改写第一个点击人
+    /// 已经建出的实例身份（编号回填、通知都会记到错误的人头上）。
+    #[test]
+    fn initiator_identity_freezes_when_an_external_effect_may_exist() {
+        for phase in ["creating", "lookup", "backfilling"] {
+            assert!(
+                !initiator_mutable(false, phase),
+                "{phase} 可能已建出实例，必须冻结身份"
+            );
+            assert!(!initiator_mutable(true, phase));
+        }
+        assert!(!initiator_mutable(true, "ready"), "有实例码一律冻结");
+        assert!(!initiator_mutable(true, "created"), "有实例码一律冻结");
+        for phase in ["ready", "created"] {
+            assert!(
+                initiator_mutable(false, phase),
+                "无实例码的 {phase} 允许本次点击人改写身份"
+            );
+        }
+    }
 
     async fn context() -> anyhow::Result<Arc<FeishuContext>> {
         let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
@@ -253,6 +284,69 @@ mod tests {
             .await?;
         let disabled_record = format!("rec{}", uuid::Uuid::new_v4().simple());
         assert!(admit(&context, &first, &disabled_record).await.is_err());
+        Ok(())
+    }
+
+    /// 显式点击刷新受理身份：只在**尚无实例**且阶段 `ready` 时生效。
+    ///
+    /// 实例一旦创建（或进入 `lookup`：创建结果未知但可能已建），飞书侧发起人
+    /// 已经固定，后来的点击不得改写快照与属性表；刷新成功时两处必须同时更新，
+    /// 否则 worker 重试会拿回旧点击人。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_refresh_initiator_updates_identity_only_before_instance_exists(
+    ) -> anyhow::Result<()> {
+        let context = context().await?;
+        let first = snapshot(&context).await?;
+        let record = format!("rec{}", uuid::Uuid::new_v4().simple());
+        let id = admit(&context, &first, &record).await?;
+
+        let mut refreshed = first.clone();
+        refreshed.applicant = Some("ou_refreshed".into());
+        assert!(refresh_initiator(&context, id, &refreshed).await?);
+        let pool = context.approval_tasks().pool().clone();
+        let read_identity = || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT t.dispatch_payload,a.open_id FROM feishu_approval_task t \
+                     JOIN feishu_approval_task_applicant a ON a.task_id=t.id WHERE t.id=?",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+            }
+        };
+        let (payload, applicant) = read_identity().await?;
+        assert_eq!(payload, serde_json::to_string(&refreshed)?);
+        assert_eq!(applicant, "ou_refreshed");
+
+        // 实例已存在：身份冻结。
+        sqlx::query("UPDATE feishu_approval_task SET instance_code='INST-1' WHERE id=?")
+            .bind(id)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        let mut third = first.clone();
+        third.applicant = Some("ou_third".into());
+        assert!(!refresh_initiator(&context, id, &third).await?);
+        // 创建结果未知（lookup）同样冻结：可能已经建出了实例。
+        sqlx::query(
+            "UPDATE feishu_approval_task SET instance_code=NULL,effect_phase='lookup' WHERE id=?",
+        )
+        .bind(id)
+        .execute(context.approval_tasks().pool())
+        .await?;
+        let mut fourth = first.clone();
+        fourth.applicant = Some("ou_fourth".into());
+        assert!(!refresh_initiator(&context, id, &fourth).await?);
+
+        let (payload, applicant) = read_identity().await?;
+        assert_eq!(
+            payload,
+            serde_json::to_string(&refreshed)?,
+            "冻结后快照不得被后续点击改写"
+        );
+        assert_eq!(applicant, "ou_refreshed", "冻结后身份属性也不得改写");
         Ok(())
     }
 

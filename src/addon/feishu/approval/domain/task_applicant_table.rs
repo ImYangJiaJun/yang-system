@@ -83,6 +83,47 @@ pub(crate) async fn upsert_task_applicant(
     Ok(())
 }
 
+/// 身份**缺席**时补写；已有身份一列都不动。
+///
+/// 组 leader 重开时用它：创建结果未知或已建出实例的组，受理人属于首次点击——
+/// 本轮点击人只能补「旧行没有身份」的空，不能改写已有身份，否则恢复出的组实例
+/// 会记到后来者头上。单条任务的显式重试走 [`upsert_task_applicant`]（点击即受理人）。
+pub(crate) async fn fill_task_applicant(
+    context: &FeishuContext,
+    task_id: i64,
+    open_id: &str,
+) -> Result<(), BaseError> {
+    let existing = context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let mut row = Record::new();
+    row.insert("task_id", serde_json::json!(task_id));
+    row.insert("open_id", serde_json::json!(open_id));
+    match context.approval_task_applicants().query().insert(row).await {
+        Ok(_) => Ok(()),
+        // 并发插入撞唯一键 = 身份已被别人补上；补写语义下这是成功。
+        Err(error) => {
+            let existing = context
+                .approval_task_applicants()
+                .query()
+                .where_eq("task_id", serde_json::json!(task_id))?
+                .optional()
+                .await?;
+            if existing.is_some() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
     let field = FieldName::new(field).map_err(|error| BaseError::ConfigError(error.to_string()))?;
     Ok(FieldRef::new(table_name.clone(), field))

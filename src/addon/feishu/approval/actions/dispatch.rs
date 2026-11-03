@@ -49,8 +49,8 @@ use crate::addon::feishu::domain::approval_convert::{
     amount_currency, format_local, is_empty, FixedOffset,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
-    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
-    DispatchResult as OrchestrationResult,
+    applicant_field_conflict, applicant_mismatch_message, dispatch_one, widget_maps_from_rows,
+    BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
 };
 use crate::addon::feishu::domain::approval_execution::{self, DispatchSnapshot, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
@@ -416,6 +416,12 @@ struct DispatchOutcome {
     /// 让重试路径用的也是点击时的那个人。**永远不是表格申请人列的值**——那列是
     /// 系统回写的产物，拿它当身份就是「替别人发起」。
     applicant_open_id: Option<String>,
+    /// 唤醒 worker 时使用的**受理身份**（落属性表、供重试/恢复）。
+    ///
+    /// 通常就是点击人；当本次点击命中「创建结果未知」等冻结场景时是**原受理人**
+    /// ——worker 的播种/重试若按点击人改写身份，恢复出的实例就会记到错误的人头上。
+    /// `None` 表示沿用 `applicant_open_id`。
+    wake_open_id: Option<String>,
     /// 通知的**最后兜底**接收人：记录创建人 open_id（`automatic_fields` 取回）。
     ///
     /// 发起人不可达时它是唯一还能定位到的触发人——「用户发起过请求就必须收到
@@ -443,6 +449,7 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             applicant_open_id: None,
+            wake_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
@@ -462,6 +469,7 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             applicant_open_id: None,
+            wake_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
@@ -494,6 +502,7 @@ impl DispatchOutcome {
             base_token,
             table_id,
             applicant_open_id: None,
+            wake_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
@@ -675,16 +684,26 @@ async fn handle_dispatch(
             // 单条点击也唤醒 worker：否则「结论变化」要等下一次 30s 轮询才发通知。
             // 唤醒只是提前跑同一轮（`Manual` 会重开本配置的旧行并保留 last_error，
             // 通知去重不受影响）；worker 没起时下一轮轮询仍会处理，不阻断响应。
-            if let Ok(handle) = ctx.tools().extension::<ApprovalDispatchHandle>() {
-                if let Err(error) = handle.request_dispatch(
-                    config_id,
-                    outcome.applicant_open_id.clone(),
-                    // 单条点击：发起人只落到被点的那一行，不能广播给同配置的
-                    // 其它跨轮待处理任务。单条恒不聚合（决策 7：独立建单）。
-                    Some(record_id.to_string()),
-                    false,
-                ) {
-                    tracing::warn!(config_id, error = %error, "审批派发唤醒 Worker 失败");
+            //
+            // **受理前就拒绝的点击不唤醒**（`claim` 为空）：那种请求没有任务行，
+            // 唤醒会让 worker 为一条明确被拒的记录重新播种——建出一行终态任务，
+            // 还把同一句拒绝再发一遍 IM（申请人守卫、回填列不可用等早退路径）。
+            if outcome.claim.is_some() {
+                if let Ok(handle) = ctx.tools().extension::<ApprovalDispatchHandle>() {
+                    if let Err(error) = handle.request_dispatch(
+                        config_id,
+                        // 冻结场景下这是原受理人，不是本次点击人（见 `wake_open_id`）。
+                        outcome
+                            .wake_open_id
+                            .clone()
+                            .or_else(|| outcome.applicant_open_id.clone()),
+                        // 单条点击：发起人只落到被点的那一行，不能广播给同配置的
+                        // 其它跨轮待处理任务。单条恒不聚合（决策 7：独立建单）。
+                        Some(record_id.to_string()),
+                        false,
+                    ) {
+                        tracing::warn!(config_id, error = %error, "审批派发唤醒 Worker 失败");
+                    }
                 }
             }
             Ok(outcome)
@@ -1224,6 +1243,35 @@ async fn dispatch_single(
             }
         };
 
+    // ---- 申请人列必须就是本次点击人（先于受理/摘组）----
+    //
+    // 校验必须发生在 `admit` 与 `detach_from_group` 之前：被拒绝的点击不能留下
+    // 首份身份快照（否则真正的申请人再点会被「首次快照」挡死），也不能先把记录
+    // 从聚合组摘走。批量播种在扫表时已按同一规则整批中止；这里是单条点击的
+    // 唯一入口兜底。
+    if let Some(names) = applicant_field_conflict(cells.get(&applicant_field), &resolved_applicant)
+    {
+        tracing::warn!(
+            stage = "initiator",
+            config_id,
+            record_id,
+            "申请人列与点击人不一致，单条派发在受理前拒绝"
+        );
+        let mut outcome = DispatchOutcome::success(
+            Outcome::Failed,
+            Some(config_id),
+            Some(base_token),
+            Some(table_id),
+            false,
+            FeedbackStatus::Failed,
+            applicant_mismatch_message(&names),
+            None,
+        );
+        outcome.applicant_open_id = Some(resolved_applicant);
+        outcome.creator_open_id = creator_open_id;
+        return Ok(outcome);
+    }
+
     let snapshot = DispatchSnapshot::new(
         &config_row,
         map_maps,
@@ -1235,15 +1283,22 @@ async fn dispatch_single(
         .map_err(|e| BaseError::ConfigError(e.to_string()))?;
     // 点击前任务行停在什么状态：`backfilled` 且源记录的回填列被清空，就是
     // 「用户删掉编号后再点一次」——只恢复原实例并重新回填，不新建审批。
+    //
+    // `effect_phase` 必须在这一刻读、不能事后再查：`claim_single_click` 的 reopen
+    // 会把 `lookup`/`creating` 复位成 `ready`，事后就分不清「从没尝试创建」和
+    // 「创建结果未知、可能已有实例」了。
     let task_row = context
         .approval_tasks()
         .query()
-        .select_fields(&["state", "group_id"])?
+        .select_fields(&["state", "group_id", "instance_code", "effect_phase"])?
         .where_primary_key_eq(serde_json::json!(task_id))?
         .optional()
         .await?
         .ok_or_else(|| BaseError::ConfigError("任务受理后不可见".into()))?;
     let prior_state = task_row.optional::<String>("state")?.unwrap_or_default();
+    let prior_phase = task_row
+        .optional::<String>("effect_phase")?
+        .unwrap_or_default();
     // 组内任务被单条点击：先摘组再按单条语义建单（设计 §4.9）。摘组在独立事务内
     // 锁配置行、复检租约；组内有在途执行时本轮不动，返回可重试提示。
     let grouped = task_row
@@ -1345,36 +1400,70 @@ async fn dispatch_single(
         .optional()
         .await?
         .ok_or_else(|| BaseError::ConfigError("任务受理后不可见".into()))?;
-    // 存下来的快照与本次不一致（上一次受理的申请人/接收人不同，或快照来自旧版本）：
-    // 按**首次快照**继续，本轮的点击人只用来补身份（若无）。身份缺席的行因此能
-    // 自愈——否则它会永远停在「没有发起人」的等待态，再点也改不了（`admit` 的
-    // `COALESCE` 保留旧快照）。
-    if persisted.optional::<String>("dispatch_payload")?.as_deref()
-        != Some(
-            serde_json::to_string(&snapshot)
-                .map_err(|e| BaseError::ConfigError(e.to_string()))?
-                .as_str(),
-        )
+    let persisted_payload = persisted.optional::<String>("dispatch_payload")?;
+    let persisted_applicant = persisted_payload
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<DispatchSnapshot>(payload).ok())
+        .and_then(|snapshot| snapshot.applicant)
+        .map(|applicant| applicant.trim().to_string())
+        .filter(|applicant| !applicant.is_empty());
+    let has_instance = task_row
+        .optional::<String>("instance_code")?
+        .is_some_and(|code| !code.trim().is_empty());
+    // 属性表是「最近一次通过校验的点击人」：批量播种只写它（`persist_applicant`），
+    // 且实例创建后不再写；worker 创建实例时用的也是它（`load_task`）。所以它就是
+    // 受理人本身，快照可能停在更早的一次点击，只作兜底。
+    let stored_applicant = context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?
+        .and_then(|row| row.optional::<String>("open_id").ok().flatten())
+        .map(|open_id| open_id.trim().to_string())
+        .filter(|open_id| !open_id.is_empty());
+    let frozen_applicant = stored_applicant.clone().or(persisted_applicant);
+    // 显式点击的受理身份：
+    //
+    // - **实例可能已存在**（已有实例码，或点击前处于 `creating`/`lookup`/
+    //   `backfilling`）：飞书侧发起人可能已经固定，身份冻结。沿用属性表/快照里的
+    //   受理人，不让后来的点击人改写——即使 reopen 已把阶段复位成 `ready`。
+    // - **尚无任何外部副作用**（`ready`/`created` 且无实例码）：本次点击人（申请人
+    //   列已校验）就是受理人。刷新快照与属性表，避免 worker 后续重试又拿回旧点击人。
+    // - 刷新落空（并发把任务推进到不可改写阶段）：尊重已落库的身份，不强行用点击人。
+    //
+    // 被拒绝的点击在 `admit` 之前就返回了，因此不会留下「错误的首份快照」。
+    // 组行的 `effect_phase` 是组行阶段的镜像（leader 行自己从不持有组实例码）。
+    // 单条点击已经把它摘出组、按单条语义建**自己的**实例，镜像里的
+    // `creating`/`lookup` 属于原组，不能套在本次点击的新实例上——身份就应该是
+    // 本次点击人。本行自己已有实例码时仍然冻结。
+    let identity_phase = if grouped {
+        "ready"
+    } else {
+        prior_phase.as_str()
+    };
+    let dispatch_applicant = if approval_execution::initiator_mutable(has_instance, identity_phase)
     {
-        approval_execution::attach_initiator(context, task_id, &snapshot)
+        if approval_execution::refresh_initiator(context, task_id, &snapshot)
             .await
-            .map_err(|e| BaseError::ConfigError(e.to_string()))?;
-        let mut row = Record::new();
-        row.insert("state", serde_json::json!("pending"));
-        approval_execution::finish(context, &claim, &row, false)
-            .await
-            .map_err(|e| BaseError::ConfigError(e.to_string()))?;
-        return Ok(DispatchOutcome::success(
-            Outcome::Accepted,
-            Some(config_id),
-            Some(base_token),
-            Some(table_id),
-            true,
-            FeedbackStatus::Queued,
-            "任务将按首次受理快照继续处理".into(),
-            None,
-        ));
-    }
+            .map_err(|e| BaseError::ConfigError(e.to_string()))?
+        {
+            resolved_applicant.clone()
+        } else {
+            frozen_applicant.unwrap_or_else(|| resolved_applicant.clone())
+        }
+    } else {
+        match frozen_applicant {
+            Some(applicant) => applicant,
+            None => {
+                // 旧任务行没有任何身份：把本次点击人补进去（有身份时不动任何列）。
+                approval_execution::attach_initiator(context, task_id, &snapshot)
+                    .await
+                    .map_err(|e| BaseError::ConfigError(e.to_string()))?;
+                resolved_applicant.clone()
+            }
+        }
+    };
     let guarded = approval_execution::ExecutionTransport {
         inner: outbound.transport(),
         context,
@@ -1405,8 +1494,8 @@ async fn dispatch_single(
             record_id,
             cells: &cells,
             applicant_field: &applicant_field,
-            // 已在上面解析成 open_id，必为 Some（发起人缺失在入口就拒了）。
-            applicant: Some(resolved_applicant),
+            // 尚无实例时是本次点击人；已有实例时是首次受理身份（见上）。
+            applicant: Some(dispatch_applicant.clone()),
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
@@ -1473,6 +1562,9 @@ async fn dispatch_single(
     outcome.claim = Some(claim);
     outcome.instance_code = instance_code;
     outcome.applicant_open_id = notify_open_id;
+    // 唤醒 worker 用**本次派发实际使用的受理身份**：冻结场景下它是原受理人，
+    // 不是点击人。用点击人会把刚冻结的身份又在播种时改回去。
+    outcome.wake_open_id = Some(dispatch_applicant);
     outcome.creator_open_id = creator_open_id;
     Ok(outcome)
 }

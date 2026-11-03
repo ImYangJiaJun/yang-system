@@ -38,6 +38,7 @@
 | 6 | 通知粒度 | 每组一条 |
 | 7 | 单条点击 | 允许独立建单；点组成员时先把该记录摘出组，再按单条语义建单 |
 | 8 | 组行数上限 | 不设业务上限；受批量扫描上限与飞书表单体积约束，超限必须显式报错 |
+| 9 | 申请人校验 | 扫描到的记录里任一成员「申请人」人员列明确不是点击人 → **整批中止**、一条不提交并 IM 通知点击人（只报条数，不列姓名）；空/普通文本视为未填，建单后覆盖成点击人。单条点击同规则（受理前终态拒绝）；组派发在成员级再兜一次。恢复已建组只补编号，不覆盖明确写着别人的非空申请人列 |
 
 ## 三、现状与复核结论
 
@@ -124,6 +125,15 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 
 入口 `seed_config`。**组维护（维护已有组）与开关无关；开关只决定是否新建组。**
 
+**申请人前置校验先于一切写操作**（2026-11-02 追加）：批量点击按配置的申请人字段 id
+解析出列名，逐条检查扫描到的待处理记录。人员列表非空且不含点击人（或单元格是裸
+`ou_` 文本）→ 整批中止：不建任务行、不 reopen、不做组维护，给点击人发
+「【批量提交已中止】」。空列/普通文本视为未填，按匹配处理并在创建后覆盖成点击人；
+`{type,value}` 包装先剥壳再判定。中止 IM **只报条数、不列姓名**：批量扫描会命中
+点击人无权查看的行，姓名属于跨权限信息。单条点击在 Action 里、`admit`/摘组之前用
+同一规则拒绝（不留下首份快照、不先摘组），`dispatch_one` 在创建前再兜一次；组派发
+在成员级再兜一次（任一成员不匹配即整组暂停，文案同样只报条数）。
+
 批量点击（`RoundTrigger::Manual` 且 `clicked_record_id=None`）按以下顺序执行：
 
 1. **锁配置行**（与 `admit`/`delete_config` 同一把 `SELECT ... FOR UPDATE`）。
@@ -135,7 +145,9 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
    - 任何成员不在本次勾选集合内的组**保持不动**（用户没重新勾选，系统不替他撤回）。
 4. **新建组**（仅 `aggregate_batch=true` **且** 本次请求 `aggregate=true`）：候选 = 本次勾选 + 回填列为空 + 任务表无行的记录；在解散之后计算。逐条签名 → `plan_groups` → 一个事务插入组行 + leader/member 行。
 5. 签名失败：单独成组（`group_key=hash(config|record|错误摘要)`），让处理期照常暂停报错。
-6. 发起人：批量点击的点击人只落到本轮 `touched` 的行（leader 与成员）。
+6. 发起人：批量点击的点击人只落到本轮 `touched` 的行（leader 与成员）；创建结果
+   未知（`creating`/`lookup`/`backfilling`）或已有实例码的行**只重开执行状态、不进
+   `touched`**，身份沿用原受理人（否则恢复出的实例会记到后来者头上）。
 
 单条点击（`clicked_record_id=Some`）不新建组、不解散组、不重组；只走单条派发与 §4.9 的摘除规则。
 
@@ -151,14 +163,18 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 `process_group` 发现 leader 的 `group_id` 非空时执行：
 
 1. 读组行与成员行（按 `group_seq` 升序）。
-2. 若组行有 `instance_code`：`get_instance` 恢复，跳过创建与签名复核，取编号后回填。
+2. 若组行有 `instance_code`：`get_instance` 恢复，跳过创建、签名复核与成员申请人校验，
+   取编号后回填。恢复**不覆盖明确写着别人的非空申请人列**：`write_extended` 只补空列
+   （空列按本轮点击人补写，与单条同一产品决策），人工改过的非空归属保持原样。
 3. 若 `group.effect_phase='lookup'`：按组 `uuid` `get_instance`；命中则落实例码；`1390003` 未命中则把组行与 leader 阶段重置为 `ready`，有界退避后重发 create。
 4. 否则：按 100 条分片 `records/batch_get` → `rekey_cells_by_field_id` → 逐记录解析外部选项并**合并 `label→option_id` 映射**（同 label 冲突判暂停）→ 逐记录预检/搬运附件 → `build_group_form`。
 5. 签名复核**仅当组行 `effect_phase='ready'`**（真正从未尝试创建）；不再用 `attempts=0` 代理。
 6. 创建前把组行阶段写为 `creating`（提交）；`create` 的 `uuid` 用组行 `uuid`。
 7. 成功：组专用确认写入 `group.instance_code`、`group.effect_phase='created'`，leader 阶段 `created` 但 **`instance_code` 保持 NULL**；`60012` 按组 uuid 回捞。
 8. 取编号 → `backfill_in_chunks` 给全部成员写同一编号；**检查 `BackfillReport.failed`**：非空返回 `CreatedPendingBackfill` 整组重试，全量成功才 `Backfilled`。
-9. 编号落库成功后，逐成员调用 `write_extended`（六个扩展字段 + 发起人列 = 批量点击人），与单条路径行为一致。
+9. 编号落库成功后，逐成员调用 `write_extended`（六个扩展字段 + 发起人列 = leader
+   任务行上的受理身份，**不是**无条件本轮点击人；仅旧行缺身份时由本轮点击人补上），
+   与单条路径行为一致。
 10. 收尾走**组专用 finish**：一个事务内更新 leader（state/last_error/attempts/available_at/清租约，允许 `ready/creating/lookup/created` 阶段）、成员行 state、组行 `serial_number/effect_phase`。**不再经过通用 `outcome_record`**，避免 `Waiting→pending` 把暂停组重新拉回轮询；组路径自行完成 `is_owned` 复核、成功审计、派发指标与 `already_initiated` 判定。
 11. 组分支位于 missing-initiator 早退之前；组缺失发起人时落组级 `paused`，不走单条 `Waiting`。
 12. 认领前的过期租约清扫必须排除组 leader 的 `lookup` 阶段，否则会在认领前先被扫成 `review`。
@@ -180,6 +196,8 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 - 每组一条；发送前一次性解析成员行号（按表批量取行号，20 页上限内），**不使用逐成员 `RowNumberEdit`**。
 - 成功：编号 + 链接 + 组内条数 + 成员行号摘要（前 5 个，超出「等 N 条」）。
 - 暂停：失败成员行号 + 原因 + 「修好后请重新点击批量派发」。
+- 批量点击的申请人冲突：一条发往点击人的「【批量提交已中止】」，**只报不匹配条数、不列
+  姓名**；发送失败时轮末汇总补发同一正文，不改发「本轮无新增待处理记录」。
 - 组任务跳过按 `(record_id, config_id)` 查请求日志的 `http_path_notified` 去重，只用 `last_error` 变化去重。
 
 ### 4.9 单条点击的共存
@@ -197,6 +215,7 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 | 场景 | 处理 | 回填列 | 自动重试 |
 |---|---|---|---|
 | 必填缺失 / 明细为空 / 值非法 / 选项冲突 | 整组 `paused` | 不写 | 否，等手动批量点击 |
+| 批量扫描命中「申请人」不是点击人 | 整批中止（不播种、不建组，IM 通知点击人） | 不写 | 否，由本人重新点击 |
 | 组内非明细签名已变化（组行 `ready`） | 整组 `paused`，提示重新点击 | 不写 | 否 |
 | 记录 `absent/forbidden`（Fatal） | 整组 `paused`，文案拆开；若组行**已有实例码**，把该成员行置 `terminal` 并摘出组，其余成员继续回填，无剩余成员则组收尾 | 不写该成员 | 否 |
 | 读记录瞬时失败 / 429 / 1395001 / 5xx | 维持 `pending`，退避，attempts 递增 | 不写 | 是 |
@@ -275,3 +294,7 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 6. 多行证据只覆盖 radioV2/textarea/checkboxV2/attachmentV2 等长子控件；其余控件组合未验证。
 7. 单条任务的 `lookup` 阶段死路维持现状，不在本次修复。
 8. 组实例的 `instance_code` 只落组行；控制台任务列表若要做组下钻需后续加 join。
+9. **组身份冻结不是持久的**：`60012` 后 `1390003`（实例尚未可查）会把组行复位成
+   `ready`，此间批量点击可能把已建实例的组当成「从未尝试创建」而解散/改写 leader
+   身份；实例本身仍由 uuid 幂等归属首次创建人。根治需持久 `create_attempted` 标记
+   （见派发主设计 §11 限制 9），本次不修。

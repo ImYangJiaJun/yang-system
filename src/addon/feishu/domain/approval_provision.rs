@@ -376,6 +376,18 @@ fn plan(
             applicant.field_name
         )]));
     }
+    // 申请人列必须是人员（type=11）：它既是申请人一致性校验的来源，也是系统回写
+    // 点击人的目标。文本列写不回人员数组，查找/公式列根本不可写；配置期拒绝比
+    // 建单后卡在回填失败更早。类型码缺失时不拦（拿不到元数据就不拒绝本来可用
+    // 的配置，与 `check_backfill_targets` 同一纪律）。
+    if let Some(field_type) = applicant.field_type {
+        if field_type != 11 {
+            reasons.push(format!(
+                "申请人列「{}」的类型是 type={field_type}，应为人员（type=11）",
+                applicant.field_name
+            ));
+        }
+    }
 
     // ---- 默认按名匹配，控制台可显式指定映射 ----
     let mut widgets = match match_fields(form, columns, input.maps) {
@@ -1440,6 +1452,14 @@ mod tests {
         }
     }
 
+    /// 申请人列的真实类型：人员（type=11）。`column` 默认单选，不能拿来建申请人。
+    fn person_column(id: &str, name: &str) -> Column {
+        Column {
+            field_type: Some(11),
+            ..column(id, name, &[])
+        }
+    }
+
     fn input<'a>(applicant: &'a str, backfill: &'a str) -> ProvisionInput<'a> {
         ProvisionInput {
             base_token: "appTest",
@@ -1549,7 +1569,7 @@ mod tests {
             &form,
             &[
                 column("fldCompany", "实际付款公司", &[]),
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
             ],
             &external,
@@ -1597,7 +1617,7 @@ mod tests {
                     "可提供的附件类型/Available attachment type",
                     &["付款申请单", "发票"],
                 ),
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
             ],
             &external,
@@ -1777,7 +1797,7 @@ mod tests {
             },
             "测试",
             &form,
-            &[column("fldP", "申请人", &[]), column("fldB", "编号", &[])],
+            &[person_column("fldP", "申请人"), column("fldB", "编号", &[])],
             &BTreeMap::new(),
             "[]",
         ));
@@ -1825,7 +1845,7 @@ mod tests {
                 children: Vec::new(),
             }],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
                 column("fldC", "SWIFT Address", &[]),
             ],
@@ -1873,11 +1893,38 @@ mod tests {
             &input("fldP", "fldP"),
             "t",
             &[],
-            &[column("fldP", "申请人", &[])],
+            &[person_column("fldP", "申请人")],
             &BTreeMap::new(),
             "[]",
         ));
         assert!(error.to_string().contains("不能是同一列"), "{error}");
+    }
+
+    #[test]
+    fn applicant_column_must_be_a_person_field() {
+        // 文本/查找列不能当申请人：人员数组写不回去，守卫也读不到人员 id。
+        let form = vec![FormWidget {
+            id: "w1".to_string(),
+            name: "审批编号".to_string(),
+            r#type: "input".to_string(),
+            required: false,
+            option: None,
+            external_data: None,
+            value: serde_json::Value::Null,
+            children: Vec::new(),
+        }];
+        let error = expect_invalid(plan(
+            &input("fldP", "fldB"),
+            "t",
+            &form,
+            &[
+                column("fldP", "申请人", &[]), // type=3（单选）
+                column("fldB", "审批编号", &[]),
+            ],
+            &BTreeMap::new(),
+            "[]",
+        ));
+        assert!(error.to_string().contains("应为人员"), "{error}");
     }
 
     #[test]
@@ -1902,7 +1949,7 @@ mod tests {
             "t",
             &[linked],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
                 column("fldQ", "公司名称/Company name", &[]),
             ],
@@ -1928,7 +1975,7 @@ mod tests {
             "test",
             &form,
             &[
-                column("applicant", "申请人", &[]),
+                person_column("applicant", "申请人"),
                 column("backfill", "编号", &[]),
                 column("field", "明细_类别", &[]),
             ],
@@ -1960,7 +2007,7 @@ mod tests {
             "t",
             &[linked],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
                 // 该控件必须**有同名列**，否则会在链接态校验之前被
                 // 「必填缺列」先拦掉——那是另一条路径，测不到本用例的目的。
@@ -1988,7 +2035,7 @@ mod tests {
                 children: Vec::new(),
             }],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
             ],
             &BTreeMap::new(),
@@ -2243,7 +2290,7 @@ mod tests {
                 children: Vec::new(),
             }],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
                 column("fldScope", "批量范围", &[]),
                 column("fldC", "SWIFT Address", &[]),
@@ -2281,7 +2328,7 @@ mod tests {
                 children: Vec::new(),
             }],
             &[
-                column("fldP", "申请人", &[]),
+                person_column("fldP", "申请人"),
                 column("fldB", "审批编号", &[]),
                 column("fldStatus", "申请状态", &[]),
                 column("fldHandler", "当前处理人", &[]),

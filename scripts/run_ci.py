@@ -247,12 +247,20 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_persist_applicant_scopes_to_touched_records", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "Approval initiator refresh integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_refresh_initiator_updates_identity_only_before_instance_exists", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "聚合播种建组集成测试",
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_seed_creates_one_group_with_two_members", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "聚合播种仅批量点击集成测试",
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_seed_only_runs_on_batch_click", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "批量点击申请人冲突整批中止集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_aborts_when_any_applicant_differs", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "聚合关闭逐条播种集成测试",

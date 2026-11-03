@@ -1075,7 +1075,7 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
 /// 与 `number_from_cell` 处理的是同一实测形态。两条读路径不同形：单条 GET 给
 /// `[1]` / `"文案"`，worker 走的 `records/batch_get` 多包一层。不剥壳时对象会
 /// 落进各分支的 `_` 兜底，表现为「必填控件被提交 null/空串」→ 飞书 1395006。
-fn unwrap_typed_cell(cell: &Value) -> &Value {
+pub(crate) fn unwrap_typed_cell(cell: &Value) -> &Value {
     match cell {
         Value::Object(map) => match (map.get("type"), map.get("value")) {
             (Some(_), Some(inner)) => unwrap_typed_cell(inner),

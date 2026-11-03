@@ -143,6 +143,56 @@ pub(crate) async fn attach_initiator(
     Ok(())
 }
 
+/// 显式点击且**尚无外部实例**时，把任务的受理身份改成本次点击人。
+///
+/// `admit` 的 `COALESCE` 保证首份快照不被普通重试覆盖；但一次**新的人工点击**
+/// （申请人列已校验等于本次点击人，或为空）应当是这条记录的受理人——否则先点过
+/// 的人留下的快照会把真正申请人永久挡在门外。只在 `instance_code` 为空且
+/// `effect_phase='ready'` 时生效：实例一旦创建，飞书侧的发起人已经固定；
+/// `lookup`（创建结果未知）也可能已有实例，同样不改写。
+///
+/// **这条 SQL 不是唯一的防线**：`reopen` 会把 `lookup`/`creating` 复位成
+/// `ready`，事后查库已经分不清「从没尝试创建」和「结果未知」。调用方必须先用
+/// 点击前的阶段判断（[`super::initiator_mutable`]），再决定要不要刷新。
+pub(crate) async fn refresh_initiator(
+    context: &FeishuContext,
+    task_id: i64,
+    snapshot: &DispatchSnapshot,
+) -> anyhow::Result<bool> {
+    let Some(applicant) = snapshot
+        .applicant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    let payload = serde_json::to_string(snapshot)?;
+    let mut transaction = context.approval_tasks().pool().begin().await?;
+    // tenant-boundary: raw-sql feishu-approval-refresh-initiator
+    let updated = sqlx::query(
+        "UPDATE feishu_approval_task SET dispatch_payload=?, updated_at=UNIX_TIMESTAMP() WHERE id=? AND (instance_code IS NULL OR instance_code='') AND effect_phase='ready'",
+    )
+    .bind(&payload)
+    .bind(task_id)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() == 0 {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+    // tenant-boundary: raw-sql feishu-approval-refresh-initiator-row
+    sqlx::query(
+        "INSERT INTO feishu_approval_task_applicant (task_id,open_id) VALUES (?,?) ON DUPLICATE KEY UPDATE open_id=VALUES(open_id)",
+    )
+    .bind(task_id)
+    .bind(applicant)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
 /// 把「重新点击」变成一次人工重试：任务不在执行中、又停在可重试状态时，
 /// 重置回 `pending` 并让调用方立刻重新认领。
 ///

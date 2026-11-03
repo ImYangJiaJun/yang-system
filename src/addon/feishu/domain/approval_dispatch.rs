@@ -117,6 +117,87 @@ impl DispatchResult {
 pub(crate) const MISSING_INITIATOR_REASON: &str =
     "该任务没有发起人身份（发起人只能来自点击按钮的人）。请在表格里重新点击按钮发起。";
 
+/// 申请人列与点击人的冲突判定。
+///
+/// 返回 `None` 表示**匹配**：单元格为空、不是人员形态（普通文本），或人员列表
+/// 里包含点击人。返回 `Some(名字)` 表示列里明确写着别人——继续派发就是替他人
+/// 发起审批，调用方必须中止（单条终态、批量整批中止）。
+///
+/// 先剥掉 `{type,value}` 包装：`records/batch_get` 对公式/查找字段会多包一层
+/// （与 `approval_convert::unwrap_typed_cell` 同一实测形态）。不剥壳时对象会
+/// 落进 `_` 兜底，被误判成「未填」，守卫就成了静默放行。
+///
+/// 裸 `ou_` 文本按人员 id 处理：飞书人员字段的标准形态是对象数组，裸字符串
+/// 只可能来自早期数据、手工文本或被改型的列；宁可收紧（拒绝）也不把可能
+/// 指向别人的 id 当成备注放行。普通文本（不以 `ou_` 开头）仍按「未填」处理。
+pub(crate) fn applicant_field_conflict(
+    cell: Option<&Value>,
+    clicker_open_id: &str,
+) -> Option<Vec<String>> {
+    fn push_person(
+        map: &serde_json::Map<String, Value>,
+        people: &mut Vec<(String, Option<String>)>,
+    ) {
+        if let Some(id) = map
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            let name = map.get("name").and_then(Value::as_str).map(str::to_string);
+            people.push((id.to_string(), name));
+        }
+    }
+
+    let cell = super::approval_convert::unwrap_typed_cell(cell?);
+    let mut people: Vec<(String, Option<String>)> = Vec::new();
+    match cell {
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::Object(map) => push_person(map, &mut people),
+                    Value::String(id) if id.starts_with("ou_") => {
+                        people.push((id.clone(), None));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // 单人对象不是 batch_get 的标准形态，但被改型/手工写入时可能出现；按人员
+        // 对象处理，避免落进 `_` 兜底被误判成「未填」。
+        Value::Object(map) => push_person(map, &mut people),
+        Value::String(text) => {
+            for part in text.split([',', '，']) {
+                let part = part.trim();
+                if part.starts_with("ou_") {
+                    people.push((part.to_string(), None));
+                }
+            }
+        }
+        _ => {}
+    }
+    if people.is_empty() || people.iter().any(|(id, _)| id == clicker_open_id) {
+        return None;
+    }
+    Some(
+        people
+            .into_iter()
+            .map(|(id, name)| name.unwrap_or(id))
+            .collect(),
+    )
+}
+
+/// 单条点击**受理前**提前守卫的拒绝文案（Action 层调用）。
+///
+/// 单条点击的人**看得见这一行**（他点的就是它），所以可以列出列里的名字；
+/// 批量扫描会扫到点击人无权查看的行，那里的通知只报条数、不报姓名。
+/// `dispatch_one` 的兜底守卫可能处理批量播种的任务，用「只报条数」的另一份文案。
+pub(crate) fn applicant_mismatch_message(names: &[String]) -> String {
+    format!(
+        "「申请人」列填写的是 {}，与本次点击人不是同一人；为避免替他人提交，本次未创建审批。请由申请人本人点击提交，或清空该列后重试。",
+        names.join("、")
+    )
+}
+
 /// 一条记录的处理输入。
 pub(crate) struct DispatchInput<'a> {
     pub(crate) fields: &'a [FieldItem],
@@ -510,6 +591,29 @@ pub(crate) async fn dispatch_one(
         applicant_field = input.applicant_field,
         "发起人校验通过"
     );
+
+    // ---- 2b. 申请人列必须就是点击人 ----
+    //
+    // 申请人是「填表人认为该谁发起」，而审批必须由点按钮的人发起。列里明确写着
+    // 别人时继续就是替他人提单；空列/非人员值按「未填」处理，成功创建后会被
+    // `write_extended` 覆盖成点击人。批量播种在扫表时已按同一规则整批中止，
+    // 这里是单条点击与存量任务行的兜底。
+    if let Some(names) = applicant_field_conflict(input.cells.get(input.applicant_field), &open_id)
+    {
+        // 这条兜底也可能落在**批量播种**出来的任务上（记录不是点击人本人的）：
+        // 姓名属于跨权限信息，只报条数，与批量中止同一口径。
+        let message = format!(
+            "「申请人」列填写的不是本次点击人（{} 人）；为避免替他人提交，本次未创建审批。请由申请人本人点击提交，或清空该列后重试。",
+            names.len()
+        );
+        tracing::warn!(
+            stage = "initiator",
+            record_id = input.record_id,
+            applicant_field = input.applicant_field,
+            "申请人列与点击人不一致，拒绝派发"
+        );
+        return DispatchResult::Terminal { message };
+    }
 
     // ---- 3. 组装 form ----
     let form_snapshot = if input.form_snapshot.trim().is_empty() {
@@ -953,6 +1057,34 @@ pub(crate) async fn dispatch_group(
     };
     let open_id = open_id.to_string();
 
+    // ---- 2b. 每个成员的申请人列都必须包含点击人 ----
+    //
+    // 组成员是批量扫描出来的，播种期已按同一规则整批拦截；这里兜住「行是旧版本
+    // 播下的 / 点击后有人改了申请人列」。一个成员不匹配就整组暂停，绝不替他人提单
+    // （组路径不写任何成员的编号列，设计 §5）。
+    //
+    // 通知只报**条数**，不列姓名：批量扫描会扫到点击人在高级权限下看不到的行，
+    // 姓名属于跨权限信息；「有 N 条不是您」已经足够行动。
+    let mismatch_count = input
+        .members
+        .iter()
+        .filter(|member| {
+            applicant_field_conflict(member.cells.get(input.applicant_field), &open_id).is_some()
+        })
+        .count();
+    if mismatch_count > 0 {
+        let message = format!(
+            "聚合组内有 {mismatch_count} 条记录的「申请人」不是本次点击人；为避免替他人提交，整组已暂停，未创建审批。请由申请人本人重新点击批量提交，或清空该列后重试。"
+        );
+        tracing::warn!(
+            stage = "initiator",
+            group_key = input.group_key,
+            mismatch_count,
+            "聚合组成员申请人与点击人不一致，整组暂停"
+        );
+        return DispatchResult::Terminal { message };
+    }
+
     // ---- 3. 组装多行明细表单 ----
     let rows: Vec<GroupFormRow<'_>> = input
         .members
@@ -1194,8 +1326,9 @@ async fn finish_group_backfill(
 
 /// 逐成员写扩展字段与发起人列（与单条路径同一份 [`write_extended`]）。
 ///
-/// 顶层控件值相同，所以每个成员的写入内容只差 `record_id` 与自己的单元格——发起人
-/// 列无条件覆盖成点击人（000a1a3 起）：组内每条记录都记下真正的发起人。
+/// 顶层控件值相同，所以每个成员的写入内容只差 `record_id` 与自己的单元格。发起人
+/// 列只在空列或写着点击人时写入；恢复已建组的实例时，明确写着别人的非空列保持原样
+/// （见 [`write_extended`] 的保护规则）。
 #[allow(dead_code)]
 async fn write_group_extended(
     backfill: &dyn Backfill,
@@ -1489,8 +1622,16 @@ pub(crate) async fn write_extended(
     // 这是该列唯一的写入方——用户手填的值在下一次成功创建时被改写成真正的发起人。
     // 与六个扩展列同一口径：列不在表结构里就是整批失败（`write_fields` 全有全无），
     // 任务留在 `CreatedPendingBackfill` 等人修，而不是悄悄只写一半。
+    //
+    // **但恢复路径不能覆盖明确写着别人的非空人员列**：实例已创建时发起人已在飞书
+    // 固定，恢复/重试只补编号，不能把人工改过的申请人列静默改回（组恢复逐成员调用
+    // 这里，同样受这条保护）。新建路径在 `dispatch_one`/`dispatch_group` 已保证
+    // 单元格为空或包含点击人，所以这里的跳过只会在恢复或校验后的并发改动中发生。
     let applicant = input.applicant.as_deref().unwrap_or_default().trim();
-    if !input.applicant_field.trim().is_empty() && !applicant.is_empty() {
+    let preserve_foreign = !input.applicant_field.trim().is_empty()
+        && !applicant.is_empty()
+        && applicant_field_conflict(input.cells.get(input.applicant_field), applicant).is_some();
+    if !input.applicant_field.trim().is_empty() && !applicant.is_empty() && !preserve_foreign {
         fields.push((
             input.applicant_field,
             Value::Array(vec![serde_json::json!({"id": applicant})]),
@@ -2528,7 +2669,7 @@ mod tests {
             ]);
             let widgets = [widget("w1", "connect")];
             let cell_map = cells(&[
-                ("fld_applicant", json!([{"id":"ou_test"}])),
+                ("fld_applicant", json!([{"id":"ou_abc"}])),
                 (
                     "fld_title",
                     json!({"link":super::super::approval::instance_applink(code).unwrap_or_else(|e| panic!("{e}")),"text":"申请编号"}),
@@ -2593,7 +2734,7 @@ mod tests {
                 ScriptedTransport::new(vec![(400, r#"{"code":1390003}"#), (status, &response)]);
             let widgets = [widget("w1", "connect")];
             let cell_map = cells(&[
-                ("fld_applicant", json!([{"id":"ou_test"}])),
+                ("fld_applicant", json!([{"id":"ou_abc"}])),
                 ("fld_title", json!(code)),
             ]);
             let mut request = input(&cell_map, &widgets);
@@ -2658,7 +2799,7 @@ mod tests {
 
     fn attachment_cells() -> serde_json::Map<String, Value> {
         cells(&[
-            ("fld_applicant", json!([{"id":"ou_test"}])),
+            ("fld_applicant", json!([{"id":"ou_abc"}])),
             (
                 "fld_src",
                 json!([
@@ -2986,7 +3127,7 @@ mod tests {
         ]);
         let mut widgets = [attachment_widget()];
         widgets[0].required = false;
-        let cells = cells(&[("fld_applicant", json!([{"id":"ou_test"}]))]);
+        let cells = cells(&[("fld_applicant", json!([{"id":"ou_abc"}]))]);
         assert!(approval_attachment::transfer(
             &transport,
             &NoSleep,
@@ -3366,6 +3507,101 @@ mod tests {
         );
         assert!(transport.requests().is_empty(), "等待态不得发出站请求");
         assert!(backfill.writes().is_empty(), "等待态不得写字段");
+    }
+
+    #[test]
+    fn applicant_field_conflict_only_flags_known_other_people() {
+        let clicker = "ou_clicker";
+        let matching: [Option<Value>; 9] = [
+            None,
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!("")),
+            Some(json!("张三")),
+            Some(json!([{"id": "ou_clicker"}])),
+            Some(json!([{"id": "ou_clicker", "name": "我"}, {"id": "ou_other"}])),
+            // v3 batch_get 对公式/查找字段多包一层；剥壳后必须仍能匹配。
+            Some(json!({"type": 11, "value": [{"id": "ou_clicker"}]})),
+            // 单人对象：非标准但可能来自改型/手工数据，不能静默放行。
+            Some(json!({"id": "ou_clicker", "name": "我"})),
+        ];
+        for cell in &matching {
+            assert_eq!(
+                applicant_field_conflict(cell.as_ref(), clicker),
+                None,
+                "{cell:?} 应视为匹配"
+            );
+        }
+        assert_eq!(
+            applicant_field_conflict(Some(&json!([{"id": "ou_other", "name": "张三"}])), clicker),
+            Some(vec!["张三".to_string()])
+        );
+        // `{type,value}` 包装内的对象数组/裸字符串都要剥壳后再判定。
+        assert_eq!(
+            applicant_field_conflict(
+                Some(&json!({"type": 11, "value": [{"id": "ou_other", "name": "张三"}]})),
+                clicker
+            ),
+            Some(vec!["张三".to_string()])
+        );
+        assert_eq!(
+            applicant_field_conflict(Some(&json!({"type": 2, "value": "ou_a"})), clicker),
+            Some(vec!["ou_a".to_string()])
+        );
+        assert_eq!(
+            applicant_field_conflict(Some(&json!({"id": "ou_other", "name": "张三"})), clicker),
+            Some(vec!["张三".to_string()])
+        );
+        // 裸 `ou_` 文本按人员 id 收紧处理；没有名字时用 id 兜底。
+        assert_eq!(
+            applicant_field_conflict(Some(&json!("ou_a,ou_b")), clicker),
+            Some(vec!["ou_a".to_string(), "ou_b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn applicant_mismatch_terminates_without_any_outbound() {
+        let transport = ScriptedTransport::new(vec![]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[("fld_applicant", json!([{"id": "ou_other", "name": "张三"}]))]);
+        let request = input(&cells, &widgets);
+
+        let result = dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+
+        assert!(
+            matches!(&result, DispatchResult::Terminal { message }
+                if !message.contains("张三")
+                    && message.contains("1 人")
+                    && message.contains("申请人")),
+            "兜底文案只报条数、不列姓名（可能来自批量播种的跨权限记录）: {result:?}"
+        );
+        assert!(transport.requests().is_empty(), "申请人冲突不得发出站请求");
+        assert!(backfill.writes().is_empty(), "申请人冲突不得写回填列");
+    }
+
+    #[tokio::test]
+    async fn applicant_mismatch_empty_cell_still_dispatches() {
+        // 空列/非人员值按「未填」处理：成功创建后由 `write_extended` 覆盖成点击人。
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-E")),
+            (200, &ok_detail("INST-E", "SERIAL-E")),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[("fld_applicant", json!("张三（手填）"))]);
+
+        assert!(matches!(
+            dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &backfill,
+                &input(&cells, &widgets)
+            )
+            .await,
+            DispatchResult::Backfilled { .. }
+        ));
     }
 
     #[tokio::test]
@@ -3984,6 +4220,36 @@ mod tests {
                     json!([{"id":"ou_abc"}])
                 ),
             ]
+        );
+    }
+
+    /// 恢复/重试路径：申请人列明确写着别人时**不覆盖**（实例已创建，发起人已固定；
+    /// 列是人工修改，不能静默改回）。新建路径的空列/含点击人仍照常写回。
+    #[tokio::test]
+    async fn write_extended_preserves_a_foreign_applicant_cell() {
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[(
+            "fld_applicant",
+            json!({"type": 11, "value": [{"id": "ou_other", "name": "张三"}]}),
+        )]);
+        let mut request = input(&cells, &widgets);
+        request.status_field = Some("fld_status");
+        let detail = InstanceDetail {
+            status: Some("PENDING".to_string()),
+            ..base_detail("INST-A", Some("SERIAL"))
+        };
+
+        write_extended(&backfill, &request, &detail)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(backfill.batches().len(), 1, "扩展字段仍合并为一次写入");
+        let fields = &backfill.batches()[0].1;
+        assert!(fields.contains(&"fld_status".to_string()), "{fields:?}");
+        assert!(
+            !fields.contains(&"fld_applicant".to_string()),
+            "不得覆盖明确写着别人的申请人列: {fields:?}"
         );
     }
 
@@ -4626,6 +4892,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn group_dispatch_pauses_when_any_member_applicant_differs() {
+        let fixture = GroupFixture::new();
+        let mut member_cells = fixture.member_cells.clone();
+        member_cells[1].insert(
+            "fld_applicant".to_string(),
+            json!([{"id": "ou_other", "name": "李四"}]),
+        );
+        let members: Vec<GroupMemberInput<'_>> = member_cells
+            .iter()
+            .enumerate()
+            .map(|(index, cells)| GroupMemberInput {
+                record_id: if index == 0 { "recA" } else { "recB" },
+                cells,
+                attachment_codes: BTreeMap::new(),
+            })
+            .collect();
+        let transport = ScriptedTransport::new(vec![]);
+        let backfill = RecordingBackfill::default();
+
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &group_input(&fixture, &members),
+        )
+        .await;
+
+        assert!(
+            matches!(&result, DispatchResult::Terminal { message }
+                if message.contains("1 条") && !message.contains("李四")),
+            "组通知只报条数、不列姓名：{result:?}"
+        );
+        assert!(transport.requests().is_empty(), "整组暂停不得发出站请求");
+        assert!(
+            backfill.raw_writes().is_empty(),
+            "整组暂停不得写任何单元格：{:?}",
+            backfill.raw_writes()
+        );
+    }
+
+    #[tokio::test]
     async fn group_dispatch_writes_extended_fields_and_applicant_per_member() {
         let fixture = GroupFixture::new();
         let members = fixture.members();
@@ -4700,6 +5008,56 @@ mod tests {
             .count();
         assert_eq!(created, 0, "已有实例码时不得再次创建");
         assert_eq!(backfill.writes().len(), 2, "全部成员仍要回填同一编号");
+    }
+
+    /// 已建实例的组在恢复回填时：空申请人列补写组身份，**明确写着别人的列不覆盖**
+    /// （实例发起人已固定，人工修改不能被静默改回）。
+    #[tokio::test]
+    async fn group_recovery_preserves_a_foreign_applicant_cell() {
+        let fixture = GroupFixture::new();
+        let member_cells = [
+            fixture.member_cells[0].clone(),
+            cells(&[
+                ("fld_top", json!("共同")),
+                ("fld_desc", json!("明细 B")),
+                ("fld_applicant", json!([{"id": "ou_other", "name": "张三"}])),
+            ]),
+        ];
+        let members: Vec<GroupMemberInput<'_>> = member_cells
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| GroupMemberInput {
+                record_id: if index == 0 { "recA" } else { "recB" },
+                cells: cell,
+                attachment_codes: BTreeMap::new(),
+            })
+            .collect();
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_detail("INST-EXISTING", "SERIAL-X")),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let mut input = group_input(&fixture, &members);
+        input.instance_code = Some("INST-EXISTING");
+        let result = dispatch_group(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await;
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+        let applicants: Vec<_> = backfill
+            .raw_writes()
+            .into_iter()
+            .filter(|(_, field, _)| field == "fld_applicant")
+            .collect();
+        assert_eq!(
+            applicants,
+            vec![(
+                "recA".to_string(),
+                "fld_applicant".to_string(),
+                json!([{"id": "ou_clicker"}])
+            )],
+            "只补写空申请人列，不能覆盖写着别人的成员"
+        );
     }
 
     #[test]

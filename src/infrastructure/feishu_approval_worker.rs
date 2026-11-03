@@ -49,7 +49,9 @@ use yang_base::tools::Tools;
 use yang_base::BaseError;
 use yang_runtime::shutdown::OwnedTask;
 
-use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
+use crate::addon::feishu::approval::domain::task_applicant_table::{
+    fill_task_applicant, upsert_task_applicant,
+};
 use crate::addon::feishu::domain::approval::instance_applink;
 use crate::addon::feishu::domain::approval::GetOutcome;
 use crate::addon::feishu::domain::approval_aggregation::{
@@ -60,8 +62,9 @@ use crate::addon::feishu::domain::approval_convert::{
     amount_currency, build_signature, format_local, FixedOffset, FormInput, WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
-    backfill_in_chunks, dispatch_group, dispatch_one, widget_maps_from_rows, BitableBackfill,
-    DispatchInput as OrchestrationInput, DispatchResult, GroupDispatchInput, GroupMemberInput,
+    applicant_field_conflict, backfill_in_chunks, dispatch_group, dispatch_one,
+    widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
+    GroupDispatchInput, GroupMemberInput,
 };
 use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback;
@@ -865,6 +868,11 @@ struct SeedOutcome {
     /// 轮末汇总靠它避免双发：已经发过「批量提交未处理任何记录」，就不该再发一条
     /// 「本轮无新增待处理记录」。
     empty_notified: bool,
+    /// 整批中止的通知正文（`Some` = 本轮因申请人冲突中止）。
+    ///
+    /// 与 [`Self::empty_notified`] 分开：中止消息发送失败时，轮末汇总要补发同一条
+    /// 中止说明，绝不能改发「本轮没有需要处理的记录」把中止掩盖成无事可做。
+    abort_message: Option<String>,
 }
 
 /// 一轮播种的汇总结果。
@@ -974,6 +982,7 @@ async fn seed_tasks(
             "base_token",
             "table_id",
             "approval_code",
+            "applicant_field",
             "backfill_field",
             "batch_scope_field",
             "aggregate_batch",
@@ -1162,8 +1171,9 @@ struct TaskRowState {
     /// 这两个字段供后续组处理与测试核对（Task 9 接入），先随投影一起读回。
     #[allow(dead_code)]
     group_seq: i64,
-    #[allow(dead_code)]
     effect_phase: String,
+    /// 非空 = 已有外部实例：发起人已固定，后续点击只补回填，不改写身份属性表。
+    instance_code: Option<String>,
 }
 
 impl TaskRowState {
@@ -1176,6 +1186,9 @@ impl TaskRowState {
                 .filter(|value| !value.trim().is_empty()),
             group_seq: row.require("group_seq")?,
             effect_phase: row.require("effect_phase")?,
+            instance_code: row
+                .optional::<String>("instance_code")?
+                .filter(|value| !value.trim().is_empty()),
         })
     }
 }
@@ -1195,6 +1208,16 @@ fn unique_record_ids(record_ids: &[String]) -> Vec<&String> {
     unique
 }
 
+/// 点击 `reopen` 之后能不能把受理身份改成本轮点击人。
+///
+/// `reopen` 会把 `creating`/`lookup`/`backfilling` 复位成 `ready`；这些阶段
+/// 可能已经建出了实例，身份必须沿用原受理人，否则恢复出的实例会被记到后来者
+/// 头上。判据与 Action 的单条点击同源（`initiator_mutable`），必须用**重开前**
+/// 读到的行快照判断——重开之后再查库已经分不清「从没尝试创建」和「结果未知」。
+fn click_can_rewrite_identity(task: &TaskRowState) -> bool {
+    approval_execution::initiator_mutable(task.instance_code.is_some(), &task.effect_phase)
+}
+
 fn task_lookup_query(
     context: &FeishuContext,
     config_id: i64,
@@ -1210,6 +1233,7 @@ fn task_lookup_query(
             "group_id",
             "group_seq",
             "effect_phase",
+            "instance_code",
         ])?
         .where_eq("config_id", serde_json::json!(config_id))?
         .where_in("record_id", values)?)
@@ -1267,6 +1291,7 @@ async fn seed_config(
     let base_token: String = config.require("base_token")?;
     let table_id: String = config.require("table_id")?;
     let approval_code: String = config.require("approval_code")?;
+    let applicant_field_id: String = config.require("applicant_field")?;
     let backfill_field_id: String = config.require("backfill_field")?;
     let batch_scope_field: Option<String> = config.optional("batch_scope_field")?;
     tracing::debug!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, batch_scope_field = ?batch_scope_field, "审批派发开始扫描回填列为空的记录");
@@ -1319,13 +1344,13 @@ async fn seed_config(
         let mut empty_notified = false;
         if !is_single_click {
             if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
-                empty_notified = notify_empty_selection(
+                empty_notified = notify_clicker(
                     runner,
                     config_id,
                     open_id,
                     config,
-                    &backfill_name,
-                    batch_scope_name.as_deref(),
+                    &empty_selection_feedback(batch_scope_name.as_deref(), &backfill_name),
+                    "批量提交未处理任何记录",
                 )
                 .await;
             }
@@ -1334,6 +1359,47 @@ async fn seed_config(
             empty_notified,
             ..SeedOutcome::default()
         });
+    }
+
+    // 批量点击（`clicked_record_id=None`）只替**点击人**提交：扫到的记录里只要
+    // 有一行「申请人」明确写着别人，整批中止——不建行、不 reopen、不做组维护，
+    // 一条都不提交。空列/非人员值按「未填」处理（成功创建后覆盖成点击人）。
+    // 单条点击不在这里拦：被点的那一条由 `dispatch_one` 的同一规则兜底，
+    // Action 会把结论直接回给点击人。
+    let batch_click = reopens_on_click(trigger, config_id) && clicked_record_id.is_none();
+    if batch_click {
+        if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
+            // 只在批量点击（且拿得到点击人）时解析申请人列：轮询与单条点击不读它，
+            // 列被删也不该让这两条路径的播种失败。
+            let applicant_name = bitable::resolve_field_name(&fields, &applicant_field_id)?;
+            let mismatch_count = pending_records
+                .iter()
+                .filter(|record| {
+                    applicant_field_conflict(record.fields.get(&applicant_name), open_id).is_some()
+                })
+                .count();
+            if mismatch_count > 0 {
+                tracing::warn!(
+                    stage = "seed",
+                    config_id,
+                    mismatch_count,
+                    applicant_field = %applicant_name,
+                    "批量提交的申请人不是点击人，整批中止"
+                );
+                // 正文只报条数、不列姓名：批量扫描会扫到点击人在高级权限下看不到
+                // 的行，姓名属于跨权限信息；「有 N 条不是您」已足够行动。
+                let body = applicant_mismatch_feedback(&applicant_name, mismatch_count);
+                let notified =
+                    notify_clicker(runner, config_id, open_id, config, &body, "批量提交已中止")
+                        .await;
+                return Ok(SeedOutcome {
+                    skipped: pending_records.len(),
+                    empty_notified: notified,
+                    abort_message: Some(body),
+                    ..SeedOutcome::default()
+                });
+            }
+        }
     }
 
     // 已有的任务行：**只查本轮待处理记录**，行数与本轮记录同量级，与历史任务
@@ -1350,7 +1416,6 @@ async fn seed_config(
     // 新建组要求「配置开关 + 请求参数」同时为真；组维护不看这两位。
     let aggregate_batch: bool = config.optional("aggregate_batch")?.unwrap_or(false);
     let aggregate_now = aggregate_batch && requested_aggregate;
-    let batch_click = reopens_on_click(trigger, config_id) && clicked_record_id.is_none();
     let outcome = if batch_click {
         seed_batch_click(
             runner,
@@ -1383,7 +1448,11 @@ async fn seed_config(
                 Some(task) if reopens_on_click(trigger, config_id) => {
                     if approval_execution::reopen(&runner.context, task.id).await? {
                         reopened += 1;
-                        touched.push(record.record_id.clone());
+                        // 创建结果未知/已有实例的行只重开执行状态，身份沿用原受理人
+                        // （见 [`click_can_rewrite_identity`]）。
+                        if click_can_rewrite_identity(task) {
+                            touched.push(record.record_id.clone());
+                        }
                     }
                 }
                 // 轮询不拉起旧行：空单元格不能证明旧请求没有成功，也不能撤销
@@ -1416,6 +1485,7 @@ async fn seed_config(
             skipped,
             touched,
             empty_notified: false,
+            abort_message: None,
         }
     };
     tracing::debug!(
@@ -1482,7 +1552,11 @@ async fn seed_batch_click(
             }
             if approval_execution::reopen(&runner.context, task.id).await? {
                 outcome.reopened += 1;
-                outcome.touched.push(record.record_id.clone());
+                // 创建结果未知/已有实例的行只重开执行状态，身份沿用原受理人
+                // （见 [`click_can_rewrite_identity`]）。
+                if click_can_rewrite_identity(task) {
+                    outcome.touched.push(record.record_id.clone());
+                }
             }
         }
 
@@ -1695,9 +1769,19 @@ async fn maintain_groups(
             reopened += 1;
             // 组 leader 不在 `SeedOutcome.touched` 里（它本来就有任务行），受理
             // 发起人只能在这里落——否则组会以「没有发起人」进等待态。
+            //
+            // 组行已建实例或创建结果未知（creating/lookup）时**只补身份空缺**：
+            // 恢复出的组实例属于首次点击人，本轮点击人不能改写已有身份。从未尝试
+            // 创建的 ready 组仍按显式点击更新为本轮点击人（点击即受理人）。
+            let identity_frozen =
+                instance_code.is_some() || matches!(phase.as_str(), "creating" | "lookup");
             if let Some(open_id) = applicant.map(str::trim).filter(|id| !id.is_empty()) {
-                if let Err(error) = upsert_task_applicant(&runner.context, leader_id, open_id).await
-                {
+                let written = if identity_frozen {
+                    fill_task_applicant(&runner.context, leader_id, open_id).await
+                } else {
+                    upsert_task_applicant(&runner.context, leader_id, open_id).await
+                };
+                if let Err(error) = written {
                     tracing::warn!(error = %error, task_id = leader_id, "聚合组 leader 的受理发起人落库失败");
                 }
             }
@@ -1975,17 +2059,30 @@ fn empty_selection_feedback(batch_scope_name: Option<&str>, backfill_name: &str)
     }
 }
 
-/// 点击受理命中 0 条时向点击人发一条 IM 说明。
+/// 批量提交因「申请人不是点击人」整批中止时的 IM 正文。
+///
+/// **只报条数，不列姓名**：批量扫描用的是应用身份、按全表勾选列扫描，命中行
+/// 可能位于点击人无权查看的视图里；列出姓名等于把别人的待提交记录信息透给点击人。
+/// 正文也不拼姓名列表，避免大量不同姓名把消息撑过飞书长度上限。
+fn applicant_mismatch_feedback(applicant_name: &str, mismatch_count: usize) -> String {
+    format!(
+        "【批量提交已中止】\n\
+         原因：本次勾选的待提交记录中有 {mismatch_count} 条的「{applicant_name}」不是您。为避免替他人提交，整批一条都没有提交。\n\
+         下一步：请只勾选「{applicant_name}」是您本人的记录后重新点击；或由申请人本人点击提交。"
+    )
+}
+
+/// 给点击人发一条 IM 说明（命中 0 条 / 申请人冲突共用）。
 ///
 /// best-effort，与其它 Worker 通知一致：任何失败只告警，**不返回 Err**，
 /// 不中断本轮其余配置的播种。返回「是否确实送达」——轮末汇总据此避免双发。
-async fn notify_empty_selection(
+async fn notify_clicker(
     runner: &RoundRunner,
     config_id: i64,
     open_id: &str,
     config: &Record,
-    backfill_name: &str,
-    batch_scope_name: Option<&str>,
+    body: &str,
+    kind: &str,
 ) -> bool {
     let title = approval_feedback::display_name(
         config.optional::<String>("title").ok().flatten().as_deref(),
@@ -2005,8 +2102,7 @@ async fn notify_empty_selection(
             .as_deref(),
     );
 
-    let body = empty_selection_feedback(batch_scope_name, backfill_name);
-    let (header, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
+    let (header, rest) = body.split_once('\n').unwrap_or((body, ""));
     let text = format!("{header}\n配置：{title}\n{rest}");
 
     // 表链接照 [`send_worker_notification`]：坐标校验失败就不带链接。
@@ -2053,8 +2149,9 @@ async fn notify_empty_selection(
             tracing::info!(
                 config_id,
                 open_id,
+                kind,
                 message_id = ?result.message_id,
-                "审批派发：点击受理命中 0 条，已向点击人发送说明"
+                "审批派发：已向点击人发送说明"
             );
             true
         }
@@ -2062,9 +2159,10 @@ async fn notify_empty_selection(
             tracing::warn!(
                 config_id,
                 open_id,
+                kind,
                 status = ?status,
                 message = %result.message,
-                "审批派发：点击受理命中 0 条，说明消息未送达"
+                "审批派发：点击人说明消息未送达"
             );
             false
         }
@@ -2227,6 +2325,9 @@ async fn notify_round_summary(
     if outcome.is_some_and(|outcome| outcome.empty_notified) {
         return;
     }
+    // 整批中止的说明没送达：轮末补发同一条正文，而不是走下面的「本轮无新增…」
+    // 汇总（那会把中止掩盖成无事可做，点击人永远不知道自己的提交被拒绝）。
+    let abort_message = outcome.and_then(|outcome| outcome.abort_message.clone());
     let seeded = outcome.map_or(0, |outcome| outcome.seeded);
     let reopened = outcome.map_or(0, |outcome| outcome.reopened);
     let scan_failure = report
@@ -2270,17 +2371,23 @@ async fn notify_round_summary(
         .filter(|(_, label)| !label.is_empty())
         .cloned()
         .collect();
-    let text = round_summary_text(
-        &title,
-        &base_token,
-        &table_id,
-        seeded,
-        reopened,
-        &filtered,
-        backlog,
-        backlog_reason.as_deref(),
-        scan_failure,
-    );
+    let text = match abort_message {
+        Some(body) => {
+            let (header, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
+            format!("{header}\n配置：{title}\n{rest}")
+        }
+        None => round_summary_text(
+            &title,
+            &base_token,
+            &table_id,
+            seeded,
+            reopened,
+            &filtered,
+            backlog,
+            backlog_reason.as_deref(),
+            scan_failure,
+        ),
+    };
 
     let table_url = (|| -> anyhow::Result<String> {
         bitable::validate_path_segment("base_token", &base_token)?;
@@ -2449,6 +2556,11 @@ async fn persist_applicant(
         if task.state != "pending" {
             continue;
         }
+        // 实例创建后发起人已固定：后续点击只负责编号/扩展回填，不能改写身份，
+        // 否则恢复路径会拿最后一个点击人覆盖真正的发起人。
+        if task.instance_code.is_some() {
+            continue;
+        }
         if let Err(error) = upsert_task_applicant(&runner.context, task.id, open_id).await {
             tracing::warn!(error = %error, task_id = task.id, record_id, "受理发起人落库失败");
         }
@@ -2558,25 +2670,27 @@ async fn load_task(
         Some(snapshot) => Record::from(snapshot.config.clone()),
         None => config,
     };
-    // 发起人：首次受理快照优先（`admit` 与任务行同事务写入），缺失时读属性扩展表
-    // （全表受理的批量行没有快照，身份由 Action/worker 落这张表）。
-    //
-    // 两个来源**都只来自点击人**；表格的申请人列不参与——它是系统回写的产物。
-    // 快照与表都要看：旧版本建的快照可能是 `None`，而之后的一次点击已经把它补进表里。
-    let applicant_open_id = match snapshot
+    // 发起人**以属性表为准**：它记录最近一次通过校验的点击人，也是本函数创建
+    // 实例时实际使用的身份；实例码落库后 `persist_applicant` 不再写它，因此它
+    // 就是冻结的受理人。快照可能停在更早的一次点击（批量播种只写属性表、不碰
+    // 快照），拿它回填/通知会把别人的审批记到错误的人头上——只作兜底。两个来源
+    // 都只来自点击人；表格的申请人列不参与——它是系统回写的产物。
+    let snapshot_applicant = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.applicant.clone())
-    {
-        Some(applicant) => Some(applicant),
-        None => runner
-            .context
-            .approval_task_applicants()
-            .query()
-            .where_eq("task_id", serde_json::json!(task_id))?
-            .optional()
-            .await?
-            .and_then(|applicant| applicant.optional::<String>("open_id").ok().flatten()),
-    };
+        .map(|applicant| applicant.trim().to_string())
+        .filter(|applicant| !applicant.is_empty());
+    let attribute_applicant = runner
+        .context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?
+        .and_then(|applicant| applicant.optional::<String>("open_id").ok().flatten())
+        .map(|open_id| open_id.trim().to_string())
+        .filter(|open_id| !open_id.is_empty());
+    let applicant_open_id = attribute_applicant.or(snapshot_applicant);
     let maps = match snapshot.as_ref().filter(|_| snapshot_is_fresh) {
         Some(snapshot) => snapshot.maps.clone(),
         None => runner
@@ -4656,6 +4770,29 @@ mod tests {
         let _ = field_type;
     }
 
+    /// 点击重开时，创建结果未知或已有实例的行不能被本轮点击人改写身份。
+    /// 判据吃的是**重开前**的行快照（`reopen` 会把阶段复位成 ready）。
+    #[test]
+    fn batch_reopen_keeps_identity_when_an_instance_may_exist() {
+        let task = |phase: &str, instance: Option<&str>| TaskRowState {
+            id: 1,
+            state: "review".into(),
+            group_id: None,
+            group_seq: 0,
+            effect_phase: phase.into(),
+            instance_code: instance.map(str::to_string),
+        };
+        for phase in ["creating", "lookup", "backfilling"] {
+            assert!(
+                !click_can_rewrite_identity(&task(phase, None)),
+                "{phase} 可能已建出实例，批次点击不得改写受理身份"
+            );
+        }
+        assert!(!click_can_rewrite_identity(&task("ready", Some("INST"))));
+        assert!(!click_can_rewrite_identity(&task("created", Some("INST"))));
+        assert!(click_can_rewrite_identity(&task("ready", None)));
+    }
+
     #[test]
     fn record_read_failures_are_terminal_only_when_fatal() {
         let failure = |kind| crate::addon::feishu::domain::outbound::OutboundFailure {
@@ -6297,18 +6434,19 @@ mod tests {
         }
     }
 
-    /// 字段列表响应：回填列、批量范围复选框列、签名来源文本列。
+    /// 字段列表响应：回填列、批量范围复选框列、签名来源文本列、申请人人员列。
     fn fields_envelope() -> String {
         serde_json::json!({
             "code": 0,
             "msg": "",
             "data": {
                 "has_more": false,
-                "total": 3,
+                "total": 4,
                 "items": [
                     {"field_id": "fldNumber", "field_name": "审批编号", "type": 15},
                     {"field_id": "fldScope", "field_name": "纳入批量", "type": 7},
                     {"field_id": "fldText", "field_name": "事由", "type": 1},
+                    {"field_id": "fldPerson", "field_name": "发起人", "type": 11},
                 ]
             }
         })
@@ -6556,6 +6694,151 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], (r1.clone(), Some(group_key.clone()), 0));
         assert_eq!(rows[1], (r2.clone(), Some(group_key.clone()), 1));
+
+        cleanup_aggregate_fixture(&pool, config_id).await?;
+        Ok(())
+    }
+
+    /// 批量点击时只要有一行的申请人明确不是点击人，整批中止：
+    /// 不建行、不 reopen、不做组维护，并给点击人发 IM。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn batch_click_aborts_when_any_applicant_differs() -> anyhow::Result<()> {
+        let (database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_aggregate_config(&pool, &namespace, "a", true).await?;
+        insert_aggregate_field_map(&pool, config_id).await?;
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let r3 = format!("{namespace}-r3");
+
+        // 存量：一个「全选即可解散」的 ready 组（r1/r2），一条停在 review 的单条
+        // 行（r3）。中止必须发生在组维护与 reopen 之前，两者都要原样保留。
+        insert_group_row(&pool, config_id, "gk-abort", "ready", None).await?;
+        insert_group_task_row(
+            &pool, config_id, "gk-abort", 0, &r1, "pending", "ready", None,
+        )
+        .await?;
+        insert_group_task_row(
+            &pool, config_id, "gk-abort", 1, &r2, "pending", "ready", None,
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO feishu_approval_task \
+             (config_id,record_id,uuid,state,effect_phase,last_error,created_at,updated_at) \
+             VALUES (?,?,?,'review','created','等待人工核查',NOW(),NOW())",
+        )
+        .bind(config_id)
+        .bind(&r3)
+        .bind(format!("uuid-{r3}"))
+        .execute(&pool)
+        .await?;
+
+        let transport = Arc::new(SeedTransport::new(vec![
+            fields_envelope(),
+            serde_json::json!({
+                "code": 0,
+                "msg": "",
+                "data": {"has_more": false, "items": [
+                    {"record_id": r1, "fields": {"事由": "报销", "发起人": [{"id": "ou_click", "name": "我"}]}},
+                    {"record_id": r2, "fields": {"事由": "报销", "发起人": [{"id": "ou_other", "name": "张三"}]}},
+                    {"record_id": r3, "fields": {"事由": "报销", "发起人": [{"id": "ou_click", "name": "我"}]}}
+                ]}
+            })
+            .to_string(),
+            serde_json::json!({"code": 0, "msg": "", "data": {"message_id": "om_abort"}})
+                .to_string(),
+        ]));
+        let runner =
+            build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
+        let config = load_seed_config(&context, config_id).await?;
+
+        let outcome = seed_config(
+            &runner,
+            &config,
+            RoundTrigger::Manual(config_id),
+            Some("ou_click"),
+            None,
+            true,
+        )
+        .await?;
+
+        assert_eq!(outcome.seeded, 0);
+        assert_eq!(outcome.reopened, 0);
+        assert_eq!(outcome.skipped, 3);
+        assert!(outcome.touched.is_empty());
+        assert!(outcome.empty_notified, "中止通知必须送达点击人");
+        let abort_message = outcome.abort_message.as_deref().unwrap_or_default();
+        assert!(
+            abort_message.contains("【批量提交已中止】"),
+            "{abort_message}"
+        );
+        assert!(abort_message.contains("1 条"), "只报条数：{abort_message}");
+        assert!(
+            !abort_message.contains("张三"),
+            "批量通知不得泄漏他人姓名：{abort_message}"
+        );
+
+        // 存量任务行与组行一条都没动。
+        let review_state: (String, String) = sqlx::query_as(
+            "SELECT state,effect_phase FROM feishu_approval_task WHERE config_id=? AND record_id=?",
+        )
+        .bind(config_id)
+        .bind(&r3)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(review_state, ("review".into(), "created".into()));
+        let members: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT record_id,state,effect_phase FROM feishu_approval_task WHERE config_id=? AND group_id='gk-abort' ORDER BY group_seq",
+        )
+        .bind(config_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(members.len(), 2, "中止不得解散或删组成员");
+        assert_eq!(
+            members,
+            vec![
+                (r1.clone(), "pending".into(), "ready".into()),
+                (r2.clone(), "pending".into(), "ready".into()),
+            ]
+        );
+        let groups: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_group WHERE config_id=? AND group_key='gk-abort'",
+        )
+        .bind(config_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(groups, 1, "中止不得删组");
+        let task_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(task_count, 3, "中止不得新建任务行");
+
+        // 表结构 + 记录 + 一条发往点击人的 IM。
+        assert_eq!(transport.request_count(), 3, "不得有任何其它出站");
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .clone();
+        let message = requests
+            .iter()
+            .find(|request| request.url.ends_with("/im/v1/messages"))
+            .ok_or_else(|| anyhow::anyhow!("缺少中止通知"))?;
+        assert_eq!(
+            message.query,
+            vec![("receive_id_type".into(), "open_id".into())],
+            "按 open_id 发给点击人"
+        );
+        let body = message.json_body.as_ref().map(|body| body.to_string());
+        let body = body.unwrap_or_default();
+        assert!(
+            body.contains("ou_click") && body.contains("批量提交已中止"),
+            "通知接收人与正文应指向点击人：{body}"
+        );
 
         cleanup_aggregate_fixture(&pool, config_id).await?;
         Ok(())
