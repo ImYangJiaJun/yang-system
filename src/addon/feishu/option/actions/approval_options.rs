@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use yang_base::action::{ActionContext, ResponseBody};
 use yang_base::definition::{HttpMethod, ModuleSpec};
-use yang_base::table::{SortOrder, WhereCondition};
+use yang_base::table::{SortOrder, TableQuery, WhereCondition};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -45,6 +45,18 @@ const PAGE_SIZE: usize = 100;
 /// 缺陷曾经上线过（110 条单测全绿、端点全挂）。把这类越界从「飞书联调时才发现」提前到
 /// 「构建期就炸」。
 const _: () = assert!(PAGE_SIZE <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
+
+/// 首请求一次返回的选项上限（分页仍是 100 行/次，这里只是循环取完）。
+///
+/// 飞书对**未开启「支持模糊、分页搜索」**的数据源不翻页：`page_token` / `query` /
+/// `hasMore` 只对搜索型数据源有效（`associate-external-options.md` 明文）。只回第一页
+/// 会让排序在 100 之后的选项永远解析不出文案——派发出去的单据上显示为空白。
+///
+/// 上限是防单个数据源失控的保护：当前最大数据源 9078 条（≈2.3 MB 响应）。超过上限
+/// 退回分页并告警；那种规模应当给控件开启搜索，或缩小数据源。
+// ponytail: 固定阈值 + 全量响应，数据源再涨一个数量级时改为按需查询（需要飞书回传
+// 已选 ID，目前请求里没有）。
+const ALL_OPTIONS_LIMIT: usize = 10_000;
 
 /// 内部处理预算；飞书的回调超时是 3 秒。
 const PROCESSING_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_500);
@@ -360,6 +372,23 @@ fn verify_source(
     Ok(())
 }
 
+/// 本次请求是否应当一次返回全部选项（而不是分页）。
+///
+/// 依据飞书文档：`page_token` / `query` / `hasMore` **只对开启了「支持模糊、分页
+/// 搜索」的数据源有效**；未开启的数据源不翻页，首响应里没给的选项控件就永远看不到。
+/// 因此「既没有游标也没有关键词」= 飞书在要全量（见 `ALL_OPTIONS_LIMIT`）。
+///
+/// 空白值按「未提供」处理：文档对 `page_token` 的约定是「不传或为空返回第一页」。
+fn wants_every_option(input: &FeishuOptionsRequest) -> bool {
+    fn blank(value: Option<&str>) -> bool {
+        match value {
+            Some(value) => value.trim().is_empty(),
+            None => true,
+        }
+    }
+    blank(input.page_token.as_deref()) && blank(input.query.as_deref())
+}
+
 /// 注册取选项端点。
 pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     module
@@ -541,23 +570,25 @@ async fn resolve(
         ])?;
     }
 
-    // 一页取满 PAGE_SIZE 条。**不能用「多取一行」判定 hasMore**：`TableQuery::page`
-    // 对页大小是**拒绝**而非 clamp，`page(1, PAGE_SIZE + 1)` 会直接返回
-    // `ParamInvalid`，把整个端点打成恒失败的 `code=50001`（`page_size` 硬上限恰好
-    // 就是 100，多取一行必然越界）。
-    //
-    // `paginate_records` 本来就会执行一次 COUNT(*)（`read.rs` 的 `paginate`），
-    // 所以改为借它的 `total` 判定下一页：既不额外取行，也不额外查询。
-    let page = query.page(1, PAGE_SIZE)?.paginate_records().await?;
-    let total = page.total;
+    // 首请求（无游标、无关键词）要**全量**：飞书对未开启搜索的数据源不翻页，
+    // 只认首响应里的选项。搜索/翻页路径保持原分页语义。
+    let (rows, next_page_token) = if wants_every_option(input) {
+        let total = query.clone().count().await? as usize;
+        if total > ALL_OPTIONS_LIMIT {
+            tracing::warn!(
+                source_key = %source_key,
+                total,
+                limit = ALL_OPTIONS_LIMIT,
+                "选项数超过单次返回上限，退回分页；未开启搜索的控件无法解析首页之外的选项"
+            );
+            read_one_page(query).await?
+        } else {
+            (read_every_page(query, total).await?, None)
+        }
+    } else {
+        read_one_page(query).await?
+    };
 
-    let mut rows = Vec::with_capacity(page.data.len());
-    for record in page.data {
-        rows.push(read_row(&record)?);
-    }
-
-    // `next_page_token` 是 hasMore 的**唯一来源**，见函数文档。
-    let next_page_token = next_page_token(&rows, total);
     let has_more = next_page_token.is_some();
 
     let result = build_result_body(&rows, &default_locale, has_more, next_page_token);
@@ -579,6 +610,42 @@ async fn resolve(
     Ok(FeishuEnvelope::encrypted(
         crate::addon::feishu::domain::crypto::encrypt_json(&value, &key)?,
     ))
+}
+
+/// 取一页（最多 `PAGE_SIZE` 条），并按 `total` 推导下一页游标。
+async fn read_one_page(query: TableQuery) -> Result<(Vec<OptionRow>, Option<String>), BaseError> {
+    // `paginate_records` 本来就会执行一次 COUNT(*)（`read.rs` 的 `paginate`），
+    // 所以借它的 `total` 判定下一页：既不额外取行，也不额外查询。
+    let page = query.page(1, PAGE_SIZE)?.paginate_records().await?;
+    let total = page.total;
+    let rows = page
+        .data
+        .iter()
+        .map(read_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    // `next_page_token` 是 hasMore 的**唯一来源**，见函数文档。
+    let token = next_page_token(&rows, total);
+    Ok((rows, token))
+}
+
+/// 取完全部选项（`total` 由调用方先 COUNT 过，且不超过 `ALL_OPTIONS_LIMIT`）。
+///
+/// 框架单页硬上限是 100，只能循环取；`total` 有界所以页数有界。
+async fn read_every_page(query: TableQuery, total: usize) -> Result<Vec<OptionRow>, BaseError> {
+    let mut rows = Vec::with_capacity(total);
+    let mut page = 1usize;
+    loop {
+        let records = query.clone().page(page, PAGE_SIZE)?.all().await?;
+        let fetched = records.len();
+        for record in &records {
+            rows.push(read_row(record)?);
+        }
+        // 取到短页即到末尾；数量兜底防并发插入把这一轮拖过上限。
+        if fetched < PAGE_SIZE || rows.len() >= ALL_OPTIONS_LIMIT {
+            return Ok(rows);
+        }
+        page += 1;
+    }
 }
 
 /// 由本页结果推导下一页游标。**它的 `Option` 同时就是 `hasMore`**。
@@ -1104,5 +1171,43 @@ mod tests {
         assert_ne!(codes::LINKAGE_AMBIGUOUS, codes::LINKAGE_NOT_RESOLVED);
         assert_ne!(codes::LINKAGE_AMBIGUOUS, 0);
         assert_ne!(codes::LINKAGE_NOT_RESOLVED, 0);
+    }
+
+    fn request_with_paging(query: Option<&str>, page_token: Option<&str>) -> FeishuOptionsRequest {
+        let mut body = serde_json::json!({"token": "t0ken"});
+        if let Some(query) = query {
+            body["query"] = serde_json::json!(query);
+        }
+        if let Some(token) = page_token {
+            body["page_token"] = serde_json::json!(token);
+        }
+        let mut request = yang_base::action::Request::new(body);
+        <FeishuOptionsRequest as yang_base::definition::ParamInput>::decode(&mut request)
+            .unwrap_or_else(|error| panic!("测试请求应可解码: {error}"))
+    }
+
+    #[test]
+    fn a_first_request_without_search_wants_every_option() {
+        // 飞书对未开启「支持模糊、分页搜索」的数据源不翻页（`page_token`/`query`/
+        // `hasMore` 只对搜索型有效）：首响应必须给全量，否则排序在 100 之后的选项
+        // 在审批单上永远解析不出文案，显示为空白。
+        assert!(wants_every_option(&request_with_paging(None, None)));
+        assert!(wants_every_option(&request_with_paging(
+            Some("   "),
+            Some("")
+        )));
+    }
+
+    #[test]
+    fn a_search_or_cursor_request_keeps_paging() {
+        // 搜索与翻页是搜索型数据源的两条真实路径，必须保持分页语义。
+        assert!(!wants_every_option(&request_with_paging(
+            Some("北京"),
+            None
+        )));
+        assert!(!wants_every_option(&request_with_paging(
+            None,
+            Some("cursor")
+        )));
     }
 }

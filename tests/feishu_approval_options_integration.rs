@@ -513,15 +513,19 @@ fn option_ids(result: &Value) -> anyhow::Result<Vec<String>> {
 
 // ---------------------------------------------------------------- 用例
 
-/// 取选项端点的**主成功路径**：正确 Token 必须拿到第一页选项。
+/// 取选项端点的**主成功路径**：正确 Token 且非搜索型请求必须拿到**全部**选项。
 ///
 /// 这条曾经必失败：`approval_options.rs` 用 `page(1, PAGE_SIZE + 1)` 多取一行判定
 /// `hasMore`，而框架 `TableQuery::page` 的页大小硬上限是 100（超出直接 `Err`，
 /// 不 clamp）。该 `Err` 被收口成 `code=50001` 的业务失败信封——凡是 token 正确的
 /// 请求，一条选项都拿不到。
+///
+/// 现在还必须一次给全量：飞书对未开启「支持模糊、分页搜索」的数据源不翻页
+/// （`page_token` / `query` / `hasMore` 只对搜索型有效），首响应里没给的选项，
+/// 控件和审批单就永远解析不出文案。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn approval_options_returns_the_first_page_with_a_next_page_token() {
+async fn approval_options_returns_every_option_when_the_client_is_not_searching() {
     let outcome = async {
         let database = connect_database().await?;
         drop_feishu_tables(&database).await?;
@@ -538,8 +542,9 @@ async fn approval_options_returns_the_first_page_with_a_next_page_token() {
             false,
         )
         .await?;
-        // 比一页多 5 条：确保 hasMore 为真且下一页恰好 5 条
-        seed_options(&database, "demo", PAGE_SIZE + 5).await?;
+        // 比一页多 5 条：跨过框架单页上限，验证循环取满了全部
+        let seeded = PAGE_SIZE + 5;
+        seed_options(&database, "demo", seeded).await?;
 
         let app = build_feishu_app(&database, &redis, None).await?;
         let envelope =
@@ -548,19 +553,21 @@ async fn approval_options_returns_the_first_page_with_a_next_page_token() {
 
         let ids = option_ids(result)?;
         ensure!(
-            ids.len() == PAGE_SIZE,
-            "第一页必须满 {PAGE_SIZE} 条，实际 {}",
+            ids.len() == seeded,
+            "非搜索型首请求必须返回全部 {seeded} 条，实际 {}",
             ids.len()
         );
         ensure!(
-            result["hasMore"] == json!(true),
-            "还有下一页时 hasMore 必须为 true: {result}"
+            (0..seeded).all(|index| ids.contains(&format!("opt_{index:03}"))),
+            "全量响应必须覆盖每一条选项，实际 {ids:?}"
         );
         ensure!(
-            result["nextPageToken"]
-                .as_str()
-                .is_some_and(|token| !token.is_empty()),
-            "hasMore 为 true 时必须同时返回 nextPageToken: {result}"
+            result["hasMore"] == json!(false),
+            "一次返回全量时 hasMore 必须为 false: {result}"
+        );
+        ensure!(
+            result.get("nextPageToken").is_none(),
+            "一次返回全量时不得再要求翻页: {result}"
         );
         // i18nResources 是文档唯一明示「必须返回」的字段，返回空会让控件显示为空
         let resources = result["i18nResources"]
@@ -1197,8 +1204,13 @@ async fn approval_options_advances_across_rows_that_share_a_sort_order() {
         let seeded = 150;
         seed_options_with_tied_sort_order(&database, "demo", seeded).await?;
 
-        let first =
-            call_approval_options(&app, "demo", json!({ "token": DATASOURCE_TOKEN })).await?;
+        // 带关键词 = 搜索型路径：这类请求才翻页（非搜索型首请求一次给全量）。
+        let first = call_approval_options(
+            &app,
+            "demo",
+            json!({ "token": DATASOURCE_TOKEN, "query": "选项" }),
+        )
+        .await?;
         let first_result = result_of(&first)?;
         let mut seen = option_ids(first_result)?;
         ensure!(seen.len() == PAGE_SIZE, "第一页应满 {PAGE_SIZE} 条");
@@ -1596,8 +1608,12 @@ async fn approval_options_advances_the_cursor_without_losing_or_repeating_option
 
         let app = build_feishu_app(&database, &redis, None).await?;
 
-        let first =
-            call_approval_options(&app, "demo", json!({ "token": DATASOURCE_TOKEN })).await?;
+        let first = call_approval_options(
+            &app,
+            "demo",
+            json!({ "token": DATASOURCE_TOKEN, "query": "选项" }),
+        )
+        .await?;
         let first_result = result_of(&first)?;
         let mut seen = option_ids(first_result)?;
         let cursor = first_result["nextPageToken"]
@@ -1608,7 +1624,7 @@ async fn approval_options_advances_the_cursor_without_losing_or_repeating_option
         let second = call_approval_options(
             &app,
             "demo",
-            json!({ "token": DATASOURCE_TOKEN, "page_token": cursor }),
+            json!({ "token": DATASOURCE_TOKEN, "query": "选项", "page_token": cursor }),
         )
         .await?;
         let second_result = result_of(&second)?;
