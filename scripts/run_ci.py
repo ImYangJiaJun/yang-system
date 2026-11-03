@@ -259,8 +259,8 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::aggregate_seed_only_runs_on_batch_click", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
-        "批量点击申请人冲突整批中止集成测试",
-        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_aborts_when_any_applicant_differs", "--", "--ignored", "--exact", "--test-threads=1"),
+        "批量点击跳过申请人不是点击人的记录集成测试",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::batch_click_skips_records_whose_applicant_differs", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "聚合关闭逐条播种集成测试",

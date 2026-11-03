@@ -1247,8 +1247,8 @@ async fn dispatch_single(
     //
     // 校验必须发生在 `admit` 与 `detach_from_group` 之前：被拒绝的点击不能留下
     // 首份身份快照（否则真正的申请人再点会被「首次快照」挡死），也不能先把记录
-    // 从聚合组摘走。批量播种在扫表时已按同一规则整批中止；这里是单条点击的
-    // 唯一入口兜底。
+    // 从聚合组摘走。批量播种在扫表时已按同一规则过滤（跳过不是点击人的记录）；
+    // 这里是单条点击的唯一入口兜底。
     if let Some(names) = applicant_field_conflict(cells.get(&applicant_field), &resolved_applicant)
     {
         tracing::warn!(

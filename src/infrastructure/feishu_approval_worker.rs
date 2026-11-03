@@ -868,11 +868,6 @@ struct SeedOutcome {
     /// 轮末汇总靠它避免双发：已经发过「批量提交未处理任何记录」，就不该再发一条
     /// 「本轮无新增待处理记录」。
     empty_notified: bool,
-    /// 整批中止的通知正文（`Some` = 本轮因申请人冲突中止）。
-    ///
-    /// 与 [`Self::empty_notified`] 分开：中止消息发送失败时，轮末汇总要补发同一条
-    /// 中止说明，绝不能改发「本轮没有需要处理的记录」把中止掩盖成无事可做。
-    abort_message: Option<String>,
 }
 
 /// 一轮播种的汇总结果。
@@ -1361,45 +1356,44 @@ async fn seed_config(
         });
     }
 
-    // 批量点击（`clicked_record_id=None`）只替**点击人**提交：扫到的记录里只要
-    // 有一行「申请人」明确写着别人，整批中止——不建行、不 reopen、不做组维护，
-    // 一条都不提交。空列/非人员值按「未填」处理（成功创建后覆盖成点击人）。
-    // 单条点击不在这里拦：被点的那一条由 `dispatch_one` 的同一规则兜底，
-    // Action 会把结论直接回给点击人。
+    // 批量点击（`clicked_record_id=None`）只提交**点击人自己的**记录：扫到的记录里
+    // 「申请人」明确写着别人的，跳过该条；空列/非人员值按「未填」处理（成功创建后
+    // 覆盖成点击人），其余照常提交。不单独发「跳过 N 条」——轮末汇总只报本轮实际
+    // 处理了多少条。单条点击不在这里过滤：被点的那一条由 Action 的提前守卫直接拒绝
+    // （`dispatch_one` 兜底），结论回给点击人。
     let batch_click = reopens_on_click(trigger, config_id) && clicked_record_id.is_none();
-    if batch_click {
+    let mut skipped_foreign = 0usize;
+    let pending_records: Vec<&bitable::RecordItem> = if batch_click {
         if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
             // 只在批量点击（且拿得到点击人）时解析申请人列：轮询与单条点击不读它，
             // 列被删也不该让这两条路径的播种失败。
             let applicant_name = bitable::resolve_field_name(&fields, &applicant_field_id)?;
-            let mismatch_count = pending_records
-                .iter()
-                .filter(|record| {
-                    applicant_field_conflict(record.fields.get(&applicant_name), open_id).is_some()
-                })
-                .count();
-            if mismatch_count > 0 {
-                tracing::warn!(
+            let (kept, skipped) =
+                partition_batch_records(pending_records, &applicant_name, open_id);
+            skipped_foreign = skipped;
+            if skipped > 0 {
+                tracing::info!(
                     stage = "seed",
                     config_id,
-                    mismatch_count,
+                    skipped,
+                    kept = kept.len(),
                     applicant_field = %applicant_name,
-                    "批量提交的申请人不是点击人，整批中止"
+                    "批量提交跳过申请人不是点击人的记录"
                 );
-                // 正文只报条数、不列姓名：批量扫描会扫到点击人在高级权限下看不到
-                // 的行，姓名属于跨权限信息；「有 N 条不是您」已足够行动。
-                let body = applicant_mismatch_feedback(&applicant_name, mismatch_count);
-                let notified =
-                    notify_clicker(runner, config_id, open_id, config, &body, "批量提交已中止")
-                        .await;
-                return Ok(SeedOutcome {
-                    skipped: pending_records.len(),
-                    empty_notified: notified,
-                    abort_message: Some(body),
-                    ..SeedOutcome::default()
-                });
             }
+            kept
+        } else {
+            pending_records
         }
+    } else {
+        pending_records
+    };
+    if pending_records.is_empty() && skipped_foreign > 0 {
+        // 勾选的全是别人的记录：一条都不处理（不做组维护）。
+        return Ok(SeedOutcome {
+            skipped: skipped_foreign,
+            ..SeedOutcome::default()
+        });
     }
 
     // 已有的任务行：**只查本轮待处理记录**，行数与本轮记录同量级，与历史任务
@@ -1416,7 +1410,7 @@ async fn seed_config(
     // 新建组要求「配置开关 + 请求参数」同时为真；组维护不看这两位。
     let aggregate_batch: bool = config.optional("aggregate_batch")?.unwrap_or(false);
     let aggregate_now = aggregate_batch && requested_aggregate;
-    let outcome = if batch_click {
+    let mut outcome = if batch_click {
         seed_batch_click(
             runner,
             config,
@@ -1485,9 +1479,9 @@ async fn seed_config(
             skipped,
             touched,
             empty_notified: false,
-            abort_message: None,
         }
     };
+    outcome.skipped += skipped_foreign;
     tracing::debug!(
         stage = "seed",
         config_id,
@@ -2059,20 +2053,28 @@ fn empty_selection_feedback(batch_scope_name: Option<&str>, backfill_name: &str)
     }
 }
 
-/// 批量提交因「申请人不是点击人」整批中止时的 IM 正文。
+/// 批量点击的有效记录 = 申请人列**不是别人**的记录。
 ///
-/// **只报条数，不列姓名**：批量扫描用的是应用身份、按全表勾选列扫描，命中行
-/// 可能位于点击人无权查看的视图里；列出姓名等于把别人的待提交记录信息透给点击人。
-/// 正文也不拼姓名列表，避免大量不同姓名把消息撑过飞书长度上限。
-fn applicant_mismatch_feedback(applicant_name: &str, mismatch_count: usize) -> String {
-    format!(
-        "【批量提交已中止】\n\
-         原因：本次勾选的待提交记录中有 {mismatch_count} 条的「{applicant_name}」不是您。为避免替他人提交，整批一条都没有提交。\n\
-         下一步：请只勾选「{applicant_name}」是您本人的记录后重新点击；或由申请人本人点击提交。"
-    )
+/// 空列/普通文本视为未填（后面会补成点击人）；明确写着别人 → 跳过该条，
+/// 不影响本轮其余记录。返回 `(保留的记录, 跳过条数)`。
+fn partition_batch_records<'a>(
+    records: impl IntoIterator<Item = &'a bitable::RecordItem>,
+    applicant_name: &str,
+    open_id: &str,
+) -> (Vec<&'a bitable::RecordItem>, usize) {
+    let mut kept = Vec::new();
+    let mut skipped = 0usize;
+    for record in records {
+        if applicant_field_conflict(record.fields.get(applicant_name), open_id).is_some() {
+            skipped += 1;
+        } else {
+            kept.push(record);
+        }
+    }
+    (kept, skipped)
 }
 
-/// 给点击人发一条 IM 说明（命中 0 条 / 申请人冲突共用）。
+/// 给点击人发一条 IM 说明（目前只用于批量点击「命中 0 条」）。
 ///
 /// best-effort，与其它 Worker 通知一致：任何失败只告警，**不返回 Err**，
 /// 不中断本轮其余配置的播种。返回「是否确实送达」——轮末汇总据此避免双发。
@@ -2325,9 +2327,6 @@ async fn notify_round_summary(
     if outcome.is_some_and(|outcome| outcome.empty_notified) {
         return;
     }
-    // 整批中止的说明没送达：轮末补发同一条正文，而不是走下面的「本轮无新增…」
-    // 汇总（那会把中止掩盖成无事可做，点击人永远不知道自己的提交被拒绝）。
-    let abort_message = outcome.and_then(|outcome| outcome.abort_message.clone());
     let seeded = outcome.map_or(0, |outcome| outcome.seeded);
     let reopened = outcome.map_or(0, |outcome| outcome.reopened);
     let scan_failure = report
@@ -2371,23 +2370,17 @@ async fn notify_round_summary(
         .filter(|(_, label)| !label.is_empty())
         .cloned()
         .collect();
-    let text = match abort_message {
-        Some(body) => {
-            let (header, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
-            format!("{header}\n配置：{title}\n{rest}")
-        }
-        None => round_summary_text(
-            &title,
-            &base_token,
-            &table_id,
-            seeded,
-            reopened,
-            &filtered,
-            backlog,
-            backlog_reason.as_deref(),
-            scan_failure,
-        ),
-    };
+    let text = round_summary_text(
+        &title,
+        &base_token,
+        &table_id,
+        seeded,
+        reopened,
+        &filtered,
+        backlog,
+        backlog_reason.as_deref(),
+        scan_failure,
+    );
 
     let table_url = (|| -> anyhow::Result<String> {
         bitable::validate_path_segment("base_token", &base_token)?;
@@ -4793,6 +4786,43 @@ mod tests {
         assert!(click_can_rewrite_identity(&task("ready", None)));
     }
 
+    /// 批量点击的过滤只跳过「明确写着别人」的记录：空列、普通文本、包含点击人
+    /// 的人员列表都保留，后面会按点击人补写/提交。
+    #[test]
+    fn batch_partition_skips_only_foreign_applicant_records() {
+        let record = |id: &str, applicant: Option<serde_json::Value>| {
+            let mut fields = BTreeMap::new();
+            if let Some(applicant) = applicant {
+                fields.insert("发起人".to_string(), applicant);
+            }
+            bitable::RecordItem {
+                record_id: id.to_string(),
+                fields,
+                created_by: None,
+            }
+        };
+        let records = [
+            record(
+                "r_own",
+                Some(serde_json::json!([{"id": "ou_click", "name": "我"}])),
+            ),
+            record(
+                "r_other",
+                Some(serde_json::json!([{"id": "ou_other", "name": "张三"}])),
+            ),
+            record("r_empty", Some(serde_json::json!([]))),
+            record("r_text", Some(serde_json::json!("张三（手填）"))),
+            record("r_absent", None),
+        ];
+        let (kept, skipped) = partition_batch_records(records.iter(), "发起人", "ou_click");
+        assert_eq!(skipped, 1, "只有明确写着别人的那条被跳过");
+        let ids: Vec<&str> = kept
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["r_own", "r_empty", "r_text", "r_absent"]);
+    }
+
     #[test]
     fn record_read_failures_are_terminal_only_when_fatal() {
         let failure = |kind| crate::addon::feishu::domain::outbound::OutboundFailure {
@@ -6699,11 +6729,11 @@ mod tests {
         Ok(())
     }
 
-    /// 批量点击时只要有一行的申请人明确不是点击人，整批中止：
-    /// 不建行、不 reopen、不做组维护，并给点击人发 IM。
+    /// 批量点击只处理申请人列是点击人的记录：明确写着别人的记录跳过，
+    /// 其余照常重开/提交；不单独发「跳过 N 条」通知，只在轮末汇总里报处理条数。
     #[tokio::test]
     #[ignore = "需要独立 MySQL 测试库"]
-    async fn batch_click_aborts_when_any_applicant_differs() -> anyhow::Result<()> {
+    async fn batch_click_skips_records_whose_applicant_differs() -> anyhow::Result<()> {
         let (database, context) = real_mysql_context().await?;
         let pool = context.approval_tasks().pool().clone();
         let namespace = uuid::Uuid::new_v4().simple().to_string();
@@ -6714,7 +6744,7 @@ mod tests {
         let r3 = format!("{namespace}-r3");
 
         // 存量：一个「全选即可解散」的 ready 组（r1/r2），一条停在 review 的单条
-        // 行（r3）。中止必须发生在组维护与 reopen 之前，两者都要原样保留。
+        // 行（r3）。r2 被跳过，组不算全选、不能被解散；r3 是点击人自己的，照常重开。
         insert_group_row(&pool, config_id, "gk-abort", "ready", None).await?;
         insert_group_task_row(
             &pool, config_id, "gk-abort", 0, &r1, "pending", "ready", None,
@@ -6765,22 +6795,12 @@ mod tests {
         .await?;
 
         assert_eq!(outcome.seeded, 0);
-        assert_eq!(outcome.reopened, 0);
-        assert_eq!(outcome.skipped, 3);
-        assert!(outcome.touched.is_empty());
-        assert!(outcome.empty_notified, "中止通知必须送达点击人");
-        let abort_message = outcome.abort_message.as_deref().unwrap_or_default();
-        assert!(
-            abort_message.contains("【批量提交已中止】"),
-            "{abort_message}"
-        );
-        assert!(abort_message.contains("1 条"), "只报条数：{abort_message}");
-        assert!(
-            !abort_message.contains("张三"),
-            "批量通知不得泄漏他人姓名：{abort_message}"
-        );
+        assert_eq!(outcome.reopened, 1, "点击人自己的单条任务照常重开");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.touched, vec![r3.clone()], "只碰点击人自己的记录");
+        assert!(!outcome.empty_notified);
 
-        // 存量任务行与组行一条都没动。
+        // r2（申请人明确是别人）被跳过、不参与组维护；r3（点击人自己的）照常重开。
         let review_state: (String, String) = sqlx::query_as(
             "SELECT state,effect_phase FROM feishu_approval_task WHERE config_id=? AND record_id=?",
         )
@@ -6788,14 +6808,14 @@ mod tests {
         .bind(&r3)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(review_state, ("review".into(), "created".into()));
+        assert_eq!(review_state, ("pending".into(), "ready".into()));
         let members: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT record_id,state,effect_phase FROM feishu_approval_task WHERE config_id=? AND group_id='gk-abort' ORDER BY group_seq",
         )
         .bind(config_id)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(members.len(), 2, "中止不得解散或删组成员");
+        assert_eq!(members.len(), 2, "被跳过的成员不得影响原组");
         assert_eq!(
             members,
             vec![
@@ -6809,36 +6829,16 @@ mod tests {
         .bind(config_id)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(groups, 1, "中止不得删组");
+        assert_eq!(groups, 1, "跳过他人记录不影响原组");
         let task_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=?")
                 .bind(config_id)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(task_count, 3, "中止不得新建任务行");
+        assert_eq!(task_count, 3, "不得为被跳过的记录新建任务行");
 
-        // 表结构 + 记录 + 一条发往点击人的 IM。
-        assert_eq!(transport.request_count(), 3, "不得有任何其它出站");
-        let requests = transport
-            .requests
-            .lock()
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .clone();
-        let message = requests
-            .iter()
-            .find(|request| request.url.ends_with("/im/v1/messages"))
-            .ok_or_else(|| anyhow::anyhow!("缺少中止通知"))?;
-        assert_eq!(
-            message.query,
-            vec![("receive_id_type".into(), "open_id".into())],
-            "按 open_id 发给点击人"
-        );
-        let body = message.json_body.as_ref().map(|body| body.to_string());
-        let body = body.unwrap_or_default();
-        assert!(
-            body.contains("ou_click") && body.contains("批量提交已中止"),
-            "通知接收人与正文应指向点击人：{body}"
-        );
+        // 过滤先于任何写操作：只读取表结构与记录，不发「跳过」通知。
+        assert_eq!(transport.request_count(), 2, "不得有任何其它出站");
 
         cleanup_aggregate_fixture(&pool, config_id).await?;
         Ok(())
