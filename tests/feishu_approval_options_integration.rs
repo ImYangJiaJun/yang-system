@@ -2240,6 +2240,45 @@ async fn approval_options_merges_same_label_ids_across_parents_when_enabled() {
             "未开启的绑定必须保持按父链派生的存储 id，实际: {parent}"
         );
 
+        // 4) 搜索分页：同一响应里一个 id 只出现一次，翻完所有页也不重复。
+        //    线上实测过反例——开关开启后按原始行翻页，7 个文案被拆成 54 行、
+        //    14 页，每页都在重复同一批 id。
+        let mut seen: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..50 {
+            let mut body = json!({ "token": DATASOURCE_TOKEN, "query": "张" });
+            if let Some(token) = token.take() {
+                body["page_token"] = json!(token);
+            }
+            let envelope = call_approval_options(&app, "short_name", body).await?;
+            let result = result_of(&envelope)?;
+            let ids = option_ids(result)?;
+            let unique: std::collections::HashSet<&String> = ids.iter().collect();
+            ensure!(
+                unique.len() == ids.len(),
+                "同一响应里不得出现重复 id，实际 {ids:?}"
+            );
+            seen.extend(ids);
+            token = result["nextPageToken"].as_str().map(str::to_string);
+            if token.is_none() {
+                break;
+            }
+            ensure!(
+                result["hasMore"] == json!(true),
+                "有游标时 hasMore 必须为 true: {result}"
+            );
+        }
+        ensure!(token.is_none(), "50 页内必须翻完，实际仍在分页");
+        let unique: std::collections::HashSet<&String> = seen.iter().collect();
+        ensure!(
+            unique.len() == seen.len(),
+            "跨页不得重复同一个 id，实际 {seen:?}"
+        );
+        ensure!(
+            seen == vec![canonical_id("short_name", "张三")],
+            "关键词「张」只应命中一条，实际 {seen:?}"
+        );
+
         Ok(())
     }
     .await;
