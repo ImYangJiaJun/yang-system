@@ -554,7 +554,10 @@ async fn resolve(
         Err(envelope) => return Ok(envelope),
     }
 
-    if let Some((sort_order, option_id)) = cursor {
+    // 开启「同名选项共用 ID」时游标里是**规范 id**，不是存储 id：拿它去做 SQL
+    // keyset 会把整批存储行滤掉（规范 id 与存储 id 无大小关系）。那条路径整份读出来
+    // 再在内存里按规范 id 分页（见下面 `paginate_collapsed`），这里跳过 SQL 条件。
+    if let Some((sort_order, option_id)) = cursor.clone().filter(|_| !merge_same_label_options) {
         // keyset 翻页：排序键严格大于游标。用 offset 会在数据变动时漏行或重复，
         // 而审批人翻页时数据被多维表格改掉是常态。
         query = query.where_or(vec![
@@ -579,7 +582,24 @@ async fn resolve(
 
     // 首请求（无游标、无关键词）要**全量**：飞书对未开启搜索的数据源不翻页，
     // 只认首响应里的选项。搜索/翻页路径保持原分页语义。
-    let (rows, next_page_token) = if wants_every_option(input) {
+    let (rows, next_page_token) = if merge_same_label_options {
+        // 开启开关后**必须先折叠再分页**：原始行按 (sort_order, option_id) 翻页，
+        // 而折叠后的规范 id 与存储 id 不是同一个键，同一文案的行会跨页重复出现
+        // （实测子列 7 个文案被拆成 54 行、14 页翻完，每页都在重复同一批 id）。
+        // 所以这里整份读出来（有 `ALL_OPTIONS_LIMIT` 兜底）再折叠，最后按规范 id
+        // 做内存里的 keyset 分页——同一响应里一个 id 只会出现一次。
+        let total = query.clone().count().await? as usize;
+        if total > ALL_OPTIONS_LIMIT {
+            tracing::warn!(
+                source_key = %source_key,
+                total,
+                limit = ALL_OPTIONS_LIMIT,
+                "开启同名选项共用 ID 的绑定按全量折叠，超出上限的部分不会返回"
+            );
+        }
+        let rows = collapse_same_label_rows(read_every_page(query, total).await?, &source_key);
+        paginate_collapsed(rows, cursor, wants_every_option(input))
+    } else if wants_every_option(input) {
         let total = query.clone().count().await? as usize;
         if total > ALL_OPTIONS_LIMIT {
             tracing::warn!(
@@ -597,15 +617,6 @@ async fn resolve(
     };
 
     let has_more = next_page_token.is_some();
-
-    // 折叠必须在父过滤之后（SQL 已按当前父级收窄），并在游标算好之后：
-    // `next_page_token` / `hasMore` 仍按**原始行**推进，折叠只影响本响应的可见项，
-    // 不会让后续页被截断（搜索型分页里同一文案可能跨页重复，但 id 相同，条件匹配无影响）。
-    let rows = if merge_same_label_options {
-        collapse_same_label_rows(rows, &source_key)
-    } else {
-        rows
-    };
 
     let result = build_result_body(&rows, &default_locale, has_more, next_page_token);
 
@@ -713,6 +724,38 @@ fn collapse_same_label_rows(rows: Vec<OptionRow>, source_key: &str) -> Vec<Optio
         }
     }
     collapsed
+}
+
+/// 对**已折叠**的结果按规范 id 做内存 keyset 分页。
+///
+/// 折叠后规范 id 只由文案决定，天然是唯一且稳定的分页键——比原始行的
+/// `(sort_order, option_id)` 更可靠，因为一个规范 id 对应多行存储、原始游标会在
+/// 两行之间落进同一个 id 内部。`cursor_ids` 是**已经发出去过**的规范 id，
+/// 这里按 `encode_cursor(0, id)` 复用同一个游标编解码（排序键位恒为 0）。
+///
+/// 全量请求不截断；分页请求每页 `PAGE_SIZE`。
+fn paginate_collapsed(
+    rows: Vec<OptionRow>,
+    cursor: Option<(i64, String)>,
+    wants_every_option: bool,
+) -> (Vec<OptionRow>, Option<String>) {
+    let rows: Vec<OptionRow> = match cursor.map(|(_, id)| id) {
+        // 游标指向的规范 id 已经不在了（文案被改名/停用，或客户端拿的是开关开启前
+        // 的旧游标）→ 返回空页，让飞书重发首请求。从头再来会让同一响应外的调用方
+        // 拿到重复 id，这是这里宁可不给的原因。
+        Some(after) => match rows.iter().position(|row| row.option_id == after) {
+            Some(position) => rows.into_iter().skip(position + 1).collect(),
+            None => Vec::new(),
+        },
+        None => rows,
+    };
+    if wants_every_option || rows.len() <= PAGE_SIZE {
+        return (rows, None);
+    }
+    let next = rows
+        .get(PAGE_SIZE - 1)
+        .map(|row| encode_cursor(0, &row.option_id));
+    (rows.into_iter().take(PAGE_SIZE).collect(), next)
 }
 
 /// 把一行记录读成响应所需的形状。
@@ -1281,5 +1324,56 @@ mod tests {
         let collapsed = collapse_same_label_rows(rows, "people");
         assert_eq!(collapsed.len(), 2);
         assert_ne!(collapsed[0].option_id, collapsed[1].option_id);
+    }
+
+    #[test]
+    fn collapsed_paging_returns_every_id_once_and_carries_a_canonical_cursor() {
+        // 折叠后的规范 id 是分页键：同一次翻页里一个 id 只出现一次，游标指向下一页
+        // 的第一个 id（排序键位恒为 0）。
+        let rows: Vec<OptionRow> = (0..PAGE_SIZE + 2)
+            .map(|index| option_row(&format!("stored:{index}"), &format!("文案{index}")))
+            .collect();
+        let rows = collapse_same_label_rows(rows, "people");
+
+        let (first, token) = paginate_collapsed(rows.clone(), None, false);
+        assert_eq!(first.len(), PAGE_SIZE);
+        let token = token.unwrap_or_else(|| panic!("还有下一页时必须给游标"));
+        let cursor = decode_cursor(&token)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("游标不应为空"));
+        assert_eq!(cursor.0, 0);
+        assert_eq!(cursor.1, rows[PAGE_SIZE - 1].option_id);
+
+        let (second, token) = paginate_collapsed(rows.clone(), Some(cursor), false);
+        assert_eq!(second.len(), 2, "第二页只应剩两条");
+        assert!(token.is_none());
+        let all: Vec<&str> = first
+            .iter()
+            .chain(second.iter())
+            .map(|row| row.option_id.as_str())
+            .collect();
+        let unique: std::collections::HashSet<&str> = all.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "跨页不得重复同一个 id");
+        assert_eq!(unique.len(), PAGE_SIZE + 2);
+    }
+
+    #[test]
+    fn collapsed_paging_does_not_truncate_a_full_list_request() {
+        let rows: Vec<OptionRow> = (0..PAGE_SIZE + 2)
+            .map(|index| option_row(&format!("stored:{index}"), &format!("文案{index}")))
+            .collect();
+        let rows = collapse_same_label_rows(rows, "people");
+        let (all, token) = paginate_collapsed(rows, None, true);
+        assert_eq!(all.len(), PAGE_SIZE + 2);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn collapsed_paging_stops_when_the_cursor_id_is_gone() {
+        // 游标指向的文案已经消失（改名/停用，或旧游标）→ 空页，不回退到从头给。
+        let rows = collapse_same_label_rows(vec![option_row("stored:a", "甲")], "people");
+        let (page, token) = paginate_collapsed(rows, Some((0, "people:gone".to_string())), false);
+        assert!(page.is_empty());
+        assert!(token.is_none());
     }
 }
