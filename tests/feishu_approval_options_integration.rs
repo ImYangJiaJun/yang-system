@@ -2115,3 +2115,143 @@ async fn approval_options_rejects_an_orphaned_binding() {
         panic!("清理失败: {error:#}");
     }
 }
+
+/// 规范 id：只哈希文案，父链不参与（`derive::label_option_id` 的测试侧复刻）。
+fn canonical_id(source_key: &str, label: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(label.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push(HEX[(byte >> 4) as usize] as char);
+        hex.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    format!("{source_key}:{}", &hex[..12])
+}
+
+/// 把 `i18nResources` 折叠成 `option_id -> 文案`（只取默认语言）。
+fn texts_by_id(result: &Value) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let resources = result["i18nResources"]
+        .as_array()
+        .context("i18nResources 必须是数组")?;
+    let default = resources
+        .iter()
+        .find(|resource| resource["isDefault"] == json!(true))
+        .context("i18nResources 必须含默认语言")?;
+    let texts = default["texts"].as_object().context("texts 必须是对象")?;
+    let mut mapped = std::collections::BTreeMap::new();
+    for (key, text) in texts {
+        let id = key
+            .strip_prefix("@i18n@")
+            .with_context(|| format!("texts 的键必须带 @i18n@ 前缀: {key}"))?;
+        mapped.insert(
+            id.to_string(),
+            text.as_str().unwrap_or_default().to_string(),
+        );
+    }
+    Ok(mapped)
+}
+
+/// 真实的「同文案、不同父」数据：子列里同一个名字挂在多个父下。
+///
+/// 这条钉住用户提的那个失效形态：同一字面值在飞书分支条件里出现多个 id，
+/// 条件永远匹配不上其中几条。开启开关后**必须**只剩一个 id，且 `texts` 里的
+/// 键与 `options[].value` 一起换成规范 id（否则控件显示为空）。
+///
+/// 同时钉住两件不能变的事：级联过滤照旧按父键收窄；没开开关的父级口径不变。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn approval_options_merges_same_label_ids_across_parents_when_enabled() {
+    let outcome = async {
+        let (database, app) = prepare_app(None).await?;
+
+        let table_id = seed_datasource_row(&database, "店铺表", "active").await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_shop",
+            "shop",
+            PARENT_DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            None,
+            true,
+        )
+        .await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_short",
+            "short_name",
+            DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            Some("fld_shop"),
+            true,
+        )
+        .await?;
+        sqlx::query("UPDATE `feishu_datasource_field` SET `merge_same_label_options` = 1 WHERE `source_key` = ?")
+            .bind("short_name")
+            .execute(database.pool())
+            .await
+            .context("开启同名选项共用 ID 失败")?;
+
+        seed_option(&database, "shop", "shop:A", "A 店", 0, true, None).await?;
+        seed_option(&database, "shop", "shop:B", "B 店", 1, true, None).await?;
+        // 同一个「张三」挂在两家店下，`option_id` 因父链不同而不同。
+        seed_option_with_parent(&database, "short_name", "sn:A", "张三", 0, "shop:A").await?;
+        seed_option_with_parent(&database, "short_name", "sn:B", "张三", 1, "shop:B").await?;
+        seed_option_with_parent(&database, "short_name", "sn:Ali", "李四", 2, "shop:A").await?;
+
+        // 1) 同一父下：折叠后只剩一条「张三」，且 id 是规范 id。
+        let one_parent = call_approval_options(
+            &app,
+            "short_name",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "fld_shop": "@i18n@shop:A" },
+            }),
+        )
+        .await?;
+        let result = result_of(&one_parent)?;
+        let texts = texts_by_id(result)?;
+        ensure!(
+            option_ids(result)? == vec![canonical_id("short_name", "张三"), canonical_id("short_name", "李四")],
+            "同一父下折叠后应为规范 id，实际: {result}"
+        );
+        ensure!(
+            texts.get(&canonical_id("short_name", "张三")).map(String::as_str) == Some("张三"),
+            "texts 的键必须与 options[].value 一起换成规范 id，否则控件显示为空: {texts:?}"
+        );
+
+        // 2) 不带父值：跨父级也只剩一个「张三」——这正是分支条件要的。
+        let all = call_approval_options(&app, "short_name", json!({ "token": DATASOURCE_TOKEN }))
+            .await?;
+        ensure!(
+            option_ids(result_of(&all)?)? == vec![canonical_id("short_name", "张三"), canonical_id("short_name", "李四")],
+            "跨父级同文案必须共用一个 id，实际: {all}"
+        );
+
+        // 3) 没开开关的绑定口径完全不变：父级的 id 仍是存储值。
+        let parent = call_approval_options(&app, "shop", json!({ "token": PARENT_DATASOURCE_TOKEN }))
+            .await?;
+        ensure!(
+            option_ids(result_of(&parent)?)? == vec!["shop:A".to_string(), "shop:B".to_string()],
+            "未开启的绑定必须保持按父链派生的存储 id，实际: {parent}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup = match connect_database().await {
+        Ok(database) => drop_feishu_tables(&database).await,
+        Err(error) => Err(error).context("清理用连接失败"),
+    };
+    if let Err(error) = outcome {
+        panic!("同名选项共用 ID 集成测试失败: {error:#}");
+    }
+    if let Err(error) = cleanup {
+        panic!("清理失败: {error:#}");
+    }
+}
