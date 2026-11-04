@@ -43,6 +43,7 @@ pub(super) const BINDING_ITEM_COLUMNS: &[&str] = &[
     "field_name",
     "source_key",
     "parent_field_id",
+    "merge_same_label_options",
     "enabled",
     "encrypt_enabled",
     "default_locale",
@@ -60,6 +61,9 @@ pub(super) struct FieldBindingItem {
     source_key: String,
     /// 同表内的父列 `field_id`；无父为 `None`。
     parent_field_id: Option<String>,
+    /// 同一文案在不同父级下是否共用一个对外 id。**绑定级开关，默认关**；
+    /// 开启后读端与派发用 `derive::label_option_id` 折叠，内部行与父键不变。
+    merge_same_label_options: bool,
     /// 是否在用。取消勾选的列会留在这里但被**停用**（不删行）。
     enabled: bool,
     /// 加密返回（回给飞书的信封是否加密）。**它是绑定级的**——一条数据源有 N 条绑定，
@@ -95,6 +99,9 @@ pub(super) fn group_bindings(
                 field_name: row.optional("field_name")?,
                 source_key: row.require("source_key")?,
                 parent_field_id: row.optional("parent_field_id")?,
+                merge_same_label_options: row
+                    .optional("merge_same_label_options")?
+                    .unwrap_or(false),
                 enabled: row.optional("enabled")?.unwrap_or(true),
                 // 两列在库上都是 `NOT NULL` + 有默认值，兜底值与列默认值一致：
                 // 缺键只可能意味着「投影少列了」，那种时候静默降级成默认值会
@@ -423,6 +430,7 @@ mod tests {
             field_name: None,
             source_key: "k".to_string(),
             parent_field_id: None,
+            merge_same_label_options: false,
             enabled: true,
             encrypt_enabled: false,
             default_locale: "zh_cn".to_string(),

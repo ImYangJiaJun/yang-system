@@ -54,6 +54,7 @@
         "field_name",
         "source_key",
         "parent_field_id",
+        "merge_same_label_options",
         "enabled",
         "encrypt_enabled",
         "default_locale",

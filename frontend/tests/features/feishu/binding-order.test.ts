@@ -21,6 +21,7 @@ function binding(
     fieldName: fieldId,
     sourceKey: fieldId.toLowerCase(),
     parentFieldId,
+    mergeSameLabelOptions: false,
     enabled: true,
     encryptEnabled: false,
     defaultLocale: "zh_cn",

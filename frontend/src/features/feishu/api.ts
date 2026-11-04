@@ -89,6 +89,7 @@ export const DATASOURCE_OPERATION_IDS = {
   /// 三者都按 `source_key` 定位绑定，**不碰** `source_key`、Token 与绑定行 id。
   repointField: "feishu.datasource.repoint_datasource_field",
   setFieldEnabled: "feishu.datasource.set_datasource_field_enabled",
+  setOptionMerge: "feishu.datasource.set_datasource_field_option_merge",
   addField: "feishu.datasource.add_datasource_field",
 } as const;
 
@@ -555,6 +556,7 @@ export const FIELD_BINDING_KEYS = {
   field_name: "fieldName",
   source_key: "sourceKey",
   parent_field_id: "parentFieldId",
+  merge_same_label_options: "mergeSameLabelOptions",
   enabled: "enabled",
   encrypt_enabled: "encryptEnabled",
   default_locale: "defaultLocale",
@@ -595,6 +597,8 @@ function parseFieldBinding(
     fieldName: asNullableString(raw.field_name),
     sourceKey,
     parentFieldId: asNullableString(raw.parent_field_id),
+    // 绑定级开关：缺失按关处理（列默认 false），与后端兜底值一致。
+    mergeSameLabelOptions: raw.merge_same_label_options === true,
     // `enabled` 缺失时按启用处理：那是存量行（列默认 true）的语义
     enabled: raw.enabled !== false,
     // 加密返回与默认语言是**绑定级**的：一条数据源有 N 个字段，可以各自加密、
@@ -1655,15 +1659,51 @@ export async function setDatasourceFieldEnabled(
   };
 }
 
+export type SetOptionMergeInput = {
+  datasourceId: number;
+  sourceKey: string;
+  mergeSameLabelOptions: boolean;
+};
+
+export type SetOptionMergeResult = {
+  sourceKey: string;
+  mergeSameLabelOptions: boolean;
+};
+
+/// 切换「同名选项共用 ID」。开启后同一文案跨父级共用一个对外 option_id；
+/// 已有分支条件引用的是旧 id，需在飞书审批后台删除后重配一次。
+export async function setDatasourceFieldOptionMerge(
+  input: SetOptionMergeInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<SetOptionMergeResult> {
+  const result = await invokeFeishuAction(
+    deps,
+    DATASOURCE_OPERATION_IDS.setOptionMerge,
+    {
+      datasource_id: input.datasourceId,
+      source_key: input.sourceKey,
+      merge_same_label_options: input.mergeSameLabelOptions,
+    },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    sourceKey: asString(data?.source_key, input.sourceKey),
+    mergeSameLabelOptions:
+      data?.merge_same_label_options === true ||
+      (data?.merge_same_label_options === undefined &&
+        input.mergeSameLabelOptions),
+  };
+}
+
 export type AddFieldInput = {
   datasourceId: number;
   fieldId: string;
   /// 省略 = 由服务端按 `table_id + field_id` 派生并自动避让冲突。
   sourceKey?: string;
   parentFieldId?: string | null;
-};
-
-/// 新增绑定的回执。**`token` 明文只在此刻出现一次**——服务端只存摘要，
+}; /// 新增绑定的回执。**`token` 明文只在此刻出现一次**——服务端只存摘要，
 /// 事后只能走回显端点（那需要额外的读权限），所以界面必须当场提供复制。
 export type AddedDatasourceField = {
   sourceKey: string;
@@ -1708,6 +1748,7 @@ export type DatasourceMaintenanceClient = {
   health: (datasourceId: number) => Promise<HealthReport>;
   repoint: (input: RepointFieldInput) => Promise<RepointFieldResult>;
   setEnabled: (input: SetFieldEnabledInput) => Promise<SetFieldEnabledResult>;
+  setOptionMerge: (input: SetOptionMergeInput) => Promise<SetOptionMergeResult>;
   addField: (input: AddFieldInput) => Promise<AddedDatasourceField>;
 };
 
@@ -1731,6 +1772,8 @@ export function useDatasourceMaintenanceClient(): DatasourceMaintenanceClient {
         repointDatasourceField(input, deps),
       setEnabled: (input: SetFieldEnabledInput) =>
         setDatasourceFieldEnabled(input, deps),
+      setOptionMerge: (input: SetOptionMergeInput) =>
+        setDatasourceFieldOptionMerge(input, deps),
       addField: (input: AddFieldInput) => addDatasourceField(input, deps),
     }),
     [deps],

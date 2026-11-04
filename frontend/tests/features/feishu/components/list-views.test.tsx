@@ -44,6 +44,7 @@ function binding(
     fieldName: null,
     sourceKey,
     parentFieldId: null,
+    mergeSameLabelOptions: false,
     enabled: true,
     encryptEnabled: false,
     defaultLocale: "zh_cn",

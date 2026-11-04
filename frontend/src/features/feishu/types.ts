@@ -937,6 +937,9 @@ export type DatasourceFieldBinding = {
   fieldName: string | null;
   sourceKey: string;
   parentFieldId: string | null;
+  /// 同一文案跨父级是否共用一个对外 option_id（绑定级开关，默认 false）。
+  /// 开启后飞书分支条件里同一文案只看到一个 id；该字段不能同时作为别人的父级。
+  mergeSameLabelOptions: boolean;
   enabled: boolean;
   /// 加密返回：回给飞书的信封是否加密。**绑定级**——与 Token 的存储方式无关。
   encryptEnabled: boolean;

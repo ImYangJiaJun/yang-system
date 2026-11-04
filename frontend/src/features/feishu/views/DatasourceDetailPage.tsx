@@ -517,6 +517,13 @@ export default function DatasourceDetailPage() {
   /// 重新导入的回执。它是**唯一**记录「这一轮导了什么、写了多少」的地方——
   /// 服务端只回这一次，库里不留（导入不写表级时间戳）。
   const [reimportNotice, setReimportNotice] = useState<string | null>(null);
+  /// 「同名选项共用 ID」开关的写状态与回执。放在详情页而不是维护对话框：
+  /// 维护对话框只对 `pull` 源开放，而 xlsx 源同样需要这个口径。
+  const [optionMergeBusy, setOptionMergeBusy] = useState(false);
+  const [optionMergeNotice, setOptionMergeNotice] = useState<string | null>(
+    null,
+  );
+  const [optionMergeError, setOptionMergeError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DETAIL_PAGE_SIZE);
   const [orderBy, setOrderBy] = useState<OrderByClause[]>(
@@ -614,6 +621,16 @@ export default function DatasourceDetailPage() {
           (binding) => binding.fieldId === currentBinding.parentFieldId,
         ) ?? null)
       : null;
+  /// 有子字段的绑定不能开启共用 ID：开启后父值走规范 id，子行存的 `parent_key`
+  /// 仍是原 option_id，级联会失配。后端同样会拒绝。
+  const currentBindingHasChildren =
+    currentBinding !== null &&
+    bindings.some(
+      (binding) => binding.parentFieldId === currentBinding.fieldId,
+    );
+  const canToggleOptionMerge =
+    canWriteDatasources(catalog.data) &&
+    hasOperation(catalog.data, DATASOURCE_OPERATION_IDS.setOptionMerge);
 
   /// 父级列的「 · {父字段名}」按**每一行自己的** source_key 推导：
   /// 行绑定 → parentFieldId → 同数据源另一条绑定。搜索跨字段时每行的
@@ -728,6 +745,32 @@ export default function DatasourceDetailPage() {
     // 体检查询的键是 `["feishu", "health", id]`（见 `HealthSection`），
     // 用前缀作废即可；选项查询不在其中——它按 source_key 取，标识没有变。
     void queryClient.invalidateQueries({ queryKey: ["feishu", "health"] });
+  }
+
+  async function handleToggleOptionMerge(merge: boolean) {
+    if (currentBinding === null || datasourceId === null) return;
+    setOptionMergeBusy(true);
+    setOptionMergeError(null);
+    setOptionMergeNotice(null);
+    try {
+      await maintenanceClient.setOptionMerge({
+        datasourceId,
+        sourceKey: currentBinding.sourceKey,
+        mergeSameLabelOptions: merge,
+      });
+      setOptionMergeNotice(
+        merge
+          ? "已开启同名选项共用 ID。请在飞书审批后台把引用该字段的分支条件删除后重配一次（旧选项 id 已不再返回）。"
+          : "已关闭同名选项共用 ID；选项 id 恢复为按父级区分。",
+      );
+      handleMaintenanceChanged();
+    } catch (cause) {
+      setOptionMergeError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    } finally {
+      setOptionMergeBusy(false);
+    }
   }
 
   // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
@@ -1113,6 +1156,47 @@ export default function DatasourceDetailPage() {
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       共 {total} 条 · 第 {page} / {Math.ceil(total / pageSize)}{" "}
                       页
+                    </p>
+                  ) : null}
+                  {!isSearching &&
+                  currentBinding !== null &&
+                  canToggleOptionMerge ? (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <label className="flex items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          className="size-3.5"
+                          checked={currentBinding.mergeSameLabelOptions}
+                          disabled={
+                            optionMergeBusy ||
+                            (!currentBinding.mergeSameLabelOptions &&
+                              currentBindingHasChildren)
+                          }
+                          onChange={(event) =>
+                            void handleToggleOptionMerge(event.target.checked)
+                          }
+                        />
+                        同名选项共用 ID
+                      </label>
+                      {currentBindingHasChildren &&
+                      !currentBinding.mergeSameLabelOptions ? (
+                        <span className="text-tone-warning">
+                          该字段是父级，需先解除子字段的父级关系
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {optionMergeError !== null ? (
+                    <p role="alert" className="mt-1 text-xs text-destructive">
+                      {optionMergeError}
+                    </p>
+                  ) : null}
+                  {optionMergeNotice !== null ? (
+                    <p
+                      aria-live="polite"
+                      className="mt-1 text-xs text-muted-foreground"
+                    >
+                      {optionMergeNotice}
                     </p>
                   ) : null}
                 </div>

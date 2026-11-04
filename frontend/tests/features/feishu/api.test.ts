@@ -40,6 +40,7 @@ import {
   revealFieldToken,
   rotateFieldToken,
   setDatasourceFieldEnabled,
+  setDatasourceFieldOptionMerge,
   updateDatasourceTable,
   createApprovalConfig,
   updateApprovalConfig,
@@ -129,6 +130,11 @@ const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
     ...DATASOURCE_LIST_ACTION,
     operation_id: "feishu.datasource.set_datasource_field_enabled",
     path: "/api/v1/feishu/datasources/field/status",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.set_datasource_field_option_merge",
+    path: "/api/v1/feishu/datasources/field/option-merge",
   },
   {
     ...DATASOURCE_LIST_ACTION,
@@ -795,6 +801,8 @@ describe("投影契约（emit ↔ read）", () => {
     field_name: "探针字段",
     source_key: "probe_key",
     parent_field_id: "fldPARENT",
+    // 兜底是 false ⇒ 用 true 才测得出「读到了」
+    merge_same_label_options: true,
     // 兜底是 true ⇒ 用 false 才测得出「读到了」
     enabled: false,
     // 兜底是 false ⇒ 用 true
@@ -1378,6 +1386,7 @@ describe("表级数据源行的投影", () => {
         fieldName: "币种/Currency",
         sourceKey: "payment_currency",
         parentFieldId: null,
+        mergeSameLabelOptions: false,
         enabled: true,
         encryptEnabled: true,
         defaultLocale: "en_us",
@@ -1388,6 +1397,7 @@ describe("表级数据源行的投影", () => {
         fieldName: null,
         sourceKey: "payment_fx_rate",
         parentFieldId: "fldA",
+        mergeSameLabelOptions: false,
         enabled: false,
         encryptEnabled: false,
         defaultLocale: "zh_cn",
@@ -1590,6 +1600,33 @@ describe("外部数据源维护端点", () => {
     });
   });
 
+  it("同名选项共用 ID：三个键，回执带出开关", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: { source_key: "people", merge_same_label_options: true },
+    });
+    const result = await setDatasourceFieldOptionMerge(
+      {
+        datasourceId: 7,
+        sourceKey: "people",
+        mergeSameLabelOptions: true,
+      },
+      deps,
+    );
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/option-merge");
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toEqual({
+      datasource_id: 7,
+      source_key: "people",
+      merge_same_label_options: true,
+    });
+    expect(result).toEqual({
+      sourceKey: "people",
+      mergeSameLabelOptions: true,
+    });
+  });
+
   it("新增：省略 source_key 时整个键不出现；Token 明文原样带回", async () => {
     const calls = stubFetch({
       code: 0,
@@ -1773,6 +1810,7 @@ describe("enabledBindingInputs", () => {
             fieldName: "费用类型",
             sourceKey: "dept_sales",
             parentFieldId: null,
+            mergeSameLabelOptions: false,
             enabled: true,
             encryptEnabled: false,
             defaultLocale: "zh_cn",
@@ -1782,6 +1820,7 @@ describe("enabledBindingInputs", () => {
             fieldName: "已停用",
             sourceKey: "dept_old",
             parentFieldId: "fldA",
+            mergeSameLabelOptions: false,
             enabled: false,
             encryptEnabled: false,
             defaultLocale: "zh_cn",

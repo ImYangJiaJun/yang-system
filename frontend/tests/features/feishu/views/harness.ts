@@ -84,6 +84,7 @@ export type FeishuApiStubOptions = {
   /// 维护三端点：改绑 / 停用启用 / 新增。
   repointField?: Handler;
   setFieldEnabled?: Handler;
+  setOptionMerge?: Handler;
   addField?: Handler;
 };
 
@@ -278,6 +279,11 @@ function catalogFor(options: FeishuApiStubOptions) {
         "feishu.datasource.set_datasource_field_enabled",
         "POST",
         "/api/v1/feishu/datasources/field/status",
+      ),
+      action(
+        "feishu.datasource.set_datasource_field_option_merge",
+        "POST",
+        "/api/v1/feishu/datasources/field/option-merge",
       ),
       action(
         "feishu.datasource.add_datasource_field",
@@ -489,6 +495,12 @@ export function stubFeishuApi(
           source_key: payload.source_key ?? "",
           enabled: payload.enabled === true,
           changed: true,
+        });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/field/option-merge")) {
+        return respond(options.setOptionMerge, payload, {
+          source_key: payload.source_key ?? "",
+          merge_same_label_options: payload.merge_same_label_options === true,
         });
       }
       if (url.endsWith("/api/v1/feishu/datasources/field/add")) {

@@ -22,6 +22,7 @@ use yang_base::table::{SortOrder, TableQuery, WhereCondition};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::derive::label_option_id;
 use crate::addon::feishu::domain::i18n::{
     build_result_body, normalize_linkage_value, OptionRow, DEFAULT_LOCALE,
 };
@@ -457,6 +458,7 @@ async fn resolve(
             "encrypt_enabled",
             "default_locale",
             "parent_field_id",
+            "merge_same_label_options",
             "datasource_id",
             "enabled",
         ])?
@@ -498,6 +500,11 @@ async fn resolve(
     let default_locale: String = binding
         .optional("default_locale")?
         .unwrap_or_else(|| DEFAULT_LOCALE.to_string());
+    // 绑定级开关：开启后同一文案在不同父级下对外共用一个规范 id。默认关，
+    // 存量数据源的口径（父链参与哈希）完全不变。
+    let merge_same_label_options: bool = binding
+        .optional("merge_same_label_options")?
+        .unwrap_or(false);
 
     // 级联：父由绑定行的 `parent_field_id` 指向**同一张表**里的另一条启用绑定，
     // 父的 `source_key` 是那条绑定自己的（设计 §8）。无父（或父已不可用）时为 None。
@@ -591,6 +598,15 @@ async fn resolve(
 
     let has_more = next_page_token.is_some();
 
+    // 折叠必须在父过滤之后（SQL 已按当前父级收窄），并在游标算好之后：
+    // `next_page_token` / `hasMore` 仍按**原始行**推进，折叠只影响本响应的可见项，
+    // 不会让后续页被截断（搜索型分页里同一文案可能跨页重复，但 id 相同，条件匹配无影响）。
+    let rows = if merge_same_label_options {
+        collapse_same_label_rows(rows, &source_key)
+    } else {
+        rows
+    };
+
     let result = build_result_body(&rows, &default_locale, has_more, next_page_token);
 
     if !encrypt_enabled {
@@ -679,6 +695,24 @@ fn next_page_token(rows: &[OptionRow], total: usize) -> Option<String> {
     // 游标必须用该行真实的 `sort_order`，否则下一页的 keyset 条件会错位
     rows.last()
         .map(|last| encode_cursor(last.sort_order, &last.option_id))
+}
+
+/// 把同一文案的多条存储行折叠成一条对外选项。
+///
+/// 只用于开启 `merge_same_label_options` 的绑定，且必须在 SQL 父过滤**之后**调用：
+/// 级联仍然只返回当前父级下出现过的文案，折叠的是「同一文案在不同父下的多条 id」。
+/// 保留首次出现的行（其 `sort_order` / `i18n` / `is_default` 作为代表），id 换成
+/// [`label_option_id`]。这样飞书分支条件里同一文案只会看到一个 id。
+fn collapse_same_label_rows(rows: Vec<OptionRow>, source_key: &str) -> Vec<OptionRow> {
+    let mut seen = std::collections::HashSet::new();
+    let mut collapsed = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        row.option_id = label_option_id(source_key, &row.label);
+        if seen.insert(row.option_id.clone()) {
+            collapsed.push(row);
+        }
+    }
+    collapsed
 }
 
 /// 把一行记录读成响应所需的形状。
@@ -1209,5 +1243,43 @@ mod tests {
             None,
             Some("cursor")
         )));
+    }
+
+    fn option_row(option_id: &str, label: &str) -> OptionRow {
+        OptionRow {
+            option_id: option_id.to_string(),
+            label: label.to_string(),
+            i18n: std::collections::BTreeMap::new(),
+            sort_order: 0,
+            is_default: false,
+        }
+    }
+
+    #[test]
+    fn collapsing_maps_same_labels_to_one_canonical_id_and_keeps_the_first_row() {
+        // 两条同文案、不同父（不同 option_id）的行必须折叠成一条；id 是根级公式，
+        // 读端与派发共用同一个函数，分支条件因此只看到一个 id。
+        let rows = vec![
+            option_row("companyA:aaa", "张三"),
+            option_row("companyB:bbb", "张三"),
+            option_row("companyA:ccc", "李四"),
+        ];
+        let collapsed = collapse_same_label_rows(rows, "people");
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[0].label, "张三");
+        assert_eq!(collapsed[0].option_id, label_option_id("people", "张三"));
+        assert_eq!(collapsed[1].label, "李四");
+        assert_eq!(collapsed[1].option_id, label_option_id("people", "李四"));
+    }
+
+    #[test]
+    fn collapsing_does_not_merge_different_labels() {
+        let rows = vec![
+            option_row("companyA:aaa", "张三"),
+            option_row("companyB:bbb", "张三丰"),
+        ];
+        let collapsed = collapse_same_label_rows(rows, "people");
+        assert_eq!(collapsed.len(), 2);
+        assert_ne!(collapsed[0].option_id, collapsed[1].option_id);
     }
 }

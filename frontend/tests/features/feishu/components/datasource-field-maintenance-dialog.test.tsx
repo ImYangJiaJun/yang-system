@@ -73,6 +73,7 @@ const DATASOURCE: DatasourceItem = {
       fieldName: "银行流水摘要",
       sourceKey: SOURCE_KEY,
       parentFieldId: null,
+      mergeSameLabelOptions: false,
       enabled: true,
       encryptEnabled: false,
       defaultLocale: "zh_cn",
@@ -97,6 +98,7 @@ const PARENT_BINDING: DatasourceFieldBinding = {
   fieldName: "费用类型",
   sourceKey: "fee_type",
   parentFieldId: null,
+  mergeSameLabelOptions: false,
   enabled: true,
   encryptEnabled: false,
   defaultLocale: "zh_cn",
@@ -135,6 +137,10 @@ function makeClient(
       changed: true,
     }),
     addField: vi.fn().mockResolvedValue(ADDED),
+    setOptionMerge: vi.fn().mockResolvedValue({
+      sourceKey: SOURCE_KEY,
+      mergeSameLabelOptions: true,
+    }),
     ...overrides,
   };
 }

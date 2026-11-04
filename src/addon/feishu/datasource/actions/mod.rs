@@ -28,6 +28,7 @@ pub(super) mod repoint_datasource_field;
 pub(super) mod reveal_token;
 pub(super) mod rotate_token;
 pub(super) mod set_datasource_field_enabled;
+pub(super) mod set_datasource_field_option_merge;
 pub(super) mod update_datasource_table;
 
 use std::sync::Arc;
@@ -54,6 +55,7 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     // 已有绑定的 source_key 与 Token。
     let module = repoint_datasource_field::register(module, Arc::clone(&context));
     let module = set_datasource_field_enabled::register(module, Arc::clone(&context));
+    let module = set_datasource_field_option_merge::register(module, Arc::clone(&context));
     let module = add_datasource_field::register(module, Arc::clone(&context));
     let module = list_bitable_tables::register(module, Arc::clone(&context));
     let module = health_check::register(module, Arc::clone(&context));

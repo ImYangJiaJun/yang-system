@@ -1323,6 +1323,36 @@ describe("飞书数据源详情页 · 外部数据源维护", () => {
     ).toBeInTheDocument();
   });
 
+  it("同名选项共用 ID：按绑定发开关，并提示重配分支条件", async () => {
+    const user = userEvent.setup();
+    const calls = stubDetail({
+      fieldMaintenance: true,
+      optionList: () => listPage(TWO_OPTIONS),
+      setOptionMerge: () => ({
+        source_key: SOURCE_KEY,
+        merge_same_label_options: true,
+      }),
+    });
+    renderDetail();
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "同名选项共用 ID",
+    });
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+
+    await waitFor(() => {
+      expect(
+        bodiesOf(calls, "/api/v1/feishu/datasources/field/option-merge")[0],
+      ).toEqual({
+        datasource_id: DATASOURCE_ID,
+        source_key: SOURCE_KEY,
+        merge_same_label_options: true,
+      });
+    });
+    expect(await screen.findByText(/分支条件删除后重配/)).toBeInTheDocument();
+  });
+
   it("打开维护对话框：并行拉远端字段与体检", async () => {
     const user = userEvent.setup();
     const calls = stubDetail({ fieldMaintenance: true });

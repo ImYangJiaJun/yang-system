@@ -23,7 +23,7 @@
 
 #![allow(dead_code)] // 建配置先落地并自带 8 个测试；消费者（dispatch 端点的自动创建）在下一步接入。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use yang_base::table::{Record, SortOrder};
@@ -38,6 +38,7 @@ use super::approval_match::{
 };
 use super::bitable::{list_all_fields, BitableCoordinates, FieldItem};
 use super::context::FeishuContext;
+use super::derive::label_option_id;
 use super::outbound::{OutboundTransport, Sleeper};
 use super::repository::all_pages;
 use super::tenant_token::TenantTokenProvider;
@@ -1079,6 +1080,8 @@ pub(crate) async fn resolve_external_options(
         })
         .collect();
     let sources = load_option_sources(context, &form, Some(&mapped_ids), &explicit_sources).await?;
+    // 绑定级「同名选项共用 ID」开关：一次查完本记录用到的全部来源。
+    let merged_sources = load_merge_sources(context, sources.values()).await?;
     let by_widget_id: BTreeMap<&str, &FormWidget> = form
         .iter()
         .flat_map(|widget| widget.walk())
@@ -1123,6 +1126,7 @@ pub(crate) async fn resolve_external_options(
                 definition,
                 cells,
                 &sources,
+                &merged_sources,
                 parent_key,
                 &form,
                 fields,
@@ -1149,6 +1153,7 @@ async fn resolve_one(
     definition: &FormWidget,
     cells: &serde_json::Map<String, Value>,
     sources: &BTreeMap<String, String>,
+    merged_sources: &BTreeSet<String>,
     parent_key: Option<String>,
     form: &[FormWidget],
     fields: &[FieldItem],
@@ -1164,44 +1169,46 @@ async fn resolve_one(
             definition.name
         )])
     })?;
+    let merge_by_label = merged_sources.contains(source);
     widget.option_map.clear();
     for label in super::approval_convert::labels_from_cell(cell)
         .into_iter()
         .filter(|l| !l.trim().is_empty())
     {
         let rows = option_rows_for_label(context, source, &label).await?;
-        let option_id = match pick_option(&rows, source, &label, parent_key.as_deref()) {
-            Ok(id) => {
-                if rows.len() > 1 {
-                    tracing::warn!(
-                        stage = "external_options",
-                        widget_id = %widget.widget_id,
-                        bitable_field = %widget.bitable_field,
-                        source_key = source,
-                        label = %label,
-                        option_id = %id,
-                        "外部选项文案命中多条启用选项，取排序最前（建议清理同名重复）"
-                    );
+        let option_id =
+            match pick_option(&rows, source, &label, parent_key.as_deref(), merge_by_label) {
+                Ok(id) => {
+                    if rows.len() > 1 && !merge_by_label {
+                        tracing::warn!(
+                            stage = "external_options",
+                            widget_id = %widget.widget_id,
+                            bitable_field = %widget.bitable_field,
+                            source_key = source,
+                            label = %label,
+                            option_id = %id,
+                            "外部选项文案命中多条启用选项，取排序最前（建议清理同名重复）"
+                        );
+                    }
+                    id
                 }
-                id
-            }
-            Err(ProvisionError::Invalid(_)) => {
-                tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
+                Err(ProvisionError::Invalid(_)) => {
+                    tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
                 bitable_field = %widget.bitable_field, source_key = source,
                 reason = "当前文案没有匹配的启用选项",
                 "审批外部选项匹配失败");
-                let source_name = option_source_name(context, source).await;
-                return Err(ProvisionError::Invalid(vec![option_match_feedback(
-                    form,
-                    widget,
-                    fields,
-                    &source_name,
-                    source,
-                    &label,
-                )]));
-            }
-            Err(error) => return Err(error),
-        };
+                    let source_name = option_source_name(context, source).await;
+                    return Err(ProvisionError::Invalid(vec![option_match_feedback(
+                        form,
+                        widget,
+                        fields,
+                        &source_name,
+                        source,
+                        &label,
+                    )]));
+                }
+                Err(error) => return Err(error),
+            };
         widget.option_map.insert(label, option_id);
     }
     Ok(())
@@ -1373,12 +1380,23 @@ fn parent_option_key(
 /// 级联控件（`parent_key` 非空）**只能取当前父级下的那条**：同名文案在不同支行下
 /// 是不同选项，取错父级会把「手动录入」记到另一家银行名下（2026-11-03 真机
 /// `202611030042`）。当前父级下没有同文案时才回退原规则，不让成功单子被误判死。
+///
+/// `merge_by_label` 是绑定级开关：开启后同一文案在不同父下对外共用一个规范 id，
+/// 挑中哪条存储行只影响「文案存在性」校验，不再影响提交值。
 fn pick_option(
     rows: &[Record],
     source: &str,
     label: &str,
     parent_key: Option<&str>,
+    merge_by_label: bool,
 ) -> Result<String, ProvisionError> {
+    let picked = |row: &Record| -> Result<String, ProvisionError> {
+        if merge_by_label {
+            let stored: String = row.require("label")?;
+            return Ok(label_option_id(source, &stored));
+        }
+        Ok(row.require("option_id")?)
+    };
     if let Some(parent_key) = parent_key {
         for row in rows {
             let stored = row.require::<String>("label")?;
@@ -1387,7 +1405,7 @@ fn pick_option(
             }
             let stored_parent: Option<String> = row.optional("parent_key")?;
             if stored_parent.as_deref() == Some(parent_key) {
-                return Ok(row.require("option_id")?);
+                return picked(row);
             }
         }
     }
@@ -1397,12 +1415,52 @@ fn pick_option(
     for row in rows {
         let stored = row.require::<String>("label")?;
         if super::approval_convert::labels_equivalent(&stored, label) {
-            return Ok(row.require("option_id")?);
+            return picked(row);
         }
     }
     Err(ProvisionError::Invalid(vec![format!(
         "数据源「{source}」的文案「{label}」没有匹配的启用选项"
     )]))
+}
+
+/// 取这些 `source_key` 里开启了「同名选项共用 ID」的集合。
+///
+/// 一次 `where_in` 查完；一份审批定义里用到的外部来源通常只有几个。开关列由表声明
+/// 兜底为 `false`，坏行按关处理——读侧开关不该把整次派发拖死。
+async fn load_merge_sources<'a>(
+    context: &FeishuContext,
+    sources: impl Iterator<Item = &'a String>,
+) -> Result<BTreeSet<String>, ProvisionError> {
+    let mut keys: Vec<String> = sources
+        .map(|source| source.trim().to_string())
+        .filter(|source| !source.is_empty())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let rows = context
+        .datasource_fields()
+        .query()
+        .select_fields(&["source_key", "merge_same_label_options"])?
+        .where_in(
+            "source_key",
+            keys.into_iter().map(serde_json::Value::String).collect(),
+        )?
+        .all()
+        .await
+        .map_err(|error| ProvisionError::Store(error.to_string()))?;
+    let mut merged = BTreeSet::new();
+    for row in &rows {
+        if row
+            .optional::<bool>("merge_same_label_options")?
+            .unwrap_or(false)
+        {
+            merged.insert(row.require::<String>("source_key")?);
+        }
+    }
+    Ok(merged)
 }
 
 /// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
@@ -1506,7 +1564,7 @@ mod tests {
                 .set("option_id", option_id)
         };
         assert_eq!(
-            pick_option(&[row("银行", "id1")], "source", "银行", None)
+            pick_option(&[row("银行", "id1")], "source", "银行", None, false)
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1"
         );
@@ -1515,7 +1573,8 @@ mod tests {
                 &[row("银行", "id1"), row("银行", "id2")],
                 "source",
                 "银行",
-                None
+                None,
+                false
             )
             .unwrap_or_else(|e| panic!("{e}")),
             "id1",
@@ -1524,22 +1583,22 @@ mod tests {
         // 数字文案按数值等价：固定小数位（查找/公式列的 9.1330）对上最短表示
         // （选项台账的 9.133）。
         assert_eq!(
-            pick_option(&[row("9.133", "id1")], "source", "9.1330", None)
+            pick_option(&[row("9.133", "id1")], "source", "9.1330", None, false)
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1"
         );
         assert_eq!(
-            pick_option(&[row("9.1330", "id1")], "source", "9.133", None)
+            pick_option(&[row("9.1330", "id1")], "source", "9.133", None, false)
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1",
             "反向口径（选项侧带尾零）也必须命中"
         );
         assert!(
-            pick_option(&[row("9.1335", "id1")], "source", "9.1330", None).is_err(),
+            pick_option(&[row("9.1335", "id1")], "source", "9.1330", None, false).is_err(),
             "同前缀但数值不同不能命中"
         );
-        assert!(pick_option(&[], "source", "银行", None).is_err());
-        assert!(pick_option(&[row("银行 ", "id1")], "source", "银行", None).is_err());
+        assert!(pick_option(&[], "source", "银行", None, false).is_err());
+        assert!(pick_option(&[row("银行 ", "id1")], "source", "银行", None, false).is_err());
     }
 
     /// 级联：同名文案在多个父级下存在时，**只能取当前父级下的那条**。
@@ -1562,16 +1621,50 @@ mod tests {
             row("手动录入", "current-branch", Some("branch-b")),
         ];
         assert_eq!(
-            pick_option(&rows, "source", "手动录入", Some("branch-b"))
+            pick_option(&rows, "source", "手动录入", Some("branch-b"), false)
                 .unwrap_or_else(|error| panic!("{error}")),
             "current-branch",
             "当前父级下的同文案必须优先于排序更前的其它父级"
         );
         // 当前父级下没有同名项：仍然回退排序最前，不把可用的单子判死。
         assert_eq!(
-            pick_option(&rows, "source", "手动录入", Some("branch-c"))
+            pick_option(&rows, "source", "手动录入", Some("branch-c"), false)
                 .unwrap_or_else(|error| panic!("{error}")),
             "other-branch"
+        );
+    }
+
+    /// 开启「同名选项共用 ID」后，同一个文案在不同父级下必须提交同一个规范 id；
+    /// 存储行与父键不变，所以级联解析仍按 `parent_key` 走。
+    #[test]
+    fn pick_option_with_merge_returns_one_canonical_id_across_parents() {
+        let row = |label: &str, option_id: &str, parent: &str| {
+            Record::new()
+                .set("label", label)
+                .set("option_id", option_id)
+                .set("parent_key", parent)
+        };
+        let rows = [
+            row("张三", "companyA:aaa", "companyA"),
+            row("张三", "companyB:bbb", "companyB"),
+        ];
+        let canonical = label_option_id("people", "张三");
+        assert_eq!(
+            pick_option(&rows, "people", "张三", Some("companyA"), true)
+                .unwrap_or_else(|error| panic!("{error}")),
+            canonical
+        );
+        assert_eq!(
+            pick_option(&rows, "people", "张三", Some("companyB"), true)
+                .unwrap_or_else(|error| panic!("{error}")),
+            canonical,
+            "不同父级下的同文案必须落到同一个对外 id"
+        );
+        // 不开开关时保持原语义：每个父级仍是自己的 id。
+        assert_eq!(
+            pick_option(&rows, "people", "张三", Some("companyB"), false)
+                .unwrap_or_else(|error| panic!("{error}")),
+            "companyB:bbb"
         );
     }
 

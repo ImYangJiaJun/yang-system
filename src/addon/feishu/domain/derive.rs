@@ -53,6 +53,10 @@
 //!
 //! **去重必须按 `option_id`，不能按 label。** 按 label 折叠会把「同 label 不同父」
 //! 重新并成一个，父级选到其中一个时另一个**静默消失**。
+//!
+//! 唯一例外是**绑定级显式开关** `merge_same_label_options`：它不改这里的存储口径，
+//! 只在读端与派发把同一文案映射到 [`label_option_id`]（根级公式）。内部行和
+//! `parent_key` 仍按父链派生，级联过滤因此照旧；开关只允许开在叶子绑定上。
 
 use std::collections::HashSet;
 
@@ -152,6 +156,18 @@ fn option_id_of(source_key: &str, parent_key: Option<&str>, label: &str) -> Stri
     };
     // hash_token 恒返回 64 字符小写 hex，切片安全（按字节切在 ASCII hex 上等价于按字符）。
     format!("{source_key}:{}", &digest[..HASH_PREFIX_LEN])
+}
+
+/// 同一绑定内「同一文案只对外暴露一个 id」时使用的规范 id。
+///
+/// 与**根级**选项的派生公式一致：只哈希文案，父链不参与。调用方传进来的必须是
+/// **库里存的**文案（已 trim、已按 255 字截断），而不是单元格原文——否则读端与
+/// 派发会各自算出一个不同的 id。
+///
+/// 这个函数只服务 `merge_same_label_options` 开启的绑定：内部行、`parent_key`
+/// 与补集停用仍按 [`option_id_of`] 的父链口径，**不要**用它改写存储。
+pub(crate) fn label_option_id(source_key: &str, label: &str) -> String {
+    option_id_of(source_key, None, label)
 }
 
 /// 由**整条祖先链**算父键：从根往下逐级折叠，得到的就是直接父那一行的 `option_id`。
@@ -475,6 +491,23 @@ mod tests {
             with_ancestors(&["USD 美元"], "6.9025"),
         ];
         assert_eq!(derive_options("fx", &["currency"], &rows).len(), 1);
+    }
+
+    #[test]
+    fn label_option_id_matches_the_root_formula_and_ignores_parents() {
+        // 开关开启后对外统一用这个 id：同文案在不同父下必须相等，且等于它作为
+        // 根级选项时的 id（读端/派发共用同一个函数，不能各写一份）。
+        let root = derive_options("demo", &[], &values(&["张三"]));
+        assert_eq!(label_option_id("demo", "张三"), root[0].option_id);
+
+        let a = derive_options("demo", &["company"], &[with_ancestors(&["A公司"], "张三")]);
+        let b = derive_options("demo", &["company"], &[with_ancestors(&["B公司"], "张三")]);
+        assert_ne!(a[0].option_id, b[0].option_id, "存量父链口径必须保持不变");
+        assert_eq!(
+            label_option_id("demo", &a[0].label),
+            label_option_id("demo", &b[0].label),
+            "开关口径下同文案必须落同一个规范 id"
+        );
     }
 
     #[test]

@@ -72,6 +72,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(64)
                 .indexed(true)
                 .filterable(true),
+            // 对外投影的选项身份口径：关（默认）= 父链参与哈希，同文案不同父是
+            // 不同选项；开 = 读端与派发把同一文案折叠成一个规范 id（见
+            // `derive::label_option_id`），内部行与 `parent_key` 不变。
+            //
+            // **只能开在叶子绑定上**：开启后父控件拿到的值是规范 id，而子行存的
+            // `parent_key` 仍是父行原本的 option_id，两者会失配。写入入口
+            // `set_datasource_field_option_merge` 会拒绝有子字段的绑定。
+            merge_same_label_options => Switch::new()
+                .title("同名选项共用 ID")
+                .require(true)
+                .default(false),
             enabled => Switch::new()
                 .title("启用")
                 .require(true)
