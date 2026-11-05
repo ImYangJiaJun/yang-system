@@ -31,6 +31,7 @@ import {
 const CONFIG_LIST_PATH = "/api/v1/feishu/approval/configs/query";
 const CONFIG_UPDATE_PATH = "/api/v1/feishu/approval/configs/update";
 const CONFIG_DELETE_PATH = "/api/v1/feishu/approval/configs/delete";
+const CONFIG_CHECK_PATH = "/api/v1/feishu/approval/configs/check";
 
 afterEach(() => {
   restoreClipboard();
@@ -335,6 +336,66 @@ describe("审批派发配置页 · 列表", () => {
       ]);
       expect(body?.count_total).toBe(true);
     }
+  });
+});
+
+describe("审批派发配置页 · 一键检查", () => {
+  it("检查全部配置：列出失效配置与原因，并标出已启用", async () => {
+    const calls = stubApprovalApi({
+      configList: () => listPage(configRows()),
+      checkConfigs: () => ({
+        total: 2,
+        ok_count: 1,
+        enabled_problem_count: 1,
+        problems: [
+          {
+            config_id: 2,
+            title: "费用报销",
+            enabled: true,
+            status: "invalid",
+            reasons: ["审批控件「widget-1」不存在"],
+          },
+        ],
+      }),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+
+    await userEvent.click(screen.getByRole("button", { name: "检查全部配置" }));
+
+    // 无参数：引擎对空请求体不发 body。
+    expect(bodiesOf(calls, CONFIG_CHECK_PATH)).toEqual([undefined]);
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "共检查 2 条配置：1 条正常，1 条需要处理（其中 1 条已启用）。",
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/费用报销（#2）/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("审批控件「widget-1」不存在"),
+    ).toBeInTheDocument();
+  });
+
+  it("全部正常时只弹成功提示，不打开结果对话框", async () => {
+    stubApprovalApi({
+      configList: () => listPage(configRows()),
+      checkConfigs: () => ({
+        total: 2,
+        ok_count: 2,
+        enabled_problem_count: 0,
+        problems: [],
+      }),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+
+    await userEvent.click(screen.getByRole("button", { name: "检查全部配置" }));
+
+    expect(
+      await screen.findByText("全部 2 条配置检查通过。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 

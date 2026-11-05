@@ -39,6 +39,7 @@ export type ApprovalApiStubOptions = {
   rotateConfigToken?: Handler;
   revealConfigToken?: Handler;
   refreshNames?: Handler;
+  checkConfigs?: Handler;
   widgets?: Handler;
   requestList?: Handler;
   taskList?: Handler;
@@ -132,6 +133,11 @@ function catalogFor(options: ApprovalApiStubOptions) {
   }
   if (options.approvalWrite ?? true)
     actions.push(
+      action(
+        "feishu.approval.check_configs",
+        "POST",
+        "/api/v1/feishu/approval/configs/check",
+      ),
       action(
         "feishu.approval.refresh_names",
         "POST",
@@ -321,6 +327,14 @@ export function stubApprovalApi(
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/update")) {
         return respond(options.updateConfig, payload, { config_id: 1 });
+      }
+      if (url.endsWith("/api/v1/feishu/approval/configs/check")) {
+        return respond(options.checkConfigs, payload, {
+          total: 0,
+          ok_count: 0,
+          enabled_problem_count: 0,
+          problems: [],
+        });
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/refresh-names")) {
         return respond(options.refreshNames, payload, { incomplete_ids: [] });

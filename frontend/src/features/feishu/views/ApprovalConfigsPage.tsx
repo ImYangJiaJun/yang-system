@@ -33,7 +33,11 @@ import { FeishuOAuthCard } from "../components/FeishuOAuthCard";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { PAGE_SIZE_OPTIONS, useDebouncedValue } from "../list-query";
-import type { ApprovalConfigItem, ApprovalConfigQuery } from "../types";
+import type {
+  ApprovalConfigCheckResult,
+  ApprovalConfigItem,
+  ApprovalConfigQuery,
+} from "../types";
 
 function messageOf(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
@@ -74,6 +78,9 @@ export default function ApprovalConfigsPage() {
   } | null>(null);
   const [pending, setPending] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] =
+    useState<ApprovalConfigCheckResult | null>(null);
 
   const listQuery = useApprovalConfigList(
     { page, pageSize, search: debouncedSearch, status },
@@ -198,6 +205,22 @@ export default function ApprovalConfigsPage() {
     } finally {
       await refreshList();
       setRefreshing(false);
+    }
+  }
+  async function checkAllConfigs() {
+    setChecking(true);
+    try {
+      const result = await actions.checkConfigs();
+      if (result.problems.length === 0) {
+        setCheckResult(null);
+        toast.success(`全部 ${result.total} 条配置检查通过。`);
+      } else {
+        setCheckResult(result);
+      }
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      setChecking(false);
     }
   }
   function submitWizard() {
@@ -339,6 +362,16 @@ export default function ApprovalConfigsPage() {
                 )
               }
             />
+            {actions.canWrite && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={checking}
+                onClick={() => void checkAllConfigs()}
+              >
+                {checking ? "检查中…" : "检查全部配置"}
+              </Button>
+            )}
             {actions.canWrite && items.length > 0 && (
               <Button
                 size="sm"
@@ -520,6 +553,61 @@ export default function ApprovalConfigsPage() {
                   : confirm?.item.enabled
                     ? "确认停用"
                     : "确认启用"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={checkResult !== null}
+        onOpenChange={(open) => {
+          if (!open && !checking) setCheckResult(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>配置检查结果</DialogTitle>
+            <DialogDescription>
+              {checkResult
+                ? `共检查 ${checkResult.total} 条配置：${checkResult.okCount} 条正常，${checkResult.problems.length} 条需要处理（其中 ${checkResult.enabledProblemCount} 条已启用）。`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] space-y-3 overflow-auto">
+            {checkResult?.problems.map((problem) => (
+              <div key={problem.configId} className="rounded-md border p-3">
+                <p className="text-sm font-medium">
+                  {problem.title}（#{problem.configId}）
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    {problem.enabled ? "已启用" : "已停用"}
+                  </span>
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+                  {problem.reasons.map((reason, index) => (
+                    <li key={index}>{reason}</li>
+                  ))}
+                </ul>
+                {problem.status === "error" && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    这不是映射本身的问题：本轮取数失败。请确认数据表仍存在、应用仍有权限，然后重试。
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={checking}
+              onClick={() => setCheckResult(null)}
+            >
+              关闭
+            </Button>
+            <Button
+              variant="outline"
+              disabled={checking}
+              onClick={() => void checkAllConfigs()}
+            >
+              {checking ? "检查中…" : "重新检查"}
             </Button>
           </DialogFooter>
         </DialogContent>

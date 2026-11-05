@@ -36,8 +36,10 @@ import type {
 
 import { withStableOrder } from "./list-query";
 import type {
+  ApprovalConfigCheckResult,
   ApprovalConfigItem,
   ApprovalConfigMap,
+  ApprovalConfigProblem,
   ApprovalConfigQuery,
   ApprovalOptionSource,
   ApprovalRequestItem,
@@ -111,6 +113,8 @@ export const APPROVAL_OPERATION_IDS = {
   createConfig: "feishu.approval.create_config",
   updateConfig: "feishu.approval.update_config",
   deleteConfig: "feishu.approval.delete_config",
+  /// 一键检查全部配置：按派发链路的校验逐条重放。
+  checkConfigs: "feishu.approval.check_configs",
   refreshNames: "feishu.approval.refresh_names",
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
@@ -2277,6 +2281,25 @@ function parseApprovalConfigItem(
   };
 }
 
+function parseApprovalConfigProblem(
+  raw: Record<string, unknown>,
+): ApprovalConfigProblem | null {
+  const configId = typeof raw.config_id === "number" ? raw.config_id : null;
+  if (configId === null) return null;
+  const rawReasons = raw.reasons;
+  return {
+    configId,
+    title: asString(raw.title),
+    enabled: raw.enabled === true,
+    status: raw.status === "error" ? "error" : "invalid",
+    reasons: Array.isArray(rawReasons)
+      ? rawReasons.filter(
+          (reason): reason is string => typeof reason === "string",
+        )
+      : [],
+  };
+}
+
 function parseApprovalWidget(
   raw: Record<string, unknown>,
 ): ApprovalWidget | null {
@@ -2678,6 +2701,7 @@ export function useApprovalTasks(
 export type ApprovalActions = {
   canRead: boolean;
   canWrite: boolean;
+  checkConfigs: () => Promise<ApprovalConfigCheckResult>;
   refreshNames: (configIds: number[]) => Promise<number[]>;
   updateConfig: (
     configId: number,
@@ -2748,6 +2772,30 @@ export function useApprovalActions(): ApprovalActions {
   return {
     canRead: canReadApproval(catalogData),
     canWrite: canWriteApproval(catalogData),
+    checkConfigs: async () => {
+      const result = await invokeFeishuAction(
+        deps,
+        APPROVAL_OPERATION_IDS.checkConfigs,
+        {},
+      );
+      const data = asRecord(result.data);
+      const rawProblems = data?.problems;
+      const problems = Array.isArray(rawProblems)
+        ? rawProblems
+            .map((item) => asRecord(item))
+            .filter(
+              (item): item is Record<string, unknown> => item !== undefined,
+            )
+            .map(parseApprovalConfigProblem)
+            .filter((item): item is ApprovalConfigProblem => item !== null)
+        : [];
+      return {
+        total: asNumber(data?.total, 0),
+        okCount: asNumber(data?.ok_count, 0),
+        enabledProblemCount: asNumber(data?.enabled_problem_count, 0),
+        problems,
+      };
+    },
     refreshNames: async (configIds: number[]) => {
       const result = await invokeFeishuAction(
         deps,

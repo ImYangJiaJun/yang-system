@@ -1194,6 +1194,25 @@ export type ApprovalConfigQuery = {
   approvalCode?: string;
 };
 
+/// 一条检查出问题的配置（`check_configs` 的 `problems[]`）。
+export type ApprovalConfigProblem = {
+  configId: number;
+  title: string;
+  enabled: boolean;
+  /// `invalid` = 配置本身有问题（派发必失败）；`error` = 本轮没能完成检查。
+  status: "invalid" | "error";
+  reasons: string[];
+};
+
+/// 批量检查结果（`check_configs`）。只返回有问题的配置。
+export type ApprovalConfigCheckResult = {
+  total: number;
+  okCount: number;
+  /// 有问题的配置里已启用的条数：它们下一次派发就会失败。
+  enabledProblemCount: number;
+  problems: ApprovalConfigProblem[];
+};
+
 /// 审批定义控件（`list_widgets` 的 `widgets[]`）。
 export type ApprovalWidget = {
   id: string;
