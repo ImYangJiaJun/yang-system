@@ -13,6 +13,13 @@
 #   ./deploy-blue-green.sh logs [container]       # 追踪容器实时日志（Ctrl+C 退出）
 #   ./deploy-blue-green.sh refresh                # 刷新配置 / 重置数据库（见下）
 #
+# 单侧部署（DEPLOY_PART=frontend|backend，由本机 deploy.ps1 -Mode frontend/backend 传入）：
+#   DEPLOY_PART=frontend ./deploy-blue-green.sh deploy
+#       只替换前端容器：跳过后端只读冒烟与数据预检，后端容器**全程不重启**。
+#   DEPLOY_PART=backend  ./deploy-blue-green.sh deploy
+#       镜像包里只有后端；前端容器**仍会被重建**——前端用 --network container:<同色后端>
+#       共享网络命名空间，后端换容器后旧前端就再也接不上，这是拓扑决定的，不是实现选择。
+#
 # refresh 由两个环境变量选动作，至少要给一个（通常由本机 deploy.ps1 的
 # -SyncConfig / -ResetDb 开关驱动，也可以在这里直接调用）：
 #   SYNC_CONFIG=1                  把 $APP_DIR/config.cloud.toml.upload（先 scp 上来）
@@ -23,7 +30,7 @@
 #
 # 可用环境变量覆盖：APP_DIR / NET / CONFIG_FILE / BACKEND_TAR / 各容器名 /
 #   LIVE_HOST_PORT / GREEN_HOST_PORT / METRICS_*_PORT / BIND_ADDR /
-#   SYNC_CONFIG / RESET_DB / RESET_DB_CONFIRM / STAGED_CONFIG
+#   SYNC_CONFIG / RESET_DB / RESET_DB_CONFIRM / STAGED_CONFIG / DEPLOY_PART
 #
 # -----------------------------------------------------------------------------
 # 拓扑（每个颜色是「一对」容器，前端与后端共享网络命名空间）
@@ -106,6 +113,11 @@ RESET_DB_CONFIRM="${RESET_DB_CONFIRM:-}"
 # 暂存的新配置文件名（相对 APP_DIR）。deploy.ps1 用 scp 把它传上来，refresh 校验后就地装。
 STAGED_CONFIG="${STAGED_CONFIG:-${CONFIG_FILE}.upload}"
 
+# 单侧部署：只更新前端或只更新后端（本机 deploy.ps1 -Mode frontend/backend 传入）。
+# 空 = 两侧都更新。frontend 时后端容器全程不碰；backend 时前端容器必须跟着重建
+# （见文件头的拓扑说明）。
+DEPLOY_PART="${DEPLOY_PART:-}"
+
 # ---------- 输出 ----------
 C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_RST=$'\033[0m'
 info() { echo -e "${C_BLU}[INFO]${C_RST} $*"; }
@@ -113,6 +125,11 @@ ok()   { echo -e "${C_GRN}[ OK ]${C_RST} $*"; }
 warn() { echo -e "${C_YEL}[WARN]${C_RST} $*"; }
 err()  { echo -e "${C_RED}[ERR ]${C_RST} $*" >&2; }
 die()  { err "$*"; exit 1; }
+
+case "$DEPLOY_PART" in
+  ''|frontend|backend) ;;
+  *) die "DEPLOY_PART 只能是 frontend 或 backend（当前：$DEPLOY_PART）" ;;
+esac
 
 # ---------- 工具 ----------
 need()    { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1，请先安装"; }
@@ -413,6 +430,18 @@ start_pair() {
     --stop-timeout 310 \
     "$FRONTEND_IMAGE" >/dev/null || return 1
   ok "前端已启动：$frontend（共享 ${backend} 的网络命名空间，不单独发布端口）"
+}
+
+# 只重建前端：加入**线上后端**的网络命名空间，后端容器保持不变。
+# （端口由 netns 拥有者发布，nginx 只是在里面监听 8081；换前端不影响后端。）
+start_frontend_only() {
+  local frontend="$1"
+  docker run -d --name "$frontend" \
+    --network "container:${LIVE_BACKEND}" \
+    --restart unless-stopped \
+    --stop-timeout 310 \
+    "$FRONTEND_IMAGE" >/dev/null || return 1
+  ok "前端已启动：$frontend（共享 ${LIVE_BACKEND} 的网络命名空间，后端未重启）"
 }
 
 stop_pair() {
@@ -1321,7 +1350,13 @@ prepare() {
   # 配置与存量数据都在**起绿容器之前**只读预检；失败即中止，线上不受影响。
   preflight_release_config
   # 冒烟不得建库；首次部署先运行 infra-up，库缺失由只读检查明确失败。
-  preflight_release_data
+  # 只更新前端时不碰数据库：数据预检针对的是后端 schema 迁移，拿它挡前端部署只会
+  # 把「数据库暂时不可用」变成「前端小修复也发不出去」。
+  if [ "$DEPLOY_PART" = frontend ]; then
+    info "DEPLOY_PART=frontend：跳过后端数据预检（前端不读写数据库）"
+  else
+    preflight_release_data
+  fi
   # 优先用镜像包；包不在时退回复用本机已有镜像。
   # **上传成功后两侧都会删包**（deploy.ps1 删本机的，cmd_cutover 删服务器上的），
   # 所以「镜像没变、只想改运行时参数（宿主端口 / BIND_ADDR / 环境变量）」的重新部署
@@ -1339,6 +1374,19 @@ prepare() {
   else
     die "既找不到镜像包 $BACKEND_TAR，本机也没有可用的 $BACKEND_IMAGE / $FRONTEND_IMAGE。请先在本机跑 deploy.ps1 上传。"
   fi
+
+  # 单侧部署的包里只有一侧镜像：没被更新的那一侧必须早就在服务器上，否则后面的
+  # start_pair 会在「镜像不存在」上失败——现在就说清楚，别等切流量。
+  case "$DEPLOY_PART" in
+    frontend)
+      docker image inspect "$BACKEND_IMAGE" >/dev/null 2>&1 \
+        || die "DEPLOY_PART=frontend 只上传前端镜像，但服务器上没有 $BACKEND_IMAGE；请先做一次完整部署"
+      ;;
+    backend)
+      docker image inspect "$FRONTEND_IMAGE" >/dev/null 2>&1 \
+        || die "DEPLOY_PART=backend 只上传后端镜像，但服务器上没有 $FRONTEND_IMAGE；请先做一次完整部署"
+      ;;
+  esac
 
   verify_runtime_config
 
@@ -1396,6 +1444,13 @@ verify_smoke_evidence() {
   wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 15
 }
 
+# 只更新前端时的证据：没有后端冒烟报告，只认「绿前端确实在跑、能出首页」。
+verify_frontend_only_evidence() {
+  [ "$(docker inspect -f '{{.State.Status}}' "$GREEN_FRONTEND")" = running ] \
+    || { err "绿前端容器没有运行"; return 1; }
+  wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 15
+}
+
 cmd_smoke() {
   need timeout
   prepare
@@ -1408,6 +1463,22 @@ cmd_smoke() {
     fi
   fi
   remove_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
+  if [ "$DEPLOY_PART" = frontend ]; then
+    # ---- 只更新前端：后端容器全程不碰，所以没有后端冒烟 ----
+    exists "$LIVE_BACKEND" || die "只更新前端需要线上容器 $LIVE_BACKEND 存在；请先做一次完整部署"
+    exists "$LIVE_FRONTEND" || die "只更新前端需要线上容器 $LIVE_FRONTEND 存在；请先做一次完整部署"
+    # 独立 nginx 只验证静态产物；探针端口仅供本机。
+    docker run -d --name "$GREEN_FRONTEND" --network "$NET" \
+      -p "127.0.0.1:${GREEN_HOST_PORT}:8081" --stop-timeout 5 \
+      "$FRONTEND_IMAGE" >/dev/null || die "绿前端容器启动失败"
+    wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 15 || die "前端静态冒烟失败"
+    # 记录里的后端 = 当前线上后端的镜像（切流量时它不动，但回退记录需要它）。
+    record_release green "$LIVE_BACKEND" "$GREEN_FRONTEND" || die "绿发布记录写入失败"
+    verify_frontend_only_evidence || die "冒烟证据验证失败"
+    ok "前端静态检查通过；后端容器保持运行，cutover 只替换前端"
+    echo "   切流量：$0 cutover"
+    return 0
+  fi
   run_read_only_smoke
   # 独立 nginx 仅验证静态产物；没有 backend netns，API 不可达。探针端口仅供本机。
   docker run -d --name "$GREEN_FRONTEND" --network "$NET" \
@@ -1430,6 +1501,24 @@ OLD_FRONTEND_ID=""
 cutover_on_exit() {
   local rc=$?
   if [ "$CUTOVER_ACTIVE" = 1 ] && [ "$rc" -ne 0 ]; then
+    if [ "$DEPLOY_PART" = frontend ]; then
+      # 只更新前端：后端从未改动，把旧前端放回去就是完整恢复，不需要 schema 判断。
+      err "切流量失败；正在把旧前端放回线上（后端未受影响）"
+      local current
+      current=$(docker inspect -f '{{.Id}}' "$LIVE_FRONTEND" 2>/dev/null) || current=""
+      if [ -n "$current" ] && [ "$current" != "$OLD_FRONTEND_ID" ]; then
+        docker rm -f "$LIVE_FRONTEND" >/dev/null 2>&1 || warn "失败的新前端未能删除，请立即检查"
+      fi
+      if exists "$BLUE_FRONTEND"; then
+        docker rename "$BLUE_FRONTEND" "$LIVE_FRONTEND" >/dev/null 2>&1 || warn "旧前端改名失败，请手工恢复"
+        docker start "$LIVE_FRONTEND" >/dev/null 2>&1 || warn "旧前端启动失败，请手工恢复"
+        health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "恢复旧前端后" || warn "恢复旧前端后健康检查未通过，请立即检查"
+      else
+        warn "找不到旧前端容器 $BLUE_FRONTEND，请手工恢复"
+      fi
+      release_deploy_lock
+      return "$rc"
+    fi
     err "切流量失败；保留原容器 ID 与 .releases/blue 配置快照"
     # 只停新后端，不能误删尚未 rename 的原容器。
     local current
@@ -1448,9 +1537,43 @@ cutover_on_exit() {
 cmd_cutover() {
   need docker; need python3
   assert_binding_policy
-  exists "$GREEN_BACKEND" || die "缺少只读冒烟容器，请先 smoke"
+  if [ "$DEPLOY_PART" != frontend ]; then
+    exists "$GREEN_BACKEND" || die "缺少只读冒烟容器，请先 smoke"
+  fi
   load_release green || die "缺少有效冒烟发布记录，请重新 smoke"
   assert_release_config green || die "配置已改变，拒绝切流量"
+  if [ "$DEPLOY_PART" = frontend ]; then
+    # ---- 只更新前端：后端容器全程保持运行 ----
+    [ "$(docker inspect -f '{{.Image}}' "$GREEN_FRONTEND")" = "$FRONTEND_IMAGE" ] \
+      || die "绿前端镜像与冒烟记录不一致"
+    verify_frontend_only_evidence || die "缺少有效前端冒烟证据，请重新 smoke"
+    exists "$LIVE_BACKEND" || die "线上后端容器不见了，拒绝只更新前端"
+    exists "$LIVE_FRONTEND" || die "线上前端容器不见了，请重新完整部署"
+    [ -f "$APP_DIR/.releases/live" ] || die "缺少线上配置快照，需重新 smoke"
+    [ "$(docker inspect -f '{{.Image}}' "$LIVE_BACKEND")" = "$BACKEND_IMAGE" ] \
+      || die "线上后端镜像与冒烟记录不一致（冒烟之后被换过？），请重新 smoke"
+
+    OLD_FRONTEND_ID=$(docker inspect -f '{{.Id}}' "$LIVE_FRONTEND")
+    OLD_BACKEND_ID=$(docker inspect -f '{{.Id}}' "$LIVE_BACKEND")
+    cp "$APP_DIR/.releases/live" "$APP_DIR/.releases/blue"
+    # 回退记录里的后端就是这台没被动过的容器：rollback 会停它再原样启回来。
+    printf '%s\n' "$OLD_BACKEND_ID" > "$APP_DIR/.releases/blue-backend-container"
+    printf '%s\n' "$OLD_FRONTEND_ID" > "$APP_DIR/.releases/blue-frontend-container"
+
+    CUTOVER_ACTIVE=1
+    trap cutover_on_exit EXIT
+    if exists "$BLUE_FRONTEND"; then docker rm -f "$BLUE_FRONTEND" >/dev/null || die "旧蓝前端清理失败"; fi
+    docker stop --time 310 "$LIVE_FRONTEND" >/dev/null || die "旧前端停止失败"
+    docker rename "$LIVE_FRONTEND" "$BLUE_FRONTEND" || die "旧前端改名失败"
+    docker rm -f "$GREEN_FRONTEND" >/dev/null 2>&1 || true
+    start_frontend_only "$LIVE_FRONTEND" || die "新前端启动失败"
+    health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "线上（仅前端）" || die "新前端健康检查失败"
+    cp "$APP_DIR/.releases/green" "$APP_DIR/.releases/live"
+    CUTOVER_ACTIVE=0
+    [ ! -e "$BACKEND_TAR" ] || rm -f "$BACKEND_TAR"
+    ok "前端已更新：$FRONTEND_IMAGE；后端容器未重启（$BACKEND_IMAGE）"
+    return 0
+  fi
   [ "$(docker inspect -f '{{.Image}}' "$GREEN_BACKEND")" = "$BACKEND_IMAGE" ] \
     && [ "$(docker inspect -f '{{.Image}}' "$GREEN_FRONTEND")" = "$FRONTEND_IMAGE" ] \
     || die "绿容器镜像与冒烟记录不一致"
@@ -1749,6 +1872,9 @@ main() {
   smoke  [tar_file]      载入镜像并起绿容器冒烟（不动线上）
   cutover                冒烟通过后切流量（绿 → 线上）
   deploy [tar_file]      一条龙：载入 → 冒烟 → 切流量
+                         DEPLOY_PART=frontend 时只替换前端容器（后端全程不重启）；
+                         DEPLOY_PART=backend 时镜像包里只有后端，前端容器仍会重建
+                         （前端共享后端 netns，后端换容器后旧前端接不上）
   rollback               回退到上一版本（蓝容器）
   refresh                刷新配置和/或重置数据库（由本机 deploy.ps1 的 -SyncConfig /
                          -ResetDb 驱动，也可在此直接调用）。用环境变量选动作，至少一个：

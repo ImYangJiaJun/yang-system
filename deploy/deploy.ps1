@@ -26,6 +26,10 @@
 #   .\deploy.ps1 -Mode infra      # 仅远程启动 MySQL + Redis（首次部署时用）
 #   .\deploy.ps1 -Mode logs       # 追踪线上后端容器日志（Ctrl+C 退出）
 #   .\deploy.ps1 -Mode logs -LogContainer yang-backend-green   # 追踪绿容器
+#   .\deploy.ps1 -Mode frontend   # 只构建/上传/部署前端：后端容器全程不重启
+#   .\deploy.ps1 -Mode backend    # 只构建/上传后端：前端容器仍会随后端一起重建
+#                                 #   （前端用 --network container:<后端> 共享网络命名空间，
+#                                 #    后端换容器后旧前端就接不上了——拓扑决定，非实现选择）
 #   .\deploy.ps1 -SkipBuild       # 跳过构建+导出，复用已有镜像包直接上传（上传/远程失败后的重试）
 #   .\deploy.ps1 -AllowDirty      # 工作区有未提交改动也构建部署（镜像标记 source-dirty=true；仅联调/紧急验证，制品不可复现，构建期间源码再变会中止）
 #
@@ -57,7 +61,7 @@
 # =============================================================================
 [CmdletBinding()]
 param(
-    [ValidateSet('deploy','upload','smoke','cutover','rollback','status','infra','logs')]
+    [ValidateSet('deploy','upload','smoke','cutover','rollback','status','infra','logs','frontend','backend')]
     [string]$Mode = 'deploy',
 
     # 跳过 [1/5]~[3/5]（构建 + 导出），复用已存在的 $TarFile 直接上传。
@@ -67,7 +71,7 @@ param(
     # 允许从**带未提交改动的工作区**构建（默认关闭 = 仍要求干净源码）。
     # 打开后镜像标记 io.yang-system.source-dirty=true，制品**不可复现**——只用于联调 / 紧急验证，
     # 正式发布应先提交再构建。构建前后仍核对 HEAD + 工作区指纹，构建期间源码（含未提交内容）
-    # 再变一样会中止导出。只对会构建的路径有意义（-Mode deploy/upload/smoke 且不带 -SkipBuild）。
+    # 再变一样会中止导出。只对会构建的路径有意义（-Mode deploy/upload/smoke/frontend/backend 且不带 -SkipBuild）。
     [switch]$AllowDirty,
 
     # 仅在核对锁内 schema 记录与旧写者兼容性之后给出；不是自动兼容性证明。
@@ -151,6 +155,12 @@ $ErrorActionPreference = 'Stop'
 # -SyncConfig / -ResetDb 是**纯运维动作**，不该顺带触发 8~9 分钟的构建。
 $ModeExplicit = $PSBoundParameters.ContainsKey('Mode')
 
+# 单侧部署用**独立的镜像包名**：否则 -SkipBuild 可能复用「另一侧」留下的包，
+# 结果部署了一个根本没变的镜像，还打印成功。显式传了 -TarFile 时以调用方为准。
+if (-not $PSBoundParameters.ContainsKey('TarFile') -and $ModeExplicit -and $Mode -in @('frontend','backend')) {
+    $TarFile = "yang-system-images-$Mode.tar.gz"
+}
+
 # 破坏性动作的交互确认是否已通过。只有它为真，才把 RESET_DB_CONFIRM=yes 转发给远端——
 # 于是「没问过」与「用户不同意」都拿不到那个值，远端会据此拒绝执行。
 $ResetConfirmed = $false
@@ -207,10 +217,10 @@ if ($AllowDirty) {
     # 会构建的路径：显式 -Mode deploy/upload/smoke，或不给 -Mode（且没开 -SyncConfig/-ResetDb）
     # 时的默认完整部署；两种情况都还得不带 -SkipBuild。
     $willBuild = (-not $SkipBuild) -and (
-        ($ModeExplicit -and $Mode -in @('deploy','upload','smoke')) -or
+        ($ModeExplicit -and $Mode -in @('deploy','upload','smoke','frontend','backend')) -or
         (-not $ModeExplicit -and -not $postRequested))
     if (-not $willBuild) {
-        throw "-AllowDirty 只影响构建路径（-Mode deploy/upload/smoke，且不带 -SkipBuild）。`n" +
+        throw "-AllowDirty 只影响构建路径（-Mode deploy/upload/smoke/frontend/backend，且不带 -SkipBuild）。`n" +
               "      当前组合不会构建：-Mode $Mode、-SkipBuild=$SkipBuild、附加动作=$postRequested。`n" +
               "      请去掉 -AllowDirty（不构建时它毫无作用），或改成会构建的调用方式。"
     }
@@ -287,6 +297,8 @@ function Get-RemoteEnv {
     }
     # 留空 = 不传，让 deploy-blue-green.sh 的默认值生效（默认值只有一处事实源）。
     if ($LiveHostPort) { $pairs['LIVE_HOST_PORT'] = $LiveHostPort }
+    # 单侧部署：远端据此只替换一侧；其它 Mode 不传（远端默认两侧）。
+    if ($Mode -in @('frontend','backend')) { $pairs['DEPLOY_PART'] = $Mode }
     # refresh 子命令的动作开关：只有远端的 cmd_refresh 会读它们，其余子命令直接忽略。
     # RESET_DB_CONFIRM 是远端**必填**的确认闸门，只在本地交互确认通过后才转发——
     # 少了它远端会拒绝执行清库（fail-closed），这正是我们要的。
@@ -578,7 +590,7 @@ function Invoke-PostSteps {
 # 文件头）。所以服务器上还没有配置时，马上要跑的远端 deploy/smoke 会卡在 require_config 上——
 # 在这里就判掉，别让人等完 8~9 分钟的构建才撞见它（这段以前放在上传段，被 2026-09-24 复审
 # 指出与它自己的注释矛盾）。
-if ($SyncConfig -and $ModeExplicit -and $Mode -in @('deploy','smoke') -and -not (Test-RemoteConfigPresent)) {
+if ($SyncConfig -and $ModeExplicit -and $Mode -in @('deploy','smoke','frontend','backend') -and -not (Test-RemoteConfigPresent)) {
     throw "服务器上还没有 config.cloud.toml，而 -Mode $Mode 一上来就要用它（远端会先做配置校验）。`n" +
           "      先单独把配置推上去，再回来部署：`n" +
           "        .\deploy.ps1 -SyncConfig     # 只推配置，不构建`n" +
@@ -637,6 +649,10 @@ if ($postRequested -and -not $ModeExplicit) {
 #    （实测报 "resolve : GetFileAttributesEx deploy: ... cannot find the file"）。
 $tarGz = Join-Path $scriptDir $TarFile
 
+# 单侧模式只构建需要更新的那一侧；另一侧的镜像在服务器上原样保留。
+$buildBackend  = -not ($ModeExplicit -and $Mode -eq 'frontend')
+$buildFrontend = -not ($ModeExplicit -and $Mode -eq 'backend')
+
 if ($SkipBuild) {
     # 复用上一次导出的镜像包。典型场景：一次完整部署在**上传或远程步骤**失败，
     # 而改变的东西没有变——构建要 8~9 分钟（网络受限时更久），重试不该再付一遍。
@@ -669,13 +685,23 @@ else {
     $buildLabels = @('--label', "org.opencontainers.image.revision=$($applicationIdentity.Revision)",
         '--label', "io.yang-system.framework-revision=$($frameworkIdentity.Revision)",
         '--label', "io.yang-system.source-dirty=$dirtyLabel", '--label', 'io.yang-system.validation=local-build')
-    Write-Host "`n==> [1/5] 构建后端镜像 $BackendImage" -ForegroundColor Cyan
-    Write-Host "    上下文：$libYangRoot（必须在仓库根，前端/后端都靠它解析 ../../crates）"
-    Exec { docker build @buildLabels -f (Join-Path $libYangRoot $backendDockerfile) -t $BackendImage $libYangRoot }
+    if ($buildBackend) {
+        Write-Host "`n==> [1/5] 构建后端镜像 $BackendImage" -ForegroundColor Cyan
+        Write-Host "    上下文：$libYangRoot（必须在仓库根，前端/后端都靠它解析 ../../crates）"
+        Exec { docker build @buildLabels -f (Join-Path $libYangRoot $backendDockerfile) -t $BackendImage $libYangRoot }
+    }
+    else {
+        Write-Host "`n==> [1/5] 跳过后端构建（-Mode frontend：后端镜像保持不变）" -ForegroundColor Yellow
+    }
 
-    Write-Host "`n==> [2/5] 构建前端镜像 $FrontendImage" -ForegroundColor Cyan
-    Write-Host "    上下文：$frontendDir"
-    Exec { docker build @buildLabels -f (Join-Path $frontendDir 'deploy/Dockerfile') -t $FrontendImage $frontendDir }
+    if ($buildFrontend) {
+        Write-Host "`n==> [2/5] 构建前端镜像 $FrontendImage" -ForegroundColor Cyan
+        Write-Host "    上下文：$frontendDir"
+        Exec { docker build @buildLabels -f (Join-Path $frontendDir 'deploy/Dockerfile') -t $FrontendImage $frontendDir }
+    }
+    else {
+        Write-Host "`n==> [2/5] 跳过前端构建（-Mode backend：前端镜像保持不变）" -ForegroundColor Yellow
+    }
 
     # 构建后再算一次身份：干净构建下 Get-BuildIdentity 仍走 Get-CleanRevision（脏了直接抛错），
     # 保证与以前一致；-AllowDirty 下则比对 HEAD + 工作区指纹，能抓住「构建期间同一文件又被改」。
@@ -689,7 +715,10 @@ else {
     $tarRaw = Join-Path $scriptDir 'yang-system-images.tar'
     if (Test-Path $tarGz) { Remove-Item $tarGz }
     if (Test-Path $tarRaw) { Remove-Item $tarRaw }
-    Exec { docker save -o $tarRaw $BackendImage $FrontendImage }
+    $imagesToSave = @()
+    if ($buildBackend)  { $imagesToSave += $BackendImage }
+    if ($buildFrontend) { $imagesToSave += $FrontendImage }
+    Exec { docker save -o $tarRaw @imagesToSave }
     $in  = [System.IO.File]::OpenRead($tarRaw)
     $out = [System.IO.File]::Create($tarGz)
     $gz  = [System.IO.Compression.GZipStream]::new($out, [System.IO.Compression.CompressionMode]::Compress)
@@ -755,8 +784,13 @@ if ($Mode -eq 'upload') {
     Write-Host "  服务器上：cd $RemoteDir && chmod +x $DeployScript && $(Get-RemoteEnv) ./$DeployScript smoke"
     exit 0
 }
-Write-Host "`n==> [5/5] 远程执行 $Mode" -ForegroundColor Cyan
-Invoke-Remote "./$DeployScript $Mode"
+# frontend / backend 是单侧部署：远端子命令仍是 deploy，替换哪一侧由 DEPLOY_PART 决定。
+$remoteMode = $Mode
+if ($Mode -in @('frontend','backend')) { $remoteMode = 'deploy' }
+$remoteLabel = $remoteMode
+if ($remoteMode -ne $Mode) { $remoteLabel = "$remoteMode（$Mode 单侧）" }
+Write-Host "`n==> [5/5] 远程执行 $remoteLabel" -ForegroundColor Cyan
+Invoke-Remote "./$DeployScript $remoteMode"
 # 附加动作在**部署成功之后**才执行。Invoke-Remote 失败会抛错终止整个脚本，所以
 # 「部署失败 → 仍然清了库」这种情况不会发生。
 Invoke-PostSteps

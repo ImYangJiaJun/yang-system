@@ -121,6 +121,9 @@ cd <lib_yang>\project\yang-system\deploy
 .\deploy.ps1 -Mode status    # 看容器/镜像/网络状态
 .\deploy.ps1 -Mode logs      # 追踪线上后端日志（Ctrl+C 退出）
 .\deploy.ps1 -Mode logs -LogContainer yang-backend-green   # 追踪绿容器
+.\deploy.ps1 -Mode frontend  # 只构建/上传/部署前端：后端容器全程不重启
+.\deploy.ps1 -Mode backend   # 只构建/上传后端：前端容器仍会随后端一起重建
+                             #   （前端共享后端 netns，后端换容器后旧前端接不上）
 .\deploy.ps1 -SkipBuild      # 跳过构建，复用上次导出的镜像包，直接上传（重试用）
 .\deploy.ps1 -SyncConfig     # 推本机配置到服务器并热替换（不构建）
 .\deploy.ps1 -ResetDb        # 清空本系统的库 + Redis（不构建），由应用启动时重建 schema
