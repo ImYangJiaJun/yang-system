@@ -162,3 +162,15 @@ describe("兜底界面的接线", () => {
     ).toHaveTextContent("正在加载页面…");
   });
 });
+
+describe("未匹配路径与渲染异常有站内兜底", () => {
+  it("未知路径显示可读的 404，而不是英文默认屏", async () => {
+    renderTestApp({ path: "/definitely-not-a-page", authenticated: true });
+    expect(
+      await screen.findByRole("heading", { name: "页面不存在" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "返回应用中心" }),
+    ).toBeInTheDocument();
+  });
+});

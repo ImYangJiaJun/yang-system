@@ -235,3 +235,39 @@ describe("树形表格安全降级", () => {
     expect(queried.rows).toBe(cyclic);
   });
 });
+
+describe("时间列区间筛选", () => {
+  const timeColumn = {
+    field: "created_at",
+    title: "创建时间",
+    description: "",
+    widget: "date_time" as const,
+    required: false,
+    searchable: false,
+    filterable: true,
+    sortable: true,
+  };
+
+  it("上界补到当天最后一秒，否则「包含结束日期」会漏掉当天记录", () => {
+    const lo = Math.floor(new Date(2026, 0, 1).getTime() / 1000);
+    const hi = Math.floor(new Date(2026, 0, 2).getTime() / 1000);
+    expect(
+      buildWhereClause({ created_at: { operator: "range", value: [lo, hi] } }, [
+        timeColumn,
+      ]),
+    ).toEqual({
+      type: "between",
+      field: "created_at",
+      lo,
+      hi: hi + 86_399,
+    });
+  });
+
+  it("非时间列的区间原样下发", () => {
+    expect(
+      buildWhereClause({ score: { operator: "range", value: [10, 20] } }, [
+        { ...timeColumn, field: "score", widget: "integer" },
+      ]),
+    ).toEqual({ type: "between", field: "score", lo: 10, hi: 20 });
+  });
+});

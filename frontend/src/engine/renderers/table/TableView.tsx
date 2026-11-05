@@ -11,6 +11,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
@@ -295,18 +302,21 @@ export function TableView({
         <span className="text-muted-foreground">
           第 {query.state.page} / {query.pageCount} 页 · 共 {query.total} 项
         </span>
-        <select
-          className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-          aria-label="每页条数"
-          value={query.state.pageSize}
-          onChange={(event) => query.changePageSize(Number(event.target.value))}
+        <Select
+          value={String(query.state.pageSize)}
+          onValueChange={(value) => query.changePageSize(Number(value))}
         >
-          {query.pageSizeOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger size="sm" aria-label="每页条数" className="w-20">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {query.pageSizeOptions.map((option) => (
+              <SelectItem key={option.value} value={String(option.value)}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button
           variant="outline"
           size="sm"

@@ -19,6 +19,10 @@ import type {
   ActionDemoSchema,
   FormFieldSchema,
 } from "@/engine/contracts/ui-catalog";
+import {
+  fromDateTimeLocalValue,
+  toDateTimeLocalValue,
+} from "./date-time-value";
 import { RelationSelect } from "./RelationSelect";
 import { resolveFormControl } from "./form-control";
 
@@ -248,10 +252,10 @@ function FieldControl({
         id={id}
         type="datetime-local"
         disabled={disabled}
-        value={
-          typeof value === "string" || typeof value === "number" ? value : ""
+        value={toDateTimeLocalValue(value)}
+        onChange={(event) =>
+          onChange(fromDateTimeLocalValue(event.target.value))
         }
-        onChange={(event) => onChange(event.target.value || undefined)}
       />
     );
   }
@@ -362,6 +366,9 @@ function FileInput({
 }
 
 /// JSON 控件：草稿失焦时解析，非法 JSON 就地提示（对齐旧 SchemaField 的 commitJson）。
+///
+/// 草稿必须在**外部值变化**时跟随：父组件重置、换行回填、切换记录都会改写 value。
+/// 以前只靠 onFocus 重取，用户会看着上一份草稿提交这一份值。
 function JsonDraftInput({
   id,
   value,
@@ -373,14 +380,27 @@ function JsonDraftInput({
   onChange: (value: unknown) => void;
   disabled?: boolean;
 }) {
-  const [draft, setDraft] = useState(() =>
-    value === undefined ? "" : JSON.stringify(value, null, 2),
-  );
-  const [error, setError] = useState("");
   const serialized = useMemo(
     () => (value === undefined ? "" : JSON.stringify(value, null, 2)),
     [value],
   );
+  const [draft, setDraft] = useState(serialized);
+  const [error, setError] = useState("");
+  // 外部值与草稿不一致且草稿不是"用户正在编辑的等价 JSON"时同步草稿。
+  // 用序列化结果比较，避免对象引用变化本身触发覆盖。
+  const [syncedFrom, setSyncedFrom] = useState(serialized);
+  if (serialized !== syncedFrom) {
+    setSyncedFrom(serialized);
+    if (draft !== serialized) {
+      try {
+        if (JSON.stringify(JSON.parse(draft)) !== serialized)
+          setDraft(serialized);
+      } catch {
+        setDraft(serialized);
+      }
+      setError("");
+    }
+  }
 
   return (
     <div className="space-y-1">
@@ -390,7 +410,6 @@ function JsonDraftInput({
         disabled={disabled}
         className="border-input flex w-full rounded-md border bg-transparent px-3 py-2 font-mono text-xs shadow-xs outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:opacity-50"
         value={draft}
-        onFocus={() => setDraft(serialized)}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           if (!draft.trim()) {

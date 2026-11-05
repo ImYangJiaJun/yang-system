@@ -79,6 +79,10 @@ export function ActionDialog({
 }
 
 /// 危险操作确认对话框（对齐旧 ActionConfirmationDialog 语义）。
+///
+/// 确认按钮的强调由 `appearance.emphasis` 决定：只有声明为 `danger` 的 Action
+/// 才画成破坏性按钮。以前写死 destructive，可逆操作（停用/启用）也被画成
+/// 「不可挽回」，业务页因此各自重写确认框（见 features/feishu/components/ConfirmDialog.tsx）。
 export function ConfirmActionDialog({
   presentation,
   onSettle,
@@ -86,6 +90,7 @@ export function ConfirmActionDialog({
   presentation: ActionPresentationSchema | null;
   onSettle: (confirmed: boolean) => void;
 }) {
+  const danger = presentation?.appearance?.emphasis === "danger";
   return (
     <Dialog
       open={Boolean(presentation)}
@@ -104,7 +109,10 @@ export function ConfirmActionDialog({
           <Button variant="ghost" onClick={() => onSettle(false)}>
             取消
           </Button>
-          <Button variant="destructive" onClick={() => onSettle(true)}>
+          <Button
+            variant={danger ? "destructive" : "default"}
+            onClick={() => onSettle(true)}
+          >
             确认
           </Button>
         </DialogFooter>

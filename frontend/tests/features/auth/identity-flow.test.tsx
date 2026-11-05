@@ -167,7 +167,8 @@ describe("身份切换", () => {
       expect(router.state.location.search).toBe("?landing=console"),
     );
     expect(router.state.location.pathname).toBe("/m/account.user");
-    await user.click(screen.getByRole("button", { name: "账号菜单" }));
+    // ModulePage 现在是路由级 lazy：跳转完成前仍显示上一屏，必须等它挂载。
+    await user.click(await screen.findByRole("button", { name: "账号菜单" }));
     await user.click(await screen.findByRole("menuitem", { name: "平台管理" }));
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/m/admin.user"),
@@ -197,8 +198,10 @@ describe("身份切换", () => {
       expect(router.state.location.pathname).toBe("/m/account.user");
     });
     expect(loadStoredIdentity()).toBe("user");
-    // 导航只含当前身份模块。
-    expect(screen.getByRole("link", { name: "账号中心" })).toBeInTheDocument();
+    // 导航只含当前身份模块。ModulePage 路由级 lazy，等它挂载后再看侧边栏。
+    expect(
+      await screen.findByRole("link", { name: "账号中心" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("link", { name: "平台账号" }),
     ).not.toBeInTheDocument();

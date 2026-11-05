@@ -57,6 +57,20 @@ function actionLabel(presentation: ActionPresentationSchema) {
   return presentation.title || presentation.operation_id;
 }
 
+/// 行内单元格的固定列样式，与表头同一套定位（见 stickySide 分支）。
+function stickyClassFor(
+  view: TableViewSchema,
+  field: string,
+): string | undefined {
+  const sticky = view.columns.find((column) => column.field === field)?.display
+    ?.sticky;
+  if (sticky === "left")
+    return "sticky left-0 z-10 bg-background shadow-[inset_-1px_0_0_var(--border)]";
+  if (sticky === "right")
+    return "sticky right-0 z-10 bg-background shadow-[inset_1px_0_0_var(--border)]";
+  return undefined;
+}
+
 export function DataGrid({
   view,
   rows,
@@ -219,6 +233,8 @@ export function DataGrid({
                     ? view.columns.find((c) => c.field === header.column.id)
                     : undefined;
                 const sortable = column?.sortable;
+                // 后端声明了固定列就照做；以前 sticky 只是契约里的一个装饰字段，从不渲染。
+                const stickySide = column?.display?.sticky;
                 return (
                   <TableHead
                     key={header.id}
@@ -233,6 +249,10 @@ export function DataGrid({
                     className={cn(
                       column?.display?.align === "right" && "text-right",
                       column?.display?.align === "center" && "text-center",
+                      stickySide === "left" &&
+                        "sticky left-0 z-20 bg-background shadow-[inset_-1px_0_0_var(--border)]",
+                      stickySide === "right" &&
+                        "sticky right-0 z-20 bg-background shadow-[inset_1px_0_0_var(--border)]",
                     )}
                   >
                     {sortable ? (
@@ -295,6 +315,7 @@ export function DataGrid({
                           }
                         : undefined
                     }
+                    className={cn(stickyClassFor(view, cell.column.id))}
                   >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </TableCell>

@@ -55,7 +55,7 @@ export function buildListActionValues(
       : state.pageSize,
     search: state.search.trim() || null,
     // 与旧实现一致：无筛选条件时 where 为 undefined，序列化时整个键省略（不下发 null）。
-    where: buildWhereClause(state.filters),
+    where: buildWhereClause(state.filters, view.columns),
     order_by: state.orderBy.map((item) => ({
       field: item.field,
       direction: item.direction === "desc" ? "Desc" : "Asc",

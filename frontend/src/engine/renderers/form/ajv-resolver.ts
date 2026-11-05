@@ -46,7 +46,15 @@ export function ajvResolver(
   let compiled: ValidateFunction | undefined;
   return (values) => {
     // 首次提交时才编译：白名单外关键词在此时抛出可识别错误（ADR-4 fail-closed）。
-    compiled ??= compileDynamicSchema(schema);
+    try {
+      compiled ??= compileDynamicSchema(schema);
+    } catch (cause) {
+      // 编译失败必须是**用户可见**的表单错误。原样抛给 react-hook-form 会被
+      // 吞成一条 unhandled rejection：按钮转圈、页面无提示，用户只能刷新。
+      // 这里把它降级为 root 级错误（SchemaField 用 role="alert" 渲染）。
+      const message = cause instanceof Error ? cause.message : String(cause);
+      return { values: {}, errors: { root: { type: "schema", message } } };
+    }
     if (compiled(sanitizeForValidation(values))) return { values, errors: {} };
     return { values: {}, errors: mapAjvErrors(compiled.errors ?? []) };
   };

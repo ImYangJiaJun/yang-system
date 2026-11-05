@@ -8,6 +8,11 @@
  * - contracts/  zod + Ajv 白名单校验与 OpenAPI 生成类型；
  * - renderers/  TableView / JsonSchemaForm / ActionDialog 通用解释器。
  *
+ * **渲染器不从这个出口导出。** 它静态依赖 TanStack Table 与 Ajv（运行时代码生成器），
+ * 从桶文件再导出会让任何 `import ... from "@/engine"` 的首屏代码把两者一起拉进来
+ * （实测首屏 272.8 kB → 219.9 kB gzip）。渲染器只在 lazy 路由（ModulePage /
+ * BusinessPage / WorkbenchPage）里按深度路径 import。
+ *
  * 引擎内部子结构对外不可见；新增引擎能力时在此显式导出。
  * （深度路径 import 的机器禁令是后续增强，见 docs/architecture/frontend-rebuild/README 进度日志。）
  */
@@ -65,13 +70,7 @@ export type {
   TableViewSchema,
 } from "./contracts/ui-catalog";
 
-// renderers —— 通用解释器构件
-export { TableView } from "./renderers/table/TableView";
-export { JsonSchemaForm } from "./renderers/form/JsonSchemaForm";
-export {
-  ActionDialog,
-  ConfirmActionDialog,
-} from "./renderers/action/ActionDialog";
+// renderers —— 通用解释器构件（故意不从桶出口导出，见文件头说明）
 
 export { withRequestDeadline } from "./http/deadline";
 export { requestWithTokenRefresh } from "./session/auth-session";

@@ -1,5 +1,11 @@
 import { Suspense, useEffect, useState } from "react";
-import { Link, useNavigate, useOutletContext, useParams } from "react-router";
+import {
+  Link,
+  Navigate,
+  useNavigate,
+  useOutletContext,
+  useParams,
+} from "react-router";
 
 import { moduleView } from "@/engine/catalog/module-pages";
 import { buildNavigationPages, WORKSPACE_IDENTITY } from "@/shell/navigation";
@@ -64,6 +70,15 @@ export default function ModulePage() {
   // 身份不一致：渲染空并等待上一 effect 的延迟跳转（见上）。
   if (identityMismatch) {
     return null;
+  }
+
+  // 声明了 app_route 且没有通用视图的模块，它的真实页面是手写路由
+  // （/account、/feishu/datasources…），通用模块页只是目录投影的产物。
+  // 直接访问 /m/<moduleId> 时应当落到那个页面，而不是渲染一块空的主 Action 面板。
+  // 声明了视图的模块仍由本页解释；app_route 若指回 /m/…（测试与兜底目录会这么写），
+  // 跳过去只会自我循环，同样不跳。
+  if (page.link && page.views.length === 0 && !page.link.startsWith("/m/")) {
+    return <Navigate to={page.link} replace />;
   }
 
   const openCustom = (presentation: ActionPresentationSchema) => {

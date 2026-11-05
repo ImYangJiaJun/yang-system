@@ -82,3 +82,20 @@ describe("mapAjvErrors", () => {
     expect(Object.keys(mapped)).toEqual(["data.name"]);
   });
 });
+
+describe("schema 编译失败的可读性", () => {
+  it("白名单外关键词变成 root 级表单错误，而不是抛给 RHF 吞掉", async () => {
+    // `if/then` 不在 contracts/ajv.ts 的白名单里：以前这里会抛异常，
+    // handleSubmit 不捕获，用户只会看到「点了提交没反应」。
+    const result = await settle(
+      ajvResolver({
+        type: "object",
+        if: { properties: { a: { const: 1 } } },
+        then: { required: ["b"] },
+        properties: { a: { type: "integer" } },
+      })({ a: 1 }, undefined, {} as never),
+    );
+    expect(result.errors.root?.type).toBe("schema");
+    expect(String(result.errors.root?.message)).toContain("白名单外关键词");
+  });
+});

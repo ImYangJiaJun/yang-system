@@ -56,9 +56,6 @@ export default function DashboardPage() {
             选择当前账号可访问的业务模块
           </p>
         </div>
-        <span className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground">
-          服务已连接
-        </span>
       </div>
 
       {modules.length + businessViews.length > 1 && (

@@ -70,6 +70,20 @@ function parseFilterValue(value: unknown): unknown {
   }
 }
 
+/// 列是否按时间语义比较（display.kind 优先，其次 widget 提示）。
+/// 时间列的区间筛选上界定到「当天最后一秒」，与日期选择器的 00:00 起点成对。
+function isTimeColumn(column: TableColumnSchema): boolean {
+  return (
+    column.display?.kind === "date" ||
+    column.display?.kind === "date_time" ||
+    column.widget === "date_time"
+  );
+}
+
+function endOfDaySeconds(seconds: number): number {
+  return seconds + 86_400 - 1;
+}
+
 export function createTableFilters(columns: TableColumnSchema[]): TableFilters {
   return Object.fromEntries(
     columns.map((column) => [
@@ -102,7 +116,11 @@ export function isFilterActive(filter: TableFilterEntry | undefined): boolean {
   return parseFilterValue(filter.value) !== undefined;
 }
 
-export function buildWhereClause(filters: TableFilters): unknown {
+export function buildWhereClause(
+  filters: TableFilters,
+  columns: TableColumnSchema[] = [],
+): unknown {
+  const byField = new Map(columns.map((column) => [column.field, column]));
   const conditions: Array<Record<string, unknown>> = [];
   for (const [field, filter] of Object.entries(filters)) {
     if (!isFilterActive(filter)) continue;
@@ -123,11 +141,17 @@ export function buildWhereClause(filters: TableFilters): unknown {
     }
     if (filter.operator === "range") {
       const [lo, hi] = filter.value as unknown[];
+      const upper = parseFilterValue(hi);
+      const column = byField.get(field);
       conditions.push({
         type: "between",
         field,
         lo: parseFilterValue(lo),
-        hi: parseFilterValue(hi),
+        // 日期选择器给的是当天 00:00；上界补到当天最后一秒，否则「包含当天」会漏记录。
+        hi:
+          column && isTimeColumn(column) && typeof upper === "number"
+            ? endOfDaySeconds(upper)
+            : upper,
       });
       continue;
     }

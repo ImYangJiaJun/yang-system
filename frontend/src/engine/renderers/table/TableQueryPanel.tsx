@@ -1,7 +1,15 @@
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import type {
+  TableColumnSchema,
   TableFilterOperator,
   TableViewSchema,
 } from "@/engine/contracts/ui-catalog";
@@ -11,6 +19,10 @@ import { isFilterActive, type TableFilters } from "./table-view-model";
 /**
  * 查询面板：搜索 + 按 view.query.filter_fields 声明的筛选字段。
  * 操作符与取值契约见 table-view-model.ts（buildWhereClause）。
+ *
+ * 取值控件按列语义选择，而不是一律文本框：日期区间用日期选择器（提交 Unix 秒，
+ * 与展示侧同一口径），数值区间用数字输入，枚举列给出可选值。以前日期区间是两个
+ * 裸文本框，用户得自己猜该填秒还是 ISO 字符串。
  */
 
 const OPERATOR_LABELS: Record<TableFilterOperator, string> = {
@@ -19,6 +31,40 @@ const OPERATOR_LABELS: Record<TableFilterOperator, string> = {
   in: "属于",
   range: "区间",
 };
+
+/// 列是否按时间语义筛选：display.kind 优先，其次 widget 提示。
+function isTimeColumn(column: TableColumnSchema): boolean {
+  return (
+    column.display?.kind === "date" ||
+    column.display?.kind === "date_time" ||
+    column.widget === "date_time"
+  );
+}
+
+function isNumberColumn(column: TableColumnSchema): boolean {
+  return (
+    column.display?.kind === "number" ||
+    column.widget === "integer" ||
+    column.widget === "decimal"
+  );
+}
+
+function toEpochSeconds(value: string): number | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? null
+    : Math.floor(date.getTime() / 1000);
+}
+
+function fromEpochSeconds(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const date = new Date(value * 1000);
+    const pad = (input: number) => String(input).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+  return typeof value === "string" ? value : "";
+}
 
 interface TableQueryPanelProps {
   view: TableViewSchema;
@@ -89,64 +135,67 @@ export function TableQueryPanel({
                   </Label>
                   <div className="flex items-center gap-1">
                     {operators.length > 1 && (
-                      <select
-                        className="h-9 rounded-md border border-input bg-transparent px-2 text-sm"
-                        aria-label={`${column.title || column.field} 操作符`}
+                      <Select
                         value={filter.operator}
-                        onChange={(event) =>
+                        onValueChange={(next) =>
                           setFilter(column.field, {
-                            operator: event.target.value as TableFilterOperator,
+                            operator: next as TableFilterOperator,
                             value:
-                              event.target.value === "range"
+                              next === "range"
                                 ? [null, null]
-                                : event.target.value === "in"
+                                : next === "in"
                                   ? []
                                   : null,
                           })
                         }
                       >
-                        {operators.map((operator) => (
-                          <option key={operator} value={operator}>
-                            {OPERATOR_LABELS[operator]}
-                          </option>
-                        ))}
-                      </select>
+                        <SelectTrigger
+                          size="sm"
+                          className="w-24"
+                          aria-label={`${column.title || column.field} 操作符`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {operators.map((operator) => (
+                            <SelectItem key={operator} value={operator}>
+                              {OPERATOR_LABELS[operator]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     )}
                     {filter.operator === "range" ? (
                       <>
-                        <Input
-                          className="w-28"
-                          aria-label={`${column.title || column.field} 下限`}
+                        <FilterValueInput
+                          column={column}
+                          ariaLabel={`${column.title || column.field} 下限`}
                           value={
-                            Array.isArray(filter.value)
-                              ? String(filter.value[0] ?? "")
-                              : ""
+                            Array.isArray(filter.value) ? filter.value[0] : null
                           }
-                          onChange={(event) => {
+                          onChange={(next) => {
                             const [, hi] = Array.isArray(filter.value)
                               ? filter.value
                               : [null, null];
                             setFilter(column.field, {
                               operator: "range",
-                              value: [event.target.value || null, hi],
+                              value: [next, hi],
                             });
                           }}
                         />
-                        <Input
-                          className="w-28"
-                          aria-label={`${column.title || column.field} 上限`}
+                        <FilterValueInput
+                          column={column}
+                          ariaLabel={`${column.title || column.field} 上限`}
                           value={
-                            Array.isArray(filter.value)
-                              ? String(filter.value[1] ?? "")
-                              : ""
+                            Array.isArray(filter.value) ? filter.value[1] : null
                           }
-                          onChange={(event) => {
+                          onChange={(next) => {
                             const [lo] = Array.isArray(filter.value)
                               ? filter.value
                               : [null, null];
                             setFilter(column.field, {
                               operator: "range",
-                              value: [lo, event.target.value || null],
+                              value: [lo, next],
                             });
                           }}
                         />
@@ -172,18 +221,14 @@ export function TableQueryPanel({
                         }
                       />
                     ) : (
-                      <Input
-                        className="w-40"
-                        aria-label={`${column.title || column.field} 筛选值`}
-                        value={
-                          filter.value === null || filter.value === undefined
-                            ? ""
-                            : String(filter.value)
-                        }
-                        onChange={(event) =>
+                      <FilterValueInput
+                        column={column}
+                        ariaLabel={`${column.title || column.field} 筛选值`}
+                        value={filter.value}
+                        onChange={(next) =>
                           setFilter(column.field, {
                             operator: filter.operator,
-                            value: event.target.value,
+                            value: next ?? null,
                           })
                         }
                       />
@@ -196,5 +241,59 @@ export function TableQueryPanel({
         </div>
       )}
     </div>
+  );
+}
+
+/// 单个筛选值的输入控件：按列语义选择，避免让用户猜格式。
+/// - 时间列：日期选择器，提交/回显统一走 Unix 秒；
+/// - 数值列：数字输入，提交 number；
+/// - 其余：文本输入。
+function FilterValueInput({
+  column,
+  ariaLabel,
+  value,
+  onChange,
+}: {
+  column: TableColumnSchema;
+  ariaLabel: string;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  if (isTimeColumn(column)) {
+    return (
+      <Input
+        type="date"
+        className="w-36"
+        aria-label={ariaLabel}
+        value={fromEpochSeconds(value)}
+        onChange={(event) => onChange(toEpochSeconds(event.target.value))}
+      />
+    );
+  }
+  if (isNumberColumn(column)) {
+    return (
+      <Input
+        type="number"
+        className="w-28"
+        aria-label={ariaLabel}
+        value={
+          typeof value === "number" || typeof value === "string"
+            ? String(value)
+            : ""
+        }
+        onChange={(event) => {
+          const raw = event.target.value;
+          onChange(raw === "" ? null : Number(raw));
+        }}
+      />
+    );
+  }
+  return (
+    <Input
+      className="w-40"
+      aria-label={ariaLabel}
+      value={value === null || value === undefined ? "" : String(value)}
+      onChange={(event) => onChange(event.target.value || null)}
+    />
   );
 }

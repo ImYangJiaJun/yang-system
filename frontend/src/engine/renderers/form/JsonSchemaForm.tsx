@@ -75,6 +75,14 @@ export function JsonSchemaForm({
       className="space-y-4"
       onSubmit={form.handleSubmit(onSubmit)}
     >
+      {form.formState.errors.root?.message && (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {form.formState.errors.root.message}
+        </p>
+      )}
       {Object.entries(properties).map(([name, property]) => (
         <SchemaField
           key={name}

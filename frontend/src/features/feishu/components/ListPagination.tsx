@@ -3,6 +3,10 @@
  *
  * `total` 为 null 时只说明「这次查询没要总数」——那就只给上一页/下一页，
  * 不编造「共 N 个」。
+ *
+ * 引擎的通用表格页与业务列表页共用这一份实现：四处各写一套上一页/下一页
+ * 是同一类控件漂移的温床（2026-11 之前引擎用的是原生 `<select>`，
+ * 业务页用的是 shadcn Select）。
  */
 
 import { ChevronLeft, ChevronRight } from "lucide-react";

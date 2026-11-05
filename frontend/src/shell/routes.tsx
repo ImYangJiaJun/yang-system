@@ -1,10 +1,8 @@
 import { Navigate } from "react-router";
 import AppLayout from "@/shell/AppLayout";
 import AccountSettingsPage from "@/features/account/AccountSettingsPage";
-import BusinessPage from "@/shell/pages/BusinessPage";
 import DashboardPage from "@/shell/pages/DashboardPage";
 import LoginPage from "@/features/auth/pages/LoginPage";
-import ModulePage from "@/shell/pages/ModulePage";
 import RegisterPage from "@/features/auth/pages/RegisterPage";
 import ResetPasswordPage from "@/features/auth/pages/ResetPasswordPage";
 import SelectIdentityPage from "@/features/auth/pages/SelectIdentityPage";
@@ -12,6 +10,7 @@ import SelectIdentityPage from "@/features/auth/pages/SelectIdentityPage";
 import { RedirectIfAuthed, RequireAuth } from "./auth-gate";
 import { RouteFallback } from "./RouteFallback";
 import SessionBridge from "./session-bridge";
+import { RouteNotFound, RouteErrorElement } from "./RouteStatus";
 
 // 开发工作台仅开发构建可见：生产构建不含该路由（ADR-5 能力 14 安全姿态）。
 const devOnlyRoutes = import.meta.env.DEV
@@ -26,10 +25,42 @@ const devOnlyRoutes = import.meta.env.DEV
     ]
   : [];
 
+/// 通用解释器页面（ModulePage / BusinessPage）按路由级 lazy 加载。
+///
+/// 它们静态引用了 TableView / JsonSchemaForm，而后者会把 TanStack Table 与 Ajv
+/// （运行时代码生成器）拖进首屏。这两个页面在生产目录没有可达入口时也用不上，
+/// 所以只在真正进入时才拉取。
+const enginePageRoutes = [
+  {
+    path: "m/:moduleId",
+    lazy: async () => ({
+      Component: (await import("@/shell/pages/ModulePage")).default,
+    }),
+    hydrateFallbackElement: <RouteFallback />,
+  },
+  {
+    path: "m/:moduleId/v/:viewId",
+    lazy: async () => ({
+      Component: (await import("@/shell/pages/ModulePage")).default,
+    }),
+    hydrateFallbackElement: <RouteFallback />,
+  },
+  {
+    path: "business",
+    lazy: async () => ({
+      Component: (await import("@/shell/pages/BusinessPage")).default,
+    }),
+    hydrateFallbackElement: <RouteFallback />,
+  },
+];
+
 export const appRoutes = [
   {
     // 会话失效事件桥接挂在路由树根部，登录页与受保护区共享。
+    // errorElement 挂在同一层：任一页面渲染期抛错都落到可读的错误界面，
+    // 而不是 react-router 的英文默认屏（整树白屏）。
     element: <SessionBridge />,
+    errorElement: <RouteErrorElement />,
     children: [
       {
         path: "/login",
@@ -87,9 +118,7 @@ export const appRoutes = [
         children: [
           { index: true, element: <DashboardPage /> },
           { path: "account", element: <AccountSettingsPage /> },
-          { path: "m/:moduleId", element: <ModulePage /> },
-          { path: "m/:moduleId/v/:viewId", element: <ModulePage /> },
-          { path: "business", element: <BusinessPage /> },
+          ...enginePageRoutes,
           {
             // 飞书数据源控制台：路由级 lazy，页面文件在 features/feishu/views/。
             // 列表页与详情页分属两个 chunk，详情页只在进入时加载。
@@ -170,6 +199,13 @@ export const appRoutes = [
           },
           ...devOnlyRoutes,
         ],
+      },
+      {
+        // 未匹配的站内路径：给可读的 404，而不是 react-router 的英文默认屏。
+        // 挂在根层（与 `/` 平级）而不是 `/` 的 children 里：挂进去要先过 RequireAuth
+        // 与 AppLayout 的目录加载，目录失败时 404 永远不出现，用户反而看到「目录加载失败」。
+        path: "*",
+        element: <RouteNotFound />,
       },
     ],
   },
