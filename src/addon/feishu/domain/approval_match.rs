@@ -1670,6 +1670,7 @@ mod tests {
                             name: "企业".to_string(),
                         },
                     ],
+                    table_id: None,
                 }),
             },
             FieldItem {

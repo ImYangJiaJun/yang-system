@@ -336,12 +336,16 @@ pub(crate) struct FieldItem {
     pub(crate) property: Option<FieldProperty>,
 }
 
-/// 字段属性。只取本模块用得到的一项。
+/// 字段属性。只取本模块用得到的几项。
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct FieldProperty {
     /// 选项列表；单选/多选之外的字段类型没有这一项。
     #[serde(default)]
     pub(crate) options: Vec<PropertyOption>,
+    /// 单向/双向关联列指向的数据表（type 18/21）。关联审批要按本表读被关联行，
+    /// 指向别的表时必须当场说清楚，否则症状只是「记录不存在」。
+    #[serde(default)]
+    pub(crate) table_id: Option<String>,
 }
 
 /// 一个字段选项。

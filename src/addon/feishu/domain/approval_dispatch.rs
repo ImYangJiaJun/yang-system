@@ -34,11 +34,11 @@ use super::approval::{
 };
 use super::approval_attachment;
 use super::approval_convert::{
-    build_form, build_group_form, Converter, FixedOffset, FormInput, GroupFormInput, GroupFormRow,
-    WidgetMap,
+    build_form, build_group_form, connection_codes, is_empty, relation_record_ids, Converter,
+    FixedOffset, FormInput, GroupFormInput, GroupFormRow, WidgetMap,
 };
 use super::approval_uuid::derive_uuid;
-use super::bitable::{BitableCoordinates, FieldItem};
+use super::bitable::{get_records_by_ids, rekey_cells_by_field_id, BitableCoordinates, FieldItem};
 use super::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
 use super::widget_rules;
@@ -668,13 +668,57 @@ pub(crate) async fn dispatch_one(
         }
         tracing::debug!(stage = "external_options", "审批外部选项解析完成");
     }
+    // ---- 3b. 关联列 → 实例 Code ----
+    //
+    // 单向/双向关联列存的是 record_id，审批控件要的是实例 Code。解析结果同时供
+    // preflight、两次 build_form 与附件搬运使用——第二次 build_form 若退回原始
+    // 单元格，会重新撞上「关联审批单元格需要 link 或 text」。
+    let resolved_cells = match resolve_relation_connect_cells(
+        transport,
+        sleeper,
+        tokens,
+        input.coordinates,
+        input.fields,
+        &widgets,
+        input.cells,
+        input.backfill_field_name,
+    )
+    .await
+    {
+        Ok(cells) => cells,
+        Err(RelationProblem::Data(reason)) => {
+            tracing::info!(
+                stage = "connections",
+                outcome = "waiting",
+                reason = "关联列解析未通过，详情见任务或派发记录",
+                "审批派发等待关联审批修正"
+            );
+            return DispatchResult::Waiting { reason };
+        }
+        Err(RelationProblem::Outbound(failure)) => {
+            tracing::warn!(
+                stage = "connections",
+                kind = ?failure.kind,
+                "关联列读取失败，等待下一轮重试"
+            );
+            return match failure.kind {
+                FailureKind::Fatal { .. } => DispatchResult::Waiting {
+                    reason: format!("读取关联审批记录失败：{}", failure.message),
+                },
+                _ => DispatchResult::Retryable {
+                    message: super::approval_feedback::outbound_reason(&failure),
+                },
+            };
+        }
+    };
+    let cells = resolved_cells.as_ref().unwrap_or(input.cells);
     tracing::debug!(stage = "form", "开始校验附件/图片并转换审批表单");
-    let preflight = approval_attachment::preflight(&widgets, input.cells);
+    let preflight = approval_attachment::preflight(&widgets, cells);
     let form = match preflight.and_then(|codes| {
         build_form(&FormInput {
             widgets: &widgets,
             form_snapshot: &form_snapshot,
-            cells: input.cells,
+            cells,
             attachment_codes: &codes,
             timezone_offset: input.timezone_offset,
         })
@@ -737,7 +781,7 @@ pub(crate) async fn dispatch_one(
             input.coordinates,
             input.record_id,
             &widgets,
-            input.cells,
+            cells,
         )
         .await
         {
@@ -757,7 +801,7 @@ pub(crate) async fn dispatch_one(
         match build_form(&FormInput {
             widgets: &widgets,
             form_snapshot: &form_snapshot,
-            cells: input.cells,
+            cells,
             attachment_codes: &codes,
             timezone_offset: input.timezone_offset,
         }) {
@@ -1085,13 +1129,42 @@ pub(crate) async fn dispatch_group(
         return DispatchResult::Terminal { message };
     }
 
+    // 关联列 → 实例 Code（逐成员，与单条同一套解析）。组路径不写回填列，
+    // 所以数据问题只能整组暂停，等用户修正后重新批量点击。
+    let mut resolved: Vec<Option<Map<String, Value>>> = Vec::with_capacity(input.members.len());
+    for member in input.members {
+        match resolve_relation_connect_cells(
+            transport,
+            sleeper,
+            tokens,
+            input.coordinates,
+            input.fields,
+            input.widgets,
+            member.cells,
+            input.backfill_field_name,
+        )
+        .await
+        {
+            Ok(cells) => resolved.push(cells),
+            Err(RelationProblem::Data(reason)) => {
+                return DispatchResult::Terminal {
+                    message: format!("关联审批列解析失败：{reason}"),
+                }
+            }
+            Err(RelationProblem::Outbound(failure)) => {
+                return group_result(classify_group_failure(failure))
+            }
+        }
+    }
+
     // ---- 3. 组装多行明细表单 ----
     let rows: Vec<GroupFormRow<'_>> = input
         .members
         .iter()
-        .map(|member| GroupFormRow {
+        .zip(&resolved)
+        .map(|(member, resolved)| GroupFormRow {
             record_id: member.record_id,
-            cells: member.cells,
+            cells: resolved.as_ref().unwrap_or(member.cells),
             attachment_codes: &member.attachment_codes,
         })
         .collect();
@@ -1360,6 +1433,136 @@ async fn write_group_extended(
         write_extended(backfill, &single, detail).await?;
     }
     Ok(())
+}
+
+/// 关联列预解析失败的分类。
+#[derive(Debug)]
+enum RelationProblem {
+    /// 数据问题：关联行不存在、申请编号还没回填、跨表关联等。等数据补齐。
+    Data(String),
+    /// 出站失败：按类别决定重试还是等待。
+    Outbound(OutboundFailure),
+}
+
+/// 关联列（单向 `18` / 双向 `21`）→ 实例 Code。
+///
+/// 「关联审批」控件只认实例 Code，而关联列单元格里存的是 record_id——Code 在那些
+/// 被关联行的**回填列**（「申请编号」的超链接）里。所以必须先把被关联行读回来。
+/// 单次最多 100 条（`records/batch_get` 的官方上限）。返回 `None` = 没有任何
+/// 关联单元格需要解析。
+#[allow(clippy::too_many_arguments)] // 派发路径的要素逐个平铺，与既有编排函数一致。
+async fn resolve_relation_connect_cells(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    fields: &[FieldItem],
+    widgets: &[WidgetMap],
+    cells: &Map<String, Value>,
+    backfill_field_name: &str,
+) -> Result<Option<Map<String, Value>>, RelationProblem> {
+    let mut targets: Vec<(&WidgetMap, Vec<String>)> = Vec::new();
+    for widget in widgets.iter().filter(|w| w.widget_type == "connect") {
+        let field = fields
+            .iter()
+            .find(|field| field.field_id == widget.bitable_field);
+        if let Some(field) = field {
+            // 只认关联列：文本格子里恰好写着「rec…」不该被当成 record_id。
+            // 字段信息缺失时（旧快照/裁剪响应）退回按单元格形态判断。
+            if !matches!(field.field_type, Some(18 | 21) | None) {
+                continue;
+            }
+            if let Some(table_id) = field
+                .property
+                .as_ref()
+                .and_then(|property| property.table_id.as_deref())
+            {
+                if table_id != coordinates.table_id {
+                    return Err(RelationProblem::Data(
+                        "关联审批列指向其它数据表，暂不支持".into(),
+                    ));
+                }
+            }
+        }
+        let Some(ids) = cells
+            .get(&widget.bitable_field)
+            .and_then(relation_record_ids)
+        else {
+            continue;
+        };
+        targets.push((widget, ids));
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    let backfill_field = fields
+        .iter()
+        .find(|field| {
+            field.field_name.trim() == backfill_field_name.trim()
+                || field.field_id == backfill_field_name
+        })
+        .ok_or_else(|| RelationProblem::Data("回填列不可用".into()))?;
+
+    // 保序去重后统一批量读：同一被关联行可能被多个控件引用。
+    let mut wanted: Vec<String> = Vec::new();
+    for (_, ids) in &targets {
+        for id in ids {
+            if !wanted.contains(id) {
+                wanted.push(id.clone());
+            }
+        }
+    }
+    let mut records: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    for chunk in wanted.chunks(100) {
+        let items = get_records_by_ids(transport, sleeper, tokens, coordinates, chunk)
+            .await
+            .map_err(|failure| match failure.kind {
+                FailureKind::Fatal { .. } => RelationProblem::Data(failure.message),
+                _ => RelationProblem::Outbound(failure),
+            })?;
+        for item in items {
+            let cells = rekey_cells_by_field_id(fields, &item.fields)
+                .map_err(|error| RelationProblem::Data(error.to_string()))?;
+            records.insert(item.record_id, cells);
+        }
+    }
+    if wanted.iter().any(|id| !records.contains_key(id)) {
+        return Err(RelationProblem::Data(
+            "关联审批列引用的记录不存在（可能已被删除）".into(),
+        ));
+    }
+
+    let mut resolved = cells.clone();
+    for (widget, ids) in &targets {
+        let mut codes: Vec<String> = Vec::new();
+        for id in ids {
+            let record = records.get(id).ok_or_else(|| {
+                RelationProblem::Data("关联审批列引用的记录不存在（可能已被删除）".into())
+            })?;
+            let cell = record.get(&backfill_field.field_id).ok_or_else(|| {
+                RelationProblem::Data("关联审批列引用的记录还没有申请编号".into())
+            })?;
+            if is_empty(cell) {
+                return Err(RelationProblem::Data(
+                    "关联审批列引用的记录还没有申请编号".into(),
+                ));
+            }
+            let found = connection_codes(cell).map_err(|reason| {
+                RelationProblem::Data(format!("关联审批列引用的记录，其申请编号不可用：{reason}"))
+            })?;
+            for code in found {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+        resolved.insert(
+            widget.bitable_field.clone(),
+            Value::Array(codes.into_iter().map(Value::String).collect()),
+        );
+    }
+    Ok(Some(resolved))
 }
 
 /// 在上传附件/图片和创建审批之前校验关联实例；同一实例在一单中只查询一次。
@@ -2414,6 +2617,139 @@ mod tests {
                 "Post https://open.feishu.cn/open-apis/bitable/v1/apps/appTest/tables/tblTest/records/batch_get"
             ]
         );
+    }
+
+    /// 关联列解析用的字段表：关联列 + 回填列。
+    fn relation_fields(kind: i32, table_id: Option<&str>) -> Vec<FieldItem> {
+        vec![
+            FieldItem {
+                is_primary: false,
+                field_id: "fldRel".into(),
+                field_name: "关联审批/Related Approval Form".into(),
+                field_type: Some(kind),
+                ui_type: Some("SingleLink".into()),
+                property: Some(super::super::bitable::FieldProperty {
+                    options: Vec::new(),
+                    table_id: table_id.map(str::to_string),
+                }),
+            },
+            FieldItem {
+                is_primary: false,
+                field_id: "fldBack".into(),
+                field_name: "申请编号".into(),
+                field_type: Some(15),
+                ui_type: Some("Url".into()),
+                property: None,
+            },
+        ]
+    }
+
+    fn connect_on_relation() -> WidgetMap {
+        let mut widget = widget("w1", "connect");
+        widget.bitable_field = "fldRel".into();
+        widget
+    }
+
+    #[tokio::test]
+    async fn relation_connect_cells_resolve_linked_records_to_instance_codes() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        let link = super::super::approval::instance_applink(code).unwrap_or_else(|e| panic!("{e}"));
+        let body = json!({"code":0,"data":{"records":[{
+            "record_id":"recLinked",
+            "fields":{"申请编号":{"text":"202601010001","link":link}}
+        }]}})
+        .to_string();
+        let transport = ScriptedTransport::new(vec![(200, body.as_str())]);
+        let resolved = resolve_relation_connect_cells(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &coordinates(),
+            &relation_fields(18, Some("tblsRc9GRRX")),
+            &[connect_on_relation()],
+            &cells(&[("fldRel", json!({"link_record_ids":["recLinked"]}))]),
+            "申请编号",
+        )
+        .await
+        .ok()
+        .flatten()
+        .expect("应解析出实例 Code");
+        assert_eq!(resolved["fldRel"], json!([code]));
+        assert_eq!(
+            transport.requests(),
+            vec![
+                "Post https://open.feishu.cn/open-apis/bitable/v1/apps/appbcbWCzen6/tables/tblsRc9GRRX/records/batch_get"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn relation_connect_cells_report_missing_serial_and_foreign_table() {
+        // 被关联行还没有申请编号：数据问题，等它先派发完。
+        let body = json!({"code":0,"data":{"records":[
+            {"record_id":"recLinked","fields":{"申请编号":null}}
+        ]}})
+        .to_string();
+        let transport = ScriptedTransport::new(vec![(200, body.as_str())]);
+        let problem = resolve_relation_connect_cells(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &coordinates(),
+            &relation_fields(18, Some("tblsRc9GRRX")),
+            &[connect_on_relation()],
+            &cells(&[("fldRel", json!({"link_record_ids":["recLinked"]}))]),
+            "申请编号",
+        )
+        .await
+        .err()
+        .expect("缺申请编号应判数据问题");
+        assert!(
+            matches!(problem, RelationProblem::Data(ref reason) if reason.contains("还没有申请编号")),
+            "{problem:?}"
+        );
+
+        // 跨表关联列：直接说清楚，且不打出站请求。
+        let transport = ScriptedTransport::new(vec![]);
+        let problem = resolve_relation_connect_cells(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &coordinates(),
+            &relation_fields(18, Some("tblOther")),
+            &[connect_on_relation()],
+            &cells(&[("fldRel", json!({"link_record_ids":["recLinked"]}))]),
+            "申请编号",
+        )
+        .await
+        .err()
+        .expect("跨表关联应判数据问题");
+        assert!(
+            matches!(problem, RelationProblem::Data(ref reason) if reason.contains("其它数据表")),
+            "{problem:?}"
+        );
+        assert!(transport.requests().is_empty());
+
+        // 已经是超链接单元格（历史写法）：原样交给原有解析，不发起读取。
+        let transport = ScriptedTransport::new(vec![]);
+        let none = resolve_relation_connect_cells(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &coordinates(),
+            &relation_fields(18, Some("tblsRc9GRRX")),
+            &[connect_on_relation()],
+            &cells(&[(
+                "fldRel",
+                json!({"link":"https://example.com","text":"申请编号"}),
+            )]),
+            "申请编号",
+        )
+        .await
+        .ok()
+        .flatten();
+        assert!(none.is_none());
+        assert!(transport.requests().is_empty());
     }
 
     /// token provider 只会在缓存未命中时用它，而 `FakeCache` 恒命中，

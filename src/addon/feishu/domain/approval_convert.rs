@@ -432,15 +432,31 @@ fn collect_signature(
         };
         let mut mapping = (*mapping).clone();
         mapping.required |= node.required;
-        let value = match assemble_widget(
-            &mapping,
-            input.cells,
-            input.attachment_codes,
-            input.timezone_offset,
-        ) {
-            Ok(Some(value)) => value,
-            Ok(None) | Err(ConvertError::MissingRequired { .. }) => Value::Null,
-            Err(error) => return Err(error),
+        // 关联列（单向/双向关联）存的是 record_id，提交值却要是被关联行
+        // 「申请编号」里的实例 Code——那需要异步读记录，而签名阶段禁止网络副作用。
+        // 签名只比「还是不是同一批行」，用排序去重后的 record_id 既稳定又不依赖
+        // Code 是否已经回填。
+        let relation = input
+            .cells
+            .get(&mapping.bitable_field)
+            .and_then(relation_record_ids);
+        let value = match (mapping.widget_type.as_str(), relation) {
+            ("connect", Some(ids)) => {
+                let mut ids = ids;
+                ids.sort();
+                ids.dedup();
+                Value::Array(ids.into_iter().map(Value::String).collect())
+            }
+            _ => match assemble_widget(
+                &mapping,
+                input.cells,
+                input.attachment_codes,
+                input.timezone_offset,
+            ) {
+                Ok(Some(value)) => value,
+                Ok(None) | Err(ConvertError::MissingRequired { .. }) => Value::Null,
+                Err(error) => return Err(error),
+            },
         };
         let value = canonical_signature_value(value);
         if values.insert(node.id.clone(), value).is_some() {
@@ -780,7 +796,7 @@ fn assemble_direct(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertErr
 }
 
 /// 只解析数据，不访问单元格里的 URL；链接须来自审批应用，编号不能代替实例 Code。
-fn connection_codes(cell: &Value) -> Result<Vec<String>, String> {
+pub(crate) fn connection_codes(cell: &Value) -> Result<Vec<String>, String> {
     fn query_pairs(query: &str) -> Result<Vec<(String, String)>, String> {
         fn decode(raw: &str) -> Result<String, String> {
             let mut decoded = Vec::new();
@@ -885,6 +901,48 @@ fn connection_codes(cell: &Value) -> Result<Vec<String>, String> {
         return Err("关联审批没有实例 Code".to_string());
     }
     Ok(codes)
+}
+
+/// 从关联列（单向 18 / 双向 21）的单元格里取 record_id。
+///
+/// 官方形态是 `{"link_record_ids": ["rec…"]}`；lark-cli 一类工具会归一化成
+/// `[{"id": "rec…"}]`。两种都认。其它形态返回 `None`——普通超链接/文本单元格
+/// 仍走原有的 [`connection_codes`]，不能被误当成关联列。
+pub(crate) fn relation_record_ids(cell: &Value) -> Option<Vec<String>> {
+    fn is_record_id(text: &str) -> bool {
+        text.starts_with("rec") && text.len() > 3
+    }
+    match cell {
+        Value::Object(map) => {
+            // 键本身已经说明这是关联列，值不再套 `rec` 前缀猜测。
+            let ids = map.get("link_record_ids")?.as_array()?;
+            let ids: Vec<String> = ids
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            (!ids.is_empty()).then_some(ids)
+        }
+        Value::Array(items) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Object(map) => {
+                        let id = map.get("id")?.as_str()?;
+                        if !is_record_id(id) {
+                            return None;
+                        }
+                        ids.push(id.to_string());
+                    }
+                    Value::String(id) if is_record_id(id) => ids.push(id.clone()),
+                    _ => return None,
+                }
+            }
+            (!ids.is_empty()).then_some(ids)
+        }
+        _ => None,
+    }
 }
 
 /// 日期：毫秒时间戳 → 带偏移量的 RFC3339。
@@ -1483,6 +1541,55 @@ mod tests {
             ),
             Err(ConvertError::InvalidDefinition(_))
         ));
+    }
+
+    #[test]
+    fn relation_cells_must_be_resolved_before_conversion() {
+        // 关联列的预解析是派发层的职责。漏掉那一步必须在这里响亮失败，
+        // 而不是把 record_id 当实例 Code 静默提交。
+        let cell = json!({"link_record_ids": ["recAAA", "recBBB"]});
+        assert_eq!(
+            connection_codes(&cell).unwrap_err(),
+            "关联审批单元格需要 link 或 text"
+        );
+        let snapshot = r#"[{"id":"w1","type":"connect","option":{"notLimitScope":true}}]"#;
+        let error = render_definition(
+            snapshot,
+            &[widget("w1", "connect")],
+            &cells(&[("fld_src", cell)]),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("关联列不应直接通过 build_form"));
+        assert!(matches!(error, ConvertError::BadValue { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn relation_connect_cells_sign_by_sorted_record_ids() {
+        // 签名用 record_id（不解析 Code），排序去重后顺序无关。
+        let snapshot = r#"[{"id":"w1","type":"connect","option":{"notLimitScope":true}}]"#;
+        let widgets = [widget("w1", "connect")];
+        let sign = |cell: Value| {
+            signature(
+                snapshot,
+                &widgets,
+                &cells(&[("fld_src", cell)]),
+                &BTreeMap::new(),
+            )
+            .unwrap_or_else(|e| panic!("{e}"))
+        };
+        assert_eq!(
+            sign(json!({"link_record_ids":["recB","recA"]})),
+            sign(json!({"link_record_ids":["recA","recB"]}))
+        );
+        assert_ne!(
+            sign(json!({"link_record_ids":["recA"]})),
+            sign(json!({"link_record_ids":["recA","recB"]}))
+        );
+        // lark-cli 归一化形态（`[{"id":…}]`）与官方原始形态等价。
+        assert_eq!(
+            sign(json!([{"id":"recB"},{"id":"recA"}])),
+            sign(json!({"link_record_ids":["recA","recB"]}))
+        );
     }
 
     #[test]

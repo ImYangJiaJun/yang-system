@@ -893,8 +893,8 @@ export function ApprovalConfigDialog({
                               ) : null}
                               {widget.type === "connect" ? (
                                 <p className="text-muted-foreground mt-1 text-xs">
-                                  关联审批：选择超链接列或实例 Code
-                                  文本列，不能仅填申请编号。
+                                  关联审批：选择超链接列、实例 Code
+                                  文本列，或关联列（单向/双向关联，仅限本表）。不能仅填申请编号。
                                 </p>
                               ) : null}
                             </TableCell>
