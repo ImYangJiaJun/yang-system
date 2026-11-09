@@ -2,8 +2,9 @@
 
 `nginx.conf` 是 YANG System SPA 的可审计完整 Nginx 配置，可直接安装为
 `/etc/nginx/nginx.conf`。`deployment-contract.mjs` 是生产构建 E2E 使用的
-同一响应合同。发布时必须把 `dist` 挂载到 `/usr/share/nginx/html`，
-Rust 服务监听 `127.0.0.1:8080`，Nginx 监听 `8081`（所有网卡）。
+同一响应合同。`dist` 内容必须位于 `/usr/share/nginx/html`（当前由 Dockerfile
+在构建时复制进镜像）；Rust 服务在容器内监听 `0.0.0.0:8080`（8080 不发布到宿主机），
+Nginx 的 upstream 指向 `127.0.0.1:8080`，Nginx 监听 `8081`（所有网卡）。
 
 > **2026-09-22 起监听地址由 `127.0.0.1:8081` 改为 `8081`。**
 >

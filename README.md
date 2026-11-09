@@ -14,9 +14,12 @@ OpenAPI 与前端页面。骨架以 `account` 为唯一业务 Addon，覆盖账�
 
 | Addon / Module | 控制台入口 | 当前能力 |
 |---|---|---|
-| `account.user` | 个人账户 / 用户中心 / 账号设置 | 邮箱验证码注册、登录（用户名/邮箱/邮箱验证码免密）、头像设置与展示、Refresh Cookie、全设备退出、当前用户、账号中心（资料/改密/改用户名/换邮箱/停用/登录设备/安全事件）、自助密码找回；启用凭据版本切换后还提供改密、自助停用、密码重置、匿名化删除；管理动作（grants 化）：停用/启用用户、签发重置凭证、用户列表 |
-| `access.grants` | —（预留端口，未接线） | 授权/权限管理端口：grant_permission / revoke_permission / list_permissions / list_user_grants；无冷启动引导，权限管理尚未交付 |
-| `feishu.approval` | 飞书审批 / 配置 | 业务名称搜索、启停筛选、独立配置详情、字段对应、同审批关联配置分页、配置 CRUD 与派发记录；管理员可补充名称快照 |
+| `account.user` | 个人账户 / 用户中心 / 账号设置 | 用户名密码注册（邮箱可在账户设置里绑定）、登录（用户名/邮箱/邮箱验证码免密）、头像设置与展示、Refresh Cookie、全设备退出、当前用户、账号中心（资料/改密/改用户名/换邮箱/停用/登录设备/安全事件）、自助密码找回；启用凭据版本切换后还提供改密、自助停用、密码重置、匿名化删除；管理动作（grants 化）：停用/启用用户、签发重置凭证、用户列表 |
+| `access.grants` / `access.groups` | 权限管理 / 权限工作台 | 直授（grant/revoke/批量授权、权限与持有者查询）与一层权限组（组 CRUD、成员与条目管理）；首账号引导（`system_admin`）；权限工作台三视图（按用户/按功能/按组） |
+| `feishu.datasource` | 飞书数据源 / 配置 | 表级数据源与字段绑定、元数据/体检/拉取；取数方式 `push` / `pull` / `xlsx_import` |
+| `feishu.portal` | 数据源详情页 / 门户 | 查询门户 CRUD 与启停、查询/联想/元数据/结果导出、口令与访问日志（`feishu.portal_log`） |
+| `feishu.event` | —（公开回调端点） | 审批事件订阅：challenge 应答与事件接收（public + `verification_token` 自校验） |
+| `feishu.approval` | 飞书审批 / 配置 | 业务名称搜索、启停筛选、独立配置详情、字段对应、同审批关联配置分页、配置 CRUD 与派发记录；管理员可补充名称快照；同批聚合派发、按配置 Token 轮换/一次性回显、审批事件查询与失败重试、飞书用户身份 OAuth（状态/授权链接） |
 
 审批配置默认展示来源数据表、审批名称、申请人来源和编号回填位置，技术标识集中在
 「排查信息」。旧配置名称暂缺时显示「名称待补充」，有写权限的用户可点击「补充名称」
@@ -168,7 +171,7 @@ src/
 ├── addon/                   # account + access（授权端口）+ feishu（集成）
 │   ├── account/             # 注册/会话/邮件投递、授权快照与密码重置；user/ 是 module 层
 │   │   └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
-│   ├── access/              # 授权端口（预留，无冷启动引导，权限管理未交付）
+│   ├── access/              # 权限管理面：直授 + 权限组 + 首账号引导（grants/ 与 groups/ 两个 module）
 ├── config/                  # 不可变设置、环境变量与 secret 白名单
 ├── infrastructure/          # 审计、授权一致性与声明式数据库 Schema
 ├── app.rs                   # 业务 Addon 的唯一组合根
@@ -296,14 +299,15 @@ python scripts/run_ci.py integration
 ```
 
 该门禁覆盖登录/MFA 邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例
-并发 apply，不使用 mock 替代 MySQL 或 Redis。入口为
-`tests/refresh_load_benchmark.rs` 和 `tests/schema_apply_integration.rs`。
+并发 apply，以及账号生命周期、权限组/首账号引导与飞书数据源/审批派发等链路，不使用 mock
+替代 MySQL 或 Redis。入口为 `tests/` 下 16 个集成测试文件，由
+`python scripts/run_ci.py integration` 统一编排。
 
 ## 参考能力
 
 | 位置 | 展示能力 |
 |---|---|
-| `addon/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、停用与全量撤销 |
+| `addon/account/user/` | 用户名密码注册、Cookie 会话、凭据/授权版本、停用与全量撤销 |
 | `infrastructure/authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
 | `app.rs` 测试 | Catalog/Registry/OpenAPI 同源与条件 Action |
 

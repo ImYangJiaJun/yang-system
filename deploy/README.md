@@ -7,7 +7,9 @@
 | 文件 | 在哪跑 | 作用 |
 |---|---|---|
 | `deploy.ps1` | **本机 Windows** | 构建两个镜像 → 导出压缩 → 上传 → 触发远程；另外两个开关 `-SyncConfig`（推配置）与 `-ResetDb`（清库） |
+| `deploy-finance-prod.ps1` | **本机 Windows** | 财务正式服务器（47.112.16.98）的第二套部署入口，流程与 `deploy.ps1` 一致，推的是 `config.cloud.finance.toml`（两台机器的配置不共用） |
 | `deploy-blue-green.sh` | **服务器** | 载入镜像、起绿容器冒烟、切流量、回退；`refresh` 子命令负责换配置与清库 |
+| `backup-mysql.sh` | **服务器** | MySQL 全量备份脚本（入口见 `docs/operations/RUNBOOK_BACKUP.md`）；每次发布由 `deploy.ps1` 一并上传 |
 | `config.cloud.example.toml` | 入库 | 配置模板（占位值，可提交） |
 | `config.cloud.toml` | **服务器** | 生产配置（**由模板复制而来，凭据默认只填在服务器上**；也可以用 `-SyncConfig` 从本机推一份覆盖它） |
 | `compose.infra.yaml` | **服务器** | MySQL + Redis（只起依赖，不起应用） |
@@ -69,8 +71,11 @@
    - `[email.password_reset].link_base_url` 在 `environment = "production"` 下**必须是 https**
      （http 只允许 development / test）。TLS 边缘没落地之前，这一项会挡住启动。
    - `[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` /
-     `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
-     `alert_failure_threshold` / `log_inbound_requests`。它有 `deny_unknown_fields`，
+     `app_id` / `app_secret` / `oauth_redirect_uri` / `pull_interval_seconds` /
+     `alert_recipients` / `alert_failure_threshold` / `log_inbound_requests` /
+     `approval_create_rate_per_minute` / `approval_scan_interval_seconds` /
+     `approval_base_timezone` / `event_verification_token` / `event_encrypt_key`。
+     它有 `deny_unknown_fields`，
      多写一个键就在反序列化阶段直接起不来。`enabled = true` 且 Token 非空会注册飞书
      **入站写入 API**——Token 是占位值时，那等于开放一个口令写在仓库里的写接口。
      `log_inbound_requests = true` 会把三个机器入口的完整请求参数（**含 Token 明文**）
@@ -83,8 +88,9 @@
    发出，且生产的 https 强制被关掉；拿到证书后必须改回 `production` + https。
 
    `deploy-blue-green.sh` 会在启动前检查占位值，**没填完会拒绝部署并把未填项列出来**。
-   注意它只认 `replace-with-*` 一族：**`CHANGE_ME_*` 不会被识别为占位**，长度够就会
-   静默通过校验，服务带着一个写在仓库里的"密钥"正常启动。填真值，别只改前缀。
+   它同时拦截 `CHANGE_ME` 与 `replace-with` 两种前缀；应用自身的启动校验才只认
+   `replace-with*` 等写法、**不认 `CHANGE_ME_*`**，所以仍建议统一使用 `replace-with-` 前缀。
+   填真值，别只改前缀。
 
 4. **起基础设施**（只做一次）：
    ```bash
@@ -221,7 +227,8 @@ SYNC_CONFIG=1 RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
 - ⚠️ **清库之后没有任何账号能登录**：全新部署时首个成功注册的账号会在同一事务内被引导为
   `system_admin`（内置全权组），之后即可通过控制台继续授权；手工 SQL 只在哨兵行被误删等
   灾备场景使用（见 `docs/contracts/AUTHZ_GRANTS.md`）。
-- ⚠️ **不可恢复**：MySQL 没有备份机制，清掉就没了（见 `docs/operations/RUNBOOK_BACKUP.md`）。
+- ⚠️ **不可恢复**：部署/清库流程本身不做自动备份，清掉就没了；备份须按
+  `docs/operations/RUNBOOK_BACKUP.md` 用 `deploy/backup-mysql.sh` 执行。
 - ⚠️ 清库对**已签发 Token** 的影响：`users` 行被删掉后，请求期的授权版本校验会拒绝**绝大多数**
   旧 Token（缓存未命中或版本不等时会回查 MySQL 的 `users.authz_version`，用户不存在即拒）。
   但重建后的自增 id 从 1 重排：若旧 Token 的 `authz_version` 恰好等于新账号的版本（都取默认 1），
@@ -382,7 +389,7 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
 
 | 症状 | 多半是 |
 |---|---|
-| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` / `alert_failure_threshold` / `log_inbound_requests`（`deny_unknown_fields`，多一个就起不来） |
+| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `oauth_redirect_uri` / `pull_interval_seconds` / `alert_recipients` / `alert_failure_threshold` / `log_inbound_requests` / `approval_create_rate_per_minute` / `approval_scan_interval_seconds` / `approval_base_timezone` / `event_verification_token` / `event_encrypt_key`（`deny_unknown_fields`，多一个就起不来） |
 | 容器起来几秒就退出，日志含「必须使用 https」 | `[email.password_reset].link_base_url` 用了 http，而 `environment = "production"` 下只接受 https |
 | 容器起来几秒就退出，日志含「占位」或密钥长度 | 有未填的 `replace-with-*`，或密钥不足 32 字节 |
 | 日志里有 `Unknown database` | 库不存在。跑 `./deploy-blue-green.sh infra-up`（内含建库步骤），或手动：`docker exec -e MYSQL_PWD="$(cat .mysql-root-password)" yang-mysql mysql -uroot -e "CREATE DATABASE IF NOT EXISTS yang_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"` |
