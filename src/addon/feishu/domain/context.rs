@@ -53,6 +53,15 @@ pub(crate) struct FeishuContext {
     /// 审批事件落地表（store-then-process 缓冲）。
     #[allow(dead_code)]
     approval_event: Repository,
+    /// 审批回写规则表。
+    #[allow(dead_code)]
+    approval_export_rule: Repository,
+    /// 审批回写字段映射表。
+    #[allow(dead_code)]
+    approval_export_field_map: Repository,
+    /// 审批回写运行台账表。
+    #[allow(dead_code)]
+    approval_export_run: Repository,
     /// 密码哈希引擎（门户口令用）。
     #[allow(dead_code)]
     password_engine: Arc<PasswordEngine>,
@@ -78,6 +87,9 @@ impl FeishuContext {
         portal: Repository,
         portal_log: Repository,
         approval_event: Repository,
+        approval_export_rule: Repository,
+        approval_export_field_map: Repository,
+        approval_export_run: Repository,
         password_engine: Arc<PasswordEngine>,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
@@ -95,6 +107,9 @@ impl FeishuContext {
             portal,
             portal_log,
             approval_event,
+            approval_export_rule,
+            approval_export_field_map,
+            approval_export_run,
             password_engine,
             settings,
             xlsx_parse_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -184,6 +199,24 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn approval_events(&self) -> &Repository {
         &self.approval_event
+    }
+
+    /// 审批回写规则表。
+    #[allow(dead_code)]
+    pub(crate) fn approval_export_rules(&self) -> &Repository {
+        &self.approval_export_rule
+    }
+
+    /// 审批回写字段映射表。
+    #[allow(dead_code)]
+    pub(crate) fn approval_export_field_maps(&self) -> &Repository {
+        &self.approval_export_field_map
+    }
+
+    /// 审批回写运行台账表。
+    #[allow(dead_code)]
+    pub(crate) fn approval_export_runs(&self) -> &Repository {
+        &self.approval_export_run
     }
 
     /// 密码哈希引擎（门户口令用）。消费者（门户 Action）在后续批次接入。
@@ -277,6 +310,11 @@ mod tests {
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::event_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::export_rule_table::table_spec()),
+            repository(
+                crate::addon::feishu::approval::domain::export_field_map_table::table_spec(),
+            ),
+            repository(crate::addon::feishu::approval::domain::export_run_table::table_spec()),
             Arc::new(
                 PasswordEngine::new(1)
                     .unwrap_or_else(|error| panic!("PasswordEngine 应可构造: {error}")),

@@ -157,6 +157,30 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "approval_events()",
         ),
+        (
+            "feishu_approval_export_rule",
+            spec(
+                crate::addon::feishu::approval::domain::export_rule_table::table_spec(),
+                "审批回写规则",
+            ),
+            "approval_export_rules()",
+        ),
+        (
+            "feishu_approval_export_field_map",
+            spec(
+                crate::addon::feishu::approval::domain::export_field_map_table::table_spec(),
+                "审批回写字段映射",
+            ),
+            "approval_export_field_maps()",
+        ),
+        (
+            "feishu_approval_export_run",
+            spec(
+                crate::addon::feishu::approval::domain::export_run_table::table_spec(),
+                "审批回写运行",
+            ),
+            "approval_export_runs()",
+        ),
     ]
 }
 
@@ -965,6 +989,12 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 用到的列（config 的 id/updated_at、field_map 的 widget_id/bitable_field
         // /required/converter…）都在各自表声明上，缺口由该文件的单测钉列。
         "approval/actions/list_configs.rs",
+        // 与 list_configs 同形：列表查询在 `query = query.where_tree(..)` 之后
+        // 再用 `query = query.order_by(..)` 重赋值，语句级锚点丢失，只剩
+        // `order_by:id` / `order_by:updated_at` 两个弱档站点。两列都在
+        // `feishu_approval_export_rule` 的声明上（id 与 updated_at 均 sortable），
+        // 缺口由该表声明的单测与列表 Action 的分组单测兜住。
+        "approval/actions/export_list_rules.rs",
         // 纯组装逻辑，不碰仓库：`request_log_writer` 的 `into_record` 只是把请求
         // 事实折成 Record——没有查询/写调用可锚。缺口由该模块的
         // `record_keys_are_declared_on_the_request_log_table` 单测原地补上
@@ -1004,6 +1034,13 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 「重赋值链变量回溯」。
         "infrastructure/feishu_approval_worker.rs",
         "infrastructure/feishu_event_worker.rs",
+        // 回写 worker 的订阅清单把「派发配置」与「回写规则」两个 Repository 放进
+        // 同一个数组循环（`for (repository, label) in [...]`），接收者变量静态解析
+        // 不出归属，退宽松档。用到的列（`id` / `approval_code` / `enabled`）在两张
+        // 表上都有声明，缺口由各表声明的单测钉住；其余查询都直接挂在
+        // `approval_export_rules()` / `approval_export_field_maps()` /
+        // `approval_export_runs()` 上，仍在严格档。
+        "infrastructure/feishu_approval_export_worker.rs",
     ]
     .into_iter()
     .collect();

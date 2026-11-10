@@ -1232,6 +1232,19 @@ export type ApprovalOptionSource = {
   datasourceTitle: string;
 };
 
+/// 审批定义节点（`list_widgets` 的 `nodes[]`，来自定义 `node_list`）。
+///
+/// **原样透传**：真机样本里 `node_list` 不是实例节点的全集（自动通过节点可能
+/// 缺席），所以界面不能把它当成「只有这些节点」的断言。
+export type ApprovalNode = {
+  name: string | null;
+  nodeId: string;
+  customNodeId: string | null;
+  /// `AND` / `OR` / `SEQUENTIAL` / `CC_NODE`。
+  nodeType: string;
+  needApprover: boolean;
+};
+
 /// 派发请求结果四桶（`feishu_approval_request_log.outcome`）。
 export type ApprovalOutcome = "succeeded" | "waiting" | "accepted" | "failed";
 
@@ -1300,6 +1313,349 @@ export type ApprovalRequestsQuery = {
   outcome: ApprovalOutcome | "all";
   orderBy: OrderByClause[];
 };
+
+/* --------------------------- 审批回写控制台 --------------------------- */
+
+/// 回写触发模式（`trigger_mode`）。
+export type ApprovalExportTriggerMode = "node_passed" | "final_approved";
+
+/// 行筛选（`row_filter`）：只写满足行条件的明细行 / 命中实例条件后写全部明细行。
+export type ApprovalExportRowFilter = "matched_rows" | "all_rows";
+
+/// 条件操作符（`condition_json` 的 `op`）。
+export type ApprovalExportConditionOp =
+  | "eq"
+  | "ne"
+  | "in"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "contains"
+  | "is_empty"
+  | "between";
+
+/// 条件范围：实例级 / 明细行级。
+export type ApprovalExportConditionScope = "instance" | "detail";
+
+/// 一个叶子条件（顶层控件或明细行内控件）。
+export type ApprovalExportConditionLeaf = {
+  widgetId: string;
+  op: ApprovalExportConditionOp;
+  /// 原样的 DSL 值：`in` / `between` 是数组，`is_empty` 不需要值。
+  value: unknown;
+};
+
+/// 一条条件：实例级叶子，或对明细行逐行求值的条件组。
+export type ApprovalExportConditionItem =
+  | {
+      scope: "instance";
+      widgetId: string;
+      op: ApprovalExportConditionOp;
+      value: unknown;
+    }
+  | {
+      scope: "detail";
+      detailWidgetId: string;
+      /// `none` = 该明细里没有任何一行满足全部叶子。
+      match: "all" | "any" | "none";
+      items: ApprovalExportConditionLeaf[];
+    };
+
+/// 条件 DSL。空条件 = 恒真；`match=all` 时全部条目为真才命中。
+export type ApprovalExportCondition = {
+  match: "all" | "any";
+  items: ApprovalExportConditionItem[];
+};
+
+/// 一条字段映射（`list_rules` 的 `maps[]`）。
+export type ApprovalExportMap = {
+  sourceKind: "detail" | "top" | "system" | "constant";
+  sourceWidgetId: string;
+  sourceSystemKey: string;
+  constantValue: string | null;
+  targetFieldId: string;
+  /// 保存时缓存的列名（仅供展示；列改名后运行期按 id 重新解析）。
+  targetFieldName: string | null;
+  converter: string;
+  /// 选项文案映射（审批文案 → 目标选项名）。
+  optionMap: Record<string, string>;
+  required: boolean;
+};
+
+/// 状态文案覆盖；未覆盖时后端给默认值（有效 / 已退回 / 已拒绝 / 已撤回 / 已撤销 / 已删除）。
+export type ApprovalExportStatusLabels = {
+  valid: string;
+  rolledBack: string;
+  rejected: string;
+  canceled: string;
+  reverted: string;
+  deleted: string;
+};
+
+export const DEFAULT_EXPORT_STATUS_LABELS: ApprovalExportStatusLabels = {
+  valid: "有效",
+  rolledBack: "已退回",
+  rejected: "已拒绝",
+  canceled: "已撤回",
+  reverted: "已撤销",
+  deleted: "已删除",
+};
+
+/// 一条回写规则（`list_rules` 的 `items[]`）。
+export type ApprovalExportRule = {
+  id: number;
+  title: string;
+  approvalCode: string;
+  approvalName: string | null;
+  triggerMode: string;
+  triggerNodeIds: string[];
+  requireFinalApproval: boolean;
+  detailWidgetId: string;
+  rowFilter: string;
+  /// 解析后的条件；`null` = 无 / 解析失败（原串仍在 `conditionJson`）。
+  condition: ApprovalExportCondition | null;
+  conditionJson: string | null;
+  targetBaseToken: string;
+  targetTableId: string;
+  targetBaseName: string | null;
+  targetTableName: string | null;
+  statusField: string | null;
+  statusFieldName: string | null;
+  statusLabels: ApprovalExportStatusLabels;
+  markEnabled: boolean;
+  enabled: boolean;
+  snapshotAt: number | null;
+  effectiveFrom: number | null;
+  updatedAt: number;
+  maps: ApprovalExportMap[];
+};
+
+/// 规则列表查询（通用分页契约）。
+export type ApprovalExportRulesQuery = {
+  page: number;
+  pageSize: number;
+  search: string;
+};
+
+/// 一条检查出问题的回写规则（`check_rules` 的 `problems[]`）。
+export type ApprovalExportRuleProblem = {
+  ruleId: number;
+  title: string;
+  /// `invalid` = 配置本身失效；`error` = 本轮飞书取数失败，结果未知。
+  status: "invalid" | "error";
+  reasons: string[];
+};
+
+/// 批量检查结果（`check_rules`）。只返回有问题的规则。
+export type ApprovalExportCheckResult = {
+  total: number;
+  okCount: number;
+  problemCount: number;
+  invalidCount: number;
+  errorCount: number;
+  problems: ApprovalExportRuleProblem[];
+};
+
+/// 回写运行行（`list_runs` 的 `items[]`；规则级与行级同表）。
+export type ApprovalExportRun = {
+  id: number;
+  ruleId: number;
+  approvalCode: string;
+  instanceCode: string;
+  triggerNodeId: string;
+  /// 规则级固定 `__rule__`；行级为 `row:N`。
+  rowKey: string;
+  generation: number;
+  writeStatus: string;
+  markStatus: string;
+  appliedLabel: string | null;
+  targetRecordId: string | null;
+  attempts: number;
+  nextAttemptAt: number | null;
+  writtenAt: number | null;
+  markedAt: number | null;
+  lastError: string | null;
+  updatedAt: number;
+};
+
+/// 运行列表查询。`rowKey` 用来只看规则级（`__rule__`）或某条行级行。
+export type ApprovalExportRunsQuery = {
+  page: number;
+  pageSize: number;
+  ruleId?: number;
+  instanceCode?: string;
+  writeStatus?: string;
+  markStatus?: string;
+  rowKey?: string;
+};
+
+/// 试算结果（`preview`）。`rows[].fields` 是目标列 field_id → 已转换值。
+export type ApprovalExportPreview = {
+  ruleId: number;
+  ruleTitle: string;
+  instanceCode: string;
+  trigger: {
+    state:
+      | "passed"
+      | "waiting_node"
+      | "waiting_final"
+      | "not_passed"
+      | "rolled_back";
+    passed: boolean;
+    nodeId: string | null;
+  };
+  condition: { matched: boolean; drifts: string[] };
+  rows: Array<{
+    rowKey: string;
+    fields: Record<string, unknown>;
+    payloadHash: string;
+  }>;
+  reviews: Array<{ rowKey: string; reason: string }>;
+  drifts: string[];
+  error: string | null;
+};
+
+/// 触发模式的中文名。
+export function exportTriggerModeLabel(value: string): string {
+  return value === "final_approved" ? "最终通过" : "指定节点通过";
+}
+
+/// 行筛选的中文名。
+export function exportRowFilterLabel(value: string): string {
+  return value === "all_rows" ? "全部明细行" : "仅满足条件的明细行";
+}
+
+/// 可写目标列的类型码（与后端 `WRITABLE_FIELD_TYPES` 一致）：文本 / 数字 /
+/// 单选 / 多选 / 日期 / 复选框 / 人员 / 电话 / 超链接。公式、查找、关联列不可写。
+export const EXPORT_WRITABLE_FIELD_TYPES: readonly number[] = [
+  1, 2, 3, 4, 5, 7, 11, 13, 15,
+];
+
+/// 转换器取值域（后端 `Converter`）。
+export const EXPORT_CONVERTER_OPTIONS: ReadonlyArray<{
+  value: string;
+  label: string;
+}> = [
+  { value: "text", label: "文本" },
+  { value: "number", label: "数字" },
+  { value: "date", label: "日期（毫秒）" },
+  { value: "person", label: "人员（ou_…）" },
+  { value: "option_text", label: "单选文案" },
+  { value: "multi_option", label: "多选文案" },
+  { value: "checkbox", label: "复选框" },
+  { value: "url", label: "链接" },
+  { value: "json", label: "JSON" },
+];
+
+export function exportConverterLabel(value: string): string {
+  return (
+    EXPORT_CONVERTER_OPTIONS.find((option) => option.value === value)?.label ??
+    value
+  );
+}
+
+/// 系统字段来源键（后端 `KNOWN_SYSTEM_KEYS`）。
+export const EXPORT_SYSTEM_KEY_OPTIONS: ReadonlyArray<{
+  value: string;
+  label: string;
+}> = [
+  { value: "instance_code", label: "审批实例 Code" },
+  { value: "serial_number", label: "审批编号" },
+  { value: "status", label: "审批状态" },
+  { value: "start_time", label: "发起时间" },
+  { value: "end_time", label: "完成时间" },
+  { value: "initiator", label: "发起人" },
+  { value: "department", label: "发起人部门" },
+  { value: "node_approver", label: "节点审批人" },
+  { value: "node_time", label: "节点通过时间" },
+];
+
+export function exportSystemKeyLabel(value: string): string {
+  return (
+    EXPORT_SYSTEM_KEY_OPTIONS.find((option) => option.value === value)?.label ??
+    value
+  );
+}
+
+/// 运行列表筛选用到的写入状态取值域（与后端状态机一致）。
+export const EXPORT_WRITE_STATUS_OPTIONS: ReadonlyArray<{
+  value: string;
+  label: string;
+}> = [
+  { value: "queued", label: "排队中" },
+  { value: "waiting_node", label: "等待节点" },
+  { value: "waiting_final", label: "等待最终通过" },
+  { value: "unmatched", label: "条件未命中" },
+  { value: "pending", label: "待写入" },
+  { value: "writing", label: "写入中" },
+  { value: "written", label: "已写入" },
+  { value: "partial", label: "部分写入" },
+  { value: "retry", label: "待重试" },
+  { value: "review", label: "需人工核查" },
+  { value: "terminal", label: "终态（不可恢复）" },
+  { value: "skipped", label: "已跳过" },
+];
+
+/// 写入状态的中文名（`write_status` 状态机）。
+export function exportWriteStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    queued: "排队中",
+    waiting_node: "等待节点",
+    waiting_final: "等待最终通过",
+    unmatched: "条件未命中",
+    pending: "待写入",
+    writing: "写入中",
+    written: "已写入",
+    partial: "部分写入",
+    retry: "待重试",
+    review: "需人工核查",
+    terminal: "终态（不可恢复）",
+    skipped: "已跳过",
+  };
+  return labels[value] ?? value;
+}
+
+/// 标记状态的中文名（`mark_status` 状态机）。
+export function exportMarkStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    none: "未标记",
+    valid: "有效",
+    rolled_back: "已退回",
+    rejected: "已拒绝",
+    canceled: "已撤回",
+    reverted: "已撤销",
+    deleted: "已删除",
+    marking: "标记中",
+    mark_failed: "标记失败",
+  };
+  return labels[value] ?? value;
+}
+
+/// 人工可重试的写入状态。与后端 `export_retry_run` 的判据一致：
+/// `writing` 可能正在 worker 手里、`written` 已成功、`terminal` / `skipped`
+/// 是配置或数据错误的终态——点重试不会变好。
+export function isExportRunRetryable(writeStatus: string): boolean {
+  return (
+    writeStatus === "pending" ||
+    writeStatus === "retry" ||
+    writeStatus === "review"
+  );
+}
+
+/// 只有已写入且有目标记录的行才能「强制重建」（目标行被手工删除时）。
+export function isExportRunForceRecreatable(run: {
+  rowKey: string;
+  writeStatus: string;
+  targetRecordId: string | null;
+}): boolean {
+  return (
+    run.rowKey !== "__rule__" &&
+    run.writeStatus !== "writing" &&
+    typeof run.targetRecordId === "string" &&
+    run.targetRecordId.trim() !== ""
+  );
+}
 
 /// 飞书用户身份（OAuth）授权状态。
 ///

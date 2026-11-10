@@ -77,6 +77,21 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true),
             // 最后一次错误信息；处理失败时记录
             last_error => Text::new().title("最后错误"),
+            // --- 审批回写投影游标（独立于派发的 processed_at）---
+            //
+            // 回写 worker 只认自己这一列：现有 event worker 会把与本系统派发
+            // 无关的实例 Skipped 并写 `processed_at`，复用同一游标会让回写
+            // 永久看不到目标实例。两侧互不干扰。
+            projection_processed_at => Timestamp::new()
+                .title("回写处理时间")
+                .filterable(true)
+                .sortable(true),
+            projection_attempts => Int::new()
+                .title("回写重试次数")
+                .require(true)
+                .default(0)
+                .filterable(true),
+            projection_last_error => Text::new().title("回写最后错误"),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间"),
         }))
@@ -182,6 +197,23 @@ mod tests {
         // 终态查询（terminal_only）与人工重试的 CAS 条件都按该列过滤，漏了
         // filterable 只会在运行期报 FieldPermissionDenied。
         assert!(retry_count.is_filterable(), "retry_count 必须可筛选");
+    }
+
+    #[test]
+    fn projection_cursor_is_independent_from_dispatch_processing() {
+        let definition = definition();
+        let projection = definition
+            .field("projection_processed_at")
+            .unwrap_or_else(|| panic!("projection_processed_at 字段必须存在"));
+        assert!(!projection.is_required(), "回写游标可空（NULL = 待回写）");
+        assert!(projection.is_filterable(), "回写认领按该列筛选");
+        assert!(projection.is_sortable(), "回写认领按该列排序");
+        let attempts = definition
+            .field("projection_attempts")
+            .unwrap_or_else(|| panic!("projection_attempts 字段必须存在"));
+        assert_eq!(attempts.default_value(), Some(&serde_json::json!(0)));
+        // 派发主游标仍在：两列并存是本次设计的硬约束。
+        assert!(definition.field("processed_at").is_some());
     }
 
     #[test]

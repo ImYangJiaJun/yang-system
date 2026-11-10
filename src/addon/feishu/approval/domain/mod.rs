@@ -4,6 +4,9 @@
 //! module 层只保留主表（`table.rs`）与 Action 注册表，其余表归 `domain/`。
 
 pub(crate) mod event_table;
+pub(crate) mod export_field_map_table;
+pub(crate) mod export_rule_table;
+pub(crate) mod export_run_table;
 pub(crate) mod field_map_table;
 pub(crate) mod group_table;
 pub(crate) mod request_log_table;

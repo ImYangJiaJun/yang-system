@@ -27,7 +27,7 @@
 #![allow(dead_code)] // 客户端先落地并自带测试；消费者（派发编排）在后续任务接入。
 
 use anyhow::ensure;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::outbound::{
     send_with_retry, FailureKind, OutboundFailure, OutboundMethod, OutboundRequest,
@@ -246,6 +246,12 @@ pub(crate) struct InstanceDetail {
     pub(crate) task_list: Option<Vec<TaskNode>>,
     /// 流程动态（bot 形态键名 `timeline`）。
     pub(crate) timeline: Option<Vec<TimelineRecord>>,
+    /// 审批表单原文（bot 形态是 **JSON 字符串**）。
+    ///
+    /// 回写功能的条件求值与字段映射都从这里取值；存原文而不是解析后的
+    /// `serde_json::Value` 是为了让 `InstanceDetail` 保持 `Eq`（`Value` 只实现
+    /// `PartialEq`），解析交给调用方按需做。
+    pub(crate) form: Option<String>,
 }
 
 /// `task_list[]` 的一个节点/任务（bot 形态）。
@@ -290,6 +296,12 @@ pub(crate) struct TimelineRecord {
     /// 扩展信息（各事件类型不同，统一按原始字符串收）。
     #[serde(default)]
     pub(crate) ext: Option<String>,
+    /// 事件关联的任务 id；可映射回 `task_list[].id`，进而得到 `node_id`。
+    ///
+    /// 回退重审判定依赖这条映射：`timeline` 的 `node_key` 是 `APPROVAL_x_y`，
+    /// 与 `task_list[].node_id` 不是同一套标识。
+    #[serde(default)]
+    pub(crate) task_id: Option<String>,
 }
 
 /// 按 `instance_code` **或 `uuid`** 取实例详情的结果。
@@ -357,6 +369,7 @@ pub(crate) async fn get_instance(
                 reverted: data.reverted,
                 task_list: data.task_list,
                 timeline: data.timeline,
+                form: data.form,
             })))
         }
         // 实例不存在：调用方据此决定「回到 create 重试」还是「退避」。
@@ -395,6 +408,9 @@ struct InstanceDetailData {
     task_list: Option<Vec<TaskNode>>,
     #[serde(default)]
     timeline: Option<Vec<TimelineRecord>>,
+    /// bot 形态是 JSON 字符串；user 形态同样有 `form`。缺省 `None`。
+    #[serde(default)]
+    form: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,8 +526,29 @@ pub(crate) struct ApprovalDefinition {
     pub(crate) approval_name: String,
     /// 控件结构快照（原始 JSON），存进配置表供保存期校验用。
     pub(crate) form: Option<serde_json::Value>,
+    /// 审批节点列表（`node_list`）。回写规则用它选触发节点。
+    ///
+    /// 真机样本里 `node_list` **不是实例节点的全集**（自动通过节点的 node_id
+    /// 可能不在其中），所以规则 UI 允许从最近实例样本补全；这里只做原样透传。
+    pub(crate) node_list: Option<Vec<ApprovalNode>>,
     /// 是否为三方审批定义。三方定义不能用 `instances create` 提单。
     pub(crate) is_external: bool,
+}
+
+/// `node_list[]` 的一项。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct ApprovalNode {
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) node_id: Option<String>,
+    #[serde(default)]
+    pub(crate) custom_node_id: Option<String>,
+    /// `AND` / `OR` / `SEQUENTIAL` / `CC_NODE`。
+    #[serde(default)]
+    pub(crate) node_type: Option<String>,
+    #[serde(default)]
+    pub(crate) need_approver: Option<bool>,
 }
 
 /// 取审批定义详情。
@@ -547,8 +584,114 @@ pub(crate) async fn get_approval_definition(
     Ok(ApprovalDefinition {
         approval_name: data.approval_name,
         form: data.form,
+        node_list: data.node_list,
         is_external: data.is_external.unwrap_or(false),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 实例编码列表
+// ---------------------------------------------------------------------------
+
+/// 实例列表查询的 URL。
+fn list_instances_url() -> String {
+    format!("{FEISHU_OPEN_BASE}/open-apis/approval/v4/instances")
+}
+
+/// 单次列表查询最多翻多少页。
+///
+/// 防的是「筛选没生效、`has_more` 永远为真」把一轮扫描拖到无限；到上限即失败，
+/// 让问题以显式错误出现，而不是悄悄只处理了前几页。
+const MAX_INSTANCE_LIST_PAGES: usize = 50;
+
+/// 列出 `[start_ms, end_ms]` 窗口内某审批定义的实例编码。
+///
+/// - 时间参数是**毫秒**；飞书对单窗的上限是 10 小时，超窗不报错而是只返回
+///   窗口内的数据（静默漏结果），所以由调用方切窗（见回写 worker 的
+///   `split_windows`）。
+/// - `page_size` 由调用方给，服务端按自己的上限截断；本函数内部按
+///   `has_more` / `page_token` 翻完全部页。
+/// - 返回按响应顺序去重后的实例编码（同一窗口边界可能重复出现在相邻窗口）。
+pub(crate) async fn list_instance_codes(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    approval_code: &str,
+    start_ms: i64,
+    end_ms: i64,
+    page_size: u32,
+) -> Result<Vec<String>, OutboundFailure> {
+    let mut codes: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut page_token: Option<String> = None;
+    let mut used_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for _ in 0..MAX_INSTANCE_LIST_PAGES {
+        let mut query = vec![
+            ("approval_code".to_string(), approval_code.to_string()),
+            ("start_time".to_string(), start_ms.to_string()),
+            ("end_time".to_string(), end_ms.to_string()),
+            ("page_size".to_string(), page_size.to_string()),
+        ];
+        if let Some(token) = page_token.as_deref() {
+            query.push(("page_token".to_string(), token.to_string()));
+        }
+
+        let request = OutboundRequest {
+            method: OutboundMethod::Get,
+            url: list_instances_url(),
+            query,
+            bearer_token: None,
+            json_body: None,
+            raw_body: None,
+            binary_limit: None,
+            timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+            idempotent: true, // 只读
+        };
+        let response = send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await?;
+        let data: ListInstancesData =
+            serde_json::from_str(&response).map_err(|error| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: format!("审批实例列表响应解析失败: {error}"),
+            })?;
+
+        for code in data.instance_code_list {
+            let code = code.trim().to_string();
+            if !code.is_empty() && seen.insert(code.clone()) {
+                codes.push(code);
+            }
+        }
+        if !data.has_more {
+            return Ok(codes);
+        }
+        let Some(next) = data.page_token.map(|token| token.trim().to_string()) else {
+            // `has_more=true` 却不给 page_token 是上游形态异常；继续翻只会拿同一页。
+            return Ok(codes);
+        };
+        if next.is_empty() || !used_tokens.insert(next.clone()) {
+            return Ok(codes);
+        }
+        page_token = Some(next);
+    }
+
+    Err(OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: format!(
+            "审批实例列表翻页超过上限 {MAX_INSTANCE_LIST_PAGES} 页（已读 {} 条）——\
+             筛选条件可能没有生效",
+            codes.len()
+        ),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ListInstancesData {
+    #[serde(default)]
+    instance_code_list: Vec<String>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    page_token: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +755,8 @@ struct ApprovalDefinitionData {
     approval_name: String,
     #[serde(default)]
     form: Option<serde_json::Value>,
+    #[serde(default)]
+    node_list: Option<Vec<ApprovalNode>>,
     #[serde(default)]
     is_external: Option<bool>,
 }
@@ -1120,6 +1265,7 @@ mod tests {
             reverted: None,
             task_list: None,
             timeline: None,
+            form: None,
         }));
         match detail {
             GetOutcome::Found(detail) => assert_eq!(detail.serial_number, None),

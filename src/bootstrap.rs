@@ -9,6 +9,7 @@ use crate::addon::feishu::domain::alert::{FeishuAlertSender, FeishuAlertSenderHa
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
+use crate::feishu_approval_export_worker::FeishuApprovalExportWorker;
 use crate::feishu_approval_worker::{
     ApprovalDispatchHandle, ApprovalDispatchRequest, ApprovalDispatchWorker,
 };
@@ -41,6 +42,7 @@ const PHASE_SESSION_CLEANUP_WORKER: &str = "session_cleanup_worker";
 const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
 const PHASE_FEISHU_EVENT_WORKER: &str = "feishu_event_worker";
+const PHASE_FEISHU_EXPORT_WORKER: &str = "feishu_approval_export_worker";
 const PHASE_FEISHU_OAUTH_REMINDER_WORKER: &str = "feishu_oauth_reminder_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
@@ -432,6 +434,23 @@ async fn run_after_tools_created(
         }
         None => None,
     };
+    // 审批回写 worker：与事件 worker 同一条准入（`can_pull()`）。它不消费派发
+    // 任务的 `processed_at`，只用自己的 `projection_processed_at` 游标。
+    let export_worker = match settings.feishu.as_ref().filter(|feishu| feishu.can_pull()) {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建审批回写上下文失败")?;
+            Some(
+                FeishuApprovalExportWorker::start(Arc::clone(&tools), feishu, feishu_context)
+                    .context("启动审批回写 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
     let signal_readiness = readiness_gate.clone();
@@ -460,7 +479,7 @@ async fn run_after_tools_created(
     // 首个退出事件只负责触发关闭；此处不先等待 HTTP，所有 worker 同时收到信号。
     //
     // 运行期监督（D7-3）：worker 的 JoinHandle 不进任何 select 时，panic/退出
-    // 只留下句柄完成，readiness 与进程都继续绿。这里每 5 秒看一眼审批 worker，
+    // 只留下句柄完成，readiness 与进程都继续绿。这里每 5 秒看一眼两个飞书 worker，
     // 一旦结束就按「业务阶段失败」走同一条关闭路径。监督 future 放在块里，
     // 借用在 select 结束时释放，后面的关闭阶段才能按值取走 worker。
     let serve_result = {
@@ -473,6 +492,12 @@ async fn run_after_tools_created(
                     .is_some_and(ApprovalDispatchWorker::has_exited)
                 {
                     return "feishu_approval_worker";
+                }
+                if export_worker
+                    .as_ref()
+                    .is_some_and(FeishuApprovalExportWorker::has_exited)
+                {
+                    return "feishu_approval_export_worker";
                 }
             }
         };
@@ -500,6 +525,9 @@ async fn run_after_tools_created(
     if let Some(worker) = &event_worker {
         worker.request_shutdown();
     }
+    if let Some(worker) = &export_worker {
+        worker.request_shutdown();
+    }
     if let Some(worker) = &oauth_reminder_worker {
         worker.request_shutdown();
     }
@@ -509,7 +537,7 @@ async fn run_after_tools_created(
     // 10%（最多 1 秒）。超时取消关闭 future 时 OwnedTask 仍持有句柄并请求 abort。
     let reserve = (Duration::from_secs(settings.shutdown.total_timeout_seconds) / 10)
         .min(Duration::from_secs(1));
-    let (http, outbox, grants, sessions, pull, approval, event, oauth, management) = tokio::join!(
+    let (http, outbox, grants, sessions, pull, approval, event, export, oauth, management) = tokio::join!(
         shutdown_budget.run_phase_with_reserve(PHASE_HTTP_DRAIN, reserve, async {
             match serve_result {
                 Some(result) => result,
@@ -549,6 +577,12 @@ async fn run_after_tools_created(
                 None => Ok(()),
             }
         }),
+        shutdown_budget.run_phase_with_reserve(PHASE_FEISHU_EXPORT_WORKER, reserve, async {
+            match export_worker {
+                Some(worker) => worker.shutdown().await,
+                None => Ok(()),
+            }
+        }),
         shutdown_budget.run_phase_with_reserve(
             PHASE_FEISHU_OAUTH_REMINDER_WORKER,
             reserve,
@@ -572,6 +606,7 @@ async fn run_after_tools_created(
         .and(pull)
         .and(approval)
         .and(event)
+        .and(export)
         .and(oauth)
         .and(management)
         .map_err(anyhow::Error::from);

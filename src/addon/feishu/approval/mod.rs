@@ -138,6 +138,22 @@ pub(crate) fn build_event_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(event_module_name()?).table(domain::event_table::table_spec()?))
 }
 
+/// 审批回写规则表：只有表，读写由回写 Action / worker 经 `FeishuContext` 完成。
+pub(crate) fn build_export_rule_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(export_rule_module_name()?).table(domain::export_rule_table::table_spec()?))
+}
+
+/// 审批回写字段映射表：只有表。
+pub(crate) fn build_export_field_map_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(export_field_map_module_name()?)
+        .table(domain::export_field_map_table::table_spec()?))
+}
+
+/// 审批回写运行台账表：只有表。
+pub(crate) fn build_export_run_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(export_run_module_name()?).table(domain::export_run_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -168,6 +184,18 @@ fn user_token_module_name() -> Result<ModuleName, BaseError> {
 
 fn event_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_event").map_err(config_error)
+}
+
+fn export_rule_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_export_rule").map_err(config_error)
+}
+
+fn export_field_map_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_export_field_map").map_err(config_error)
+}
+
+fn export_run_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_export_run").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {

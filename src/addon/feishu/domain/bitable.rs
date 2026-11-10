@@ -1464,6 +1464,155 @@ pub(crate) async fn batch_update_records(
     Ok(())
 }
 
+/// 新建记录接口的 URL。
+pub(crate) fn create_record_url(app_token: &str, table_id: &str) -> anyhow::Result<String> {
+    validate_path_segment("app_token", app_token)?;
+    validate_path_segment("table_id", table_id)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    ))
+}
+
+/// 新建记录响应里的 `data`（只取本次要用的 record_id）。
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRecordData {
+    record: CreatedRecord,
+}
+
+/// 新建记录返回的记录。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CreatedRecord {
+    pub(crate) record_id: String,
+}
+
+/// 新建一条目标记录。
+///
+/// `fields` 的键必须是**字段名**而不是 field_id——真机已确认 create 接口传
+/// field_id 会报 `1254045 FieldNameNotFound`。调用方先用 `list_all_fields`
+/// 把映射里的 field_id 解析成当前字段名。
+///
+/// `client_token` 必须是合法 UUIDv4（非法值返回 `1254037`）。同 token 重放
+/// 返回同一个 record_id，不会重复建行；但**目标行被手工删除后重放也只返回
+/// 旧 id**（记录实际不存在），所以“重放成功”不能证明目标行还在。
+pub(crate) async fn create_record(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    fields: serde_json::Map<String, serde_json::Value>,
+    client_token: &str,
+) -> Result<CreatedRecord, OutboundFailure> {
+    let url =
+        create_record_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
+            OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            }
+        })?;
+    let query = vec![
+        ("client_token".to_string(), client_token.to_string()),
+        ("user_id_type".to_string(), "open_id".to_string()),
+    ];
+    let body = serde_json::json!({ "fields": fields });
+    let data: CreateRecordData = send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Post,
+        &url,
+        query,
+        Some(body),
+        PULL_REQUEST_TIMEOUT_SECS,
+    )
+    .await?;
+    Ok(data.record)
+}
+
+/// 把导出值编码成目标列接受的单元格。
+///
+/// 与审批派发的 `BitableBackfill::cell_value` 保持同一套真机结论（单选裸字符串、
+/// 日期毫秒、人员 `[{\"id\":\"ou_..\"}]`），但多了回写需要的数字/多选/复选框/电话。
+/// 返回 `None` 表示该值不该写（例如链接列拿到非对象）；`Err` 是类型/形态错误。
+///
+/// 这里刻意不抽到 `approval_dispatch` 复用：那边的函数是派发链路的私有实现，
+/// 两边的错误文案与支持范围不同，硬合并会让派发侧承担回写侧的字段类型。
+pub(crate) fn encode_export_cell(
+    field_type: Option<i32>,
+    value: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, OutboundFailure> {
+    use serde_json::Value;
+    let fatal = |message: String| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message,
+    };
+    let cell = match field_type {
+        // 文本 / 多行文本：取 {text} 或原值。
+        Some(1) => value.get("text").unwrap_or(value).clone(),
+        // 数字：number 或可解析的数字字符串。
+        Some(2) => match value {
+            Value::Number(_) => value.clone(),
+            Value::String(text) => text
+                .trim()
+                .parse::<f64>()
+                .map(Value::from)
+                .map_err(|_| fatal(format!("数字字段的值不是数字：{text}")))?,
+            _ => return Err(fatal("数字字段的值必须是数字".to_string())),
+        },
+        // 单选：裸字符串（数组形态会被 1254062 拒）。
+        Some(3) => {
+            let text = value.get("text").unwrap_or(value);
+            match text.as_str() {
+                Some(text) => Value::String(text.to_string()),
+                None => return Err(fatal("单选字段的值必须是字符串".to_string())),
+            }
+        }
+        // 多选：字符串数组。
+        Some(4) => match value.as_array() {
+            Some(items) if items.iter().all(Value::is_string) => Value::Array(items.clone()),
+            _ => return Err(fatal("多选字段的值必须是字符串数组".to_string())),
+        },
+        // 日期：毫秒时间戳。
+        Some(5) => match value {
+            Value::Number(_) => value.clone(),
+            Value::String(text) => text
+                .trim()
+                .parse::<i64>()
+                .map(Value::from)
+                .map_err(|_| fatal(format!("日期字段的值不是毫秒时间戳：{text}")))?,
+            _ => return Err(fatal("日期字段的值必须是毫秒时间戳".to_string())),
+        },
+        // 复选框：布尔。
+        Some(7) => match value {
+            Value::Bool(_) => value.clone(),
+            Value::String(text) if text == "true" || text == "false" => Value::Bool(text == "true"),
+            _ => return Err(fatal("复选框字段的值必须是布尔".to_string())),
+        },
+        // 人员：`[{\"id\":\"ou_..\"}]`。
+        Some(11) if value.is_array() => value.clone(),
+        Some(11) => {
+            return Err(fatal(
+                "人员字段的值必须是 [{\"id\":\"ou_..\"}] 数组".to_string(),
+            ))
+        }
+        // 电话：字符串。
+        Some(13) => match value.as_str() {
+            Some(text) => Value::String(text.to_string()),
+            None => return Err(fatal("电话字段的值必须是字符串".to_string())),
+        },
+        // 超链接：对象；非对象不写（与派发一致）。
+        Some(15) if value.is_object() => value.clone(),
+        Some(15) => return Ok(None),
+        // 附件 / 关联 / 公式 / 查找等 v1 不支持写。
+        Some(other) => {
+            return Err(fatal(format!(
+                "目标列类型 {other} 不支持回写（公式/查找/关联列不可写；附件列请用文本/链接）"
+            )))
+        }
+        None => return Err(fatal("目标列类型未知，拒绝写入".to_string())),
+    };
+    Ok(Some(cell))
+}
+
 /// 查询记录的 `data`。
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SearchRecordsData {

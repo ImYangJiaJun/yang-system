@@ -41,6 +41,20 @@ import type {
   ApprovalConfigMap,
   ApprovalConfigProblem,
   ApprovalConfigQuery,
+  ApprovalExportCheckResult,
+  ApprovalExportCondition,
+  ApprovalExportConditionItem,
+  ApprovalExportConditionLeaf,
+  ApprovalExportConditionOp,
+  ApprovalExportMap,
+  ApprovalExportPreview,
+  ApprovalExportRule,
+  ApprovalExportRuleProblem,
+  ApprovalExportRulesQuery,
+  ApprovalExportRun,
+  ApprovalExportRunsQuery,
+  ApprovalExportStatusLabels,
+  ApprovalNode,
   ApprovalOptionSource,
   ApprovalRequestItem,
   ApprovalRequestsQuery,
@@ -65,7 +79,11 @@ import type {
   TableWizardField,
   TokenPrecheckResult,
 } from "./types";
-import { approvalCodeHint, approvalCodeVerdict } from "./types";
+import {
+  approvalCodeHint,
+  approvalCodeVerdict,
+  DEFAULT_EXPORT_STATUS_LABELS,
+} from "./types";
 
 /// 控制台要用的数据源 Action。
 ///
@@ -131,6 +149,33 @@ export const APPROVAL_OPERATION_IDS = {
   rotateConfigToken: "feishu.approval.rotate_config_token",
   /// 回显访问 Token。**纯读**：解密取出封存的明文，不改变任何状态（可反复复制）。
   revealConfigToken: "feishu.approval.reveal_config_token",
+} as const;
+
+/// 审批回写控制台的 9 个 Action。
+///
+/// 与派发控制台同一命名纪律：模块名 `feishu.approval` + 动作名。前五个只读写本库，
+/// **无条件注册**；保存 / 体检 / 试算要打飞书，凭证缺失时服务端**不注册**它们
+/// （路由 404）——所以界面上「新建 / 检查」按钮是否渲染不能只看权限，还要看目录里
+/// 有没有这一粒（`hasOperation` 恰好同时回答这两个问题）。
+export const EXPORT_OPERATION_IDS = {
+  /// 规则列表（含映射）。读权限，无条件注册。
+  listRules: "feishu.approval.export_list_rules",
+  /// 运行台账。读权限，无条件注册。
+  listRuns: "feishu.approval.export_list_runs",
+  /// 删除规则（映射同事务删除，运行记录保留）。写权限，无条件注册。
+  deleteRule: "feishu.approval.export_delete_rule",
+  /// 重试一条可恢复状态的运行记录。写权限，无条件注册。
+  retryRun: "feishu.approval.export_retry_run",
+  /// 强制重建一条已写入的目标记录（代次 +1、换新幂等 Token）。
+  forceRecreate: "feishu.approval.export_force_recreate",
+  /// 创建规则：保存期全量校验（定义控件 / 目标列 / 条件引用）。
+  createRule: "feishu.approval.export_create_rule",
+  /// 更新规则：全量替换规则字段与字段映射。
+  updateRule: "feishu.approval.export_update_rule",
+  /// 批量体检启用的规则。
+  checkRules: "feishu.approval.export_check_rules",
+  /// 试算（dry-run）：按已保存规则与实例计算触发、条件与将写入的行。
+  preview: "feishu.approval.export_preview",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -232,6 +277,22 @@ export function canWriteApproval(catalog: UiCatalog | undefined): boolean {
   return hasOperation(catalog, APPROVAL_OPERATION_IDS.createConfig);
 }
 
+/// 能否看回写规则与运行记录（「回写」tab 的渲染条件）。
+export function canReadApprovalExport(catalog: UiCatalog | undefined): boolean {
+  return hasOperation(catalog, EXPORT_OPERATION_IDS.listRules);
+}
+
+/// 能否写回写规则（新建 / 编辑 / 删除 / 重试 / 强制重建 / 体检的渲染条件）。
+///
+/// 用「保存」这一粒做判据：服务端这九粒共享 `feishu.approval.write`，缺一粒就
+/// 整体不渲染写侧，免得用户点开一个半残的对话框。保存 / 体检 / 试算还额外要求
+/// 服务端配置了飞书出站凭证（不满足时目录里没有，按钮自然消失）。
+export function canWriteApprovalExport(
+  catalog: UiCatalog | undefined,
+): boolean {
+  return hasOperation(catalog, EXPORT_OPERATION_IDS.createRule);
+}
+
 /* -------------------------------- query key ------------------------------- */
 
 /// 顶层键：会话边界（`session-reset` 的 `queryClient.clear()`）按前缀清空查询缓存，
@@ -306,6 +367,34 @@ export const feishuQueryKeys = {
         tableId: query.tableId.trim(),
         outcome: query.outcome,
         orderBy: withStableOrder(query.orderBy),
+      },
+    ] as const,
+  approvalExportRules: () =>
+    [FEISHU_QUERY_ROOT, "approval-export-rules"] as const,
+  approvalExportRuleList: (query: ApprovalExportRulesQuery) =>
+    [
+      ...feishuQueryKeys.approvalExportRules(),
+      {
+        page: query.page,
+        pageSize: query.pageSize,
+        // 入参必须进 key（同 approvalConfigList 的教训）：漏掉 search，
+        // 15s staleTime 内搜索只改闭包不改 key，缓存命中旧列表。
+        search: query.search.trim(),
+      },
+    ] as const,
+  approvalExportRuns: () =>
+    [FEISHU_QUERY_ROOT, "approval-export-runs"] as const,
+  approvalExportRunList: (query: ApprovalExportRunsQuery) =>
+    [
+      ...feishuQueryKeys.approvalExportRuns(),
+      {
+        page: query.page,
+        pageSize: query.pageSize,
+        ruleId: query.ruleId ?? null,
+        instanceCode: query.instanceCode?.trim() ?? "",
+        writeStatus: query.writeStatus ?? "",
+        markStatus: query.markStatus ?? "",
+        rowKey: query.rowKey ?? "",
       },
     ] as const,
   /// 某条数据源下的门户列表（管理面板）。
@@ -2560,13 +2649,35 @@ export async function deleteApprovalConfig(
   };
 }
 
-/// 控件预览（`feishu.approval.list_widgets`）：按 approval_code 出站调飞书并解析表单。
-/// 归 write 侧（出站耗频控配额），目录里没有它时 `requireAction` 抛错。
-export async function listApprovalWidgets(
+/// 审批定义预览：控件 + 节点。两者都来自同一次出站 `approvals get`。
+export type ApprovalDefinitionPreview = {
+  widgets: ApprovalWidget[];
+  /// `node_list` 原文投影；真机样本里它不是实例节点全集，界面要如实提示。
+  nodes: ApprovalNode[];
+};
+
+function parseApprovalNode(raw: Record<string, unknown>): ApprovalNode | null {
+  const customNodeId = asNullableString(raw.custom_node_id);
+  // 触发判定用 `task_list.node_id`；定义里 `node_id` 缺席时退到
+  // `custom_node_id`（自定义节点在定义里可能只有它），两者都空则不可选。
+  const nodeId = asString(raw.node_id) || customNodeId || "";
+  if (nodeId === "") return null;
+  return {
+    name: asNullableString(raw.name),
+    nodeId,
+    customNodeId,
+    nodeType: asString(raw.node_type),
+    needApprover: raw.need_approver === true,
+  };
+}
+
+/// 控件与节点预览（`feishu.approval.list_widgets`）：按 approval_code 出站调飞书
+/// 并解析定义。归 write 侧（出站耗频控配额），目录里没有它时 `requireAction` 抛错。
+export async function fetchApprovalDefinition(
   approvalCode: string,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
-): Promise<ApprovalWidget[]> {
+): Promise<ApprovalDefinitionPreview> {
   const result = await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.listWidgets,
@@ -2588,10 +2699,25 @@ export async function listApprovalWidgets(
           };
     },
   );
-  return listOf(result.data, "widgets", parseApprovalWidget).map((widget) => ({
-    ...widget,
-    optionSources: widget.usesExternalOptions ? sources : undefined,
-  }));
+  return {
+    widgets: listOf(result.data, "widgets", parseApprovalWidget).map(
+      (widget) => ({
+        ...widget,
+        optionSources: widget.usesExternalOptions ? sources : undefined,
+      }),
+    ),
+    nodes: listOf(result.data, "nodes", parseApprovalNode),
+  };
+}
+
+/// 只要控件（派发配置向导用；新增的 `nodes` 键对它无影响）。
+export async function listApprovalWidgets(
+  approvalCode: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalWidget[]> {
+  const definition = await fetchApprovalDefinition(approvalCode, deps, signal);
+  return definition.widgets;
 }
 
 /// 派发记录（`feishu.approval.list_requests`）。请求体/返回体原文随行返回，本地展开。
@@ -2856,6 +2982,745 @@ export function useApprovalWizardClient(): ApprovalWizardClient {
         updateApprovalConfig(configId, patch, deps),
     }),
     [deps],
+  );
+}
+
+/* ----------------------------- 审批回写控制台 ----------------------------- */
+
+/* ----- 请求体 ----- */
+
+function buildApprovalExportRuleListBody(
+  query: ApprovalExportRulesQuery,
+): Record<string, unknown> {
+  const search = query.search.trim();
+  return {
+    page: query.page,
+    page_size: query.pageSize,
+    search: search === "" ? undefined : search,
+    // 确定性全序：只按 updated_at 排会在同一秒写入的规则之间抖动，翻页漏行。
+    order_by: [
+      { field: "updated_at", direction: "Desc" },
+      { field: "id", direction: "Asc" },
+    ],
+    count_total: true,
+  };
+}
+
+function buildApprovalExportRunListBody(
+  query: ApprovalExportRunsQuery,
+): Record<string, unknown> {
+  return {
+    page: query.page,
+    page_size: query.pageSize,
+    count_total: true,
+    rule_id: query.ruleId,
+    instance_code: query.instanceCode?.trim() || undefined,
+    write_status: query.writeStatus || undefined,
+    mark_status: query.markStatus || undefined,
+    row_key: query.rowKey || undefined,
+  };
+}
+
+/* ----- 响应解析 ----- */
+
+const EXPORT_CONDITION_OPS: readonly ApprovalExportConditionOp[] = [
+  "eq",
+  "ne",
+  "in",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "contains",
+  "is_empty",
+  "between",
+];
+
+function asExportConditionOp(value: unknown): ApprovalExportConditionOp | null {
+  return EXPORT_CONDITION_OPS.find((op) => op === value) ?? null;
+}
+
+function parseExportConditionLeaf(
+  raw: Record<string, unknown>,
+): ApprovalExportConditionLeaf | null {
+  const widgetId = asString(raw.widget_id);
+  const op = asExportConditionOp(raw.op);
+  if (widgetId === "" || op === null) return null;
+  return { widgetId, op, value: raw.value ?? null };
+}
+
+/// 后端已把 `condition_json` 解析成对象；这里再折成界面的驼峰形状。
+/// 任一条目认不出就跳过该条（整条规则仍可编辑），不因此判整页失败。
+function parseExportCondition(value: unknown): ApprovalExportCondition | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const match = record.match === "any" ? "any" : "all";
+  const rawItems = record.items;
+  if (!Array.isArray(rawItems)) return { match, items: [] };
+  const items: ApprovalExportConditionItem[] = [];
+  for (const rawItem of rawItems) {
+    const item = asRecord(rawItem);
+    if (!item) continue;
+    if (item.scope === "instance") {
+      const leaf = parseExportConditionLeaf(item);
+      if (leaf) items.push({ scope: "instance", ...leaf });
+      continue;
+    }
+    if (item.scope === "detail") {
+      const detailWidgetId = asString(item.detail_widget_id);
+      if (detailWidgetId === "") continue;
+      const detailMatch =
+        item.match === "any" ? "any" : item.match === "none" ? "none" : "all";
+      const rawLeaves = item.items;
+      const leaves = Array.isArray(rawLeaves)
+        ? rawLeaves
+            .map((leaf) => asRecord(leaf))
+            .filter(
+              (leaf): leaf is Record<string, unknown> => leaf !== undefined,
+            )
+            .map(parseExportConditionLeaf)
+            .filter(
+              (leaf): leaf is ApprovalExportConditionLeaf => leaf !== null,
+            )
+        : [];
+      items.push({
+        scope: "detail",
+        detailWidgetId,
+        match: detailMatch,
+        items: leaves,
+      });
+    }
+  }
+  return { match, items };
+}
+
+/// 条件对象 → 线上 DSL JSON 文本；空条件返回 `null`（= 不写该列，恒真）。
+export function serializeExportCondition(
+  condition: ApprovalExportCondition | null,
+): string | null {
+  if (!condition || condition.items.length === 0) return null;
+  const leaf = (item: ApprovalExportConditionLeaf) => ({
+    widget_id: item.widgetId,
+    op: item.op,
+    // `is_empty` 不需要操作数；其余原样带上（`in` / `between` 是数组）。
+    ...(item.op === "is_empty" ? {} : { value: item.value }),
+  });
+  return JSON.stringify({
+    match: condition.match,
+    items: condition.items.map((item) =>
+      item.scope === "instance"
+        ? { scope: "instance", ...leaf(item) }
+        : {
+            scope: "detail",
+            detail_widget_id: item.detailWidgetId,
+            match: item.match,
+            items: item.items.map(leaf),
+          },
+    ),
+  });
+}
+
+function parseExportStatusLabels(value: unknown): ApprovalExportStatusLabels {
+  const record = asRecord(value);
+  const text = (key: string, fallback: string) => {
+    const raw = record?.[key];
+    return typeof raw === "string" && raw !== "" ? raw : fallback;
+  };
+  return {
+    valid: text("valid", DEFAULT_EXPORT_STATUS_LABELS.valid),
+    rolledBack: text("rolled_back", DEFAULT_EXPORT_STATUS_LABELS.rolledBack),
+    rejected: text("rejected", DEFAULT_EXPORT_STATUS_LABELS.rejected),
+    canceled: text("canceled", DEFAULT_EXPORT_STATUS_LABELS.canceled),
+    reverted: text("reverted", DEFAULT_EXPORT_STATUS_LABELS.reverted),
+    deleted: text("deleted", DEFAULT_EXPORT_STATUS_LABELS.deleted),
+  };
+}
+
+function parseExportOptionMap(value: unknown): Record<string, string> {
+  const record = asRecord(value);
+  if (!record) return {};
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === "string") out[key] = item;
+  }
+  return out;
+}
+
+function parseExportMap(
+  raw: Record<string, unknown>,
+): ApprovalExportMap | null {
+  const targetFieldId = asString(raw.target_field_id);
+  if (targetFieldId === "") return null;
+  const kind =
+    raw.source_kind === "top" ||
+    raw.source_kind === "system" ||
+    raw.source_kind === "constant"
+      ? raw.source_kind
+      : "detail";
+  return {
+    sourceKind: kind,
+    sourceWidgetId: asString(raw.source_widget_id),
+    sourceSystemKey: asString(raw.source_system_key),
+    constantValue: asNullableString(raw.constant_value),
+    targetFieldId,
+    targetFieldName: asNullableString(raw.target_field_name),
+    converter: asString(raw.converter, "text"),
+    optionMap: parseExportOptionMap(raw.option_map),
+    required: raw.required === true,
+  };
+}
+
+function parseApprovalExportRule(
+  raw: Record<string, unknown>,
+): ApprovalExportRule | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  const rawMaps = raw.maps;
+  const maps = Array.isArray(rawMaps)
+    ? rawMaps
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map(parseExportMap)
+        .filter((item): item is ApprovalExportMap => item !== null)
+    : [];
+  const rawNodeIds = raw.trigger_node_ids;
+  const conditionJson = asNullableString(raw.condition_json);
+  // `condition` 解析失败时后端给 null、原串仍在 conditionJson：页面据此提示
+  // 「条件无法解析，请重新保存」，而不是把整条规则读成「无条件」。
+  const condition = parseExportCondition(raw.condition);
+  return {
+    id,
+    title: asString(raw.title),
+    approvalCode: asString(raw.approval_code),
+    approvalName: asNullableString(raw.approval_name),
+    triggerMode: asString(raw.trigger_mode, "node_passed"),
+    triggerNodeIds: Array.isArray(rawNodeIds)
+      ? rawNodeIds.filter((node): node is string => typeof node === "string")
+      : [],
+    requireFinalApproval: raw.require_final_approval !== false,
+    detailWidgetId: asString(raw.detail_widget_id),
+    rowFilter: asString(raw.row_filter, "matched_rows"),
+    condition,
+    conditionJson,
+    targetBaseToken: asString(raw.target_base_token),
+    targetTableId: asString(raw.target_table_id),
+    targetBaseName: asNullableString(raw.target_base_name),
+    targetTableName: asNullableString(raw.target_table_name),
+    statusField: asNullableString(raw.status_field),
+    statusFieldName: asNullableString(raw.status_field_name),
+    statusLabels: parseExportStatusLabels(raw.status_labels),
+    markEnabled: raw.mark_enabled !== false,
+    enabled: raw.enabled === true,
+    snapshotAt: asNullableNumber(raw.snapshot_at),
+    effectiveFrom: asNullableNumber(raw.effective_from),
+    updatedAt: asNumber(raw.updated_at, 0),
+    maps,
+  };
+}
+
+function parseApprovalExportRun(
+  raw: Record<string, unknown>,
+): ApprovalExportRun | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  return {
+    id,
+    ruleId: asNumber(raw.rule_id, 0),
+    approvalCode: asString(raw.approval_code),
+    instanceCode: asString(raw.instance_code),
+    triggerNodeId: asString(raw.trigger_node_id),
+    rowKey: asString(raw.row_key),
+    generation: asNumber(raw.generation, 0),
+    writeStatus: asString(raw.write_status),
+    markStatus: asString(raw.mark_status),
+    appliedLabel: asNullableString(raw.applied_label),
+    targetRecordId: asNullableString(raw.target_record_id),
+    attempts: asNumber(raw.attempts, 0),
+    nextAttemptAt: asNullableNumber(raw.next_attempt_at),
+    writtenAt: asNullableNumber(raw.written_at),
+    markedAt: asNullableNumber(raw.marked_at),
+    lastError: asNullableString(raw.last_error),
+    updatedAt: asNumber(raw.updated_at, 0),
+  };
+}
+
+function parseApprovalExportRuleProblem(
+  raw: Record<string, unknown>,
+): ApprovalExportRuleProblem | null {
+  const ruleId = typeof raw.rule_id === "number" ? raw.rule_id : null;
+  if (ruleId === null) return null;
+  const rawReasons = raw.reasons;
+  return {
+    ruleId,
+    title: asString(raw.title),
+    status: raw.status === "error" ? "error" : "invalid",
+    reasons: Array.isArray(rawReasons)
+      ? rawReasons.filter(
+          (reason): reason is string => typeof reason === "string",
+        )
+      : [],
+  };
+}
+
+function parseApprovalExportPreview(data: unknown): ApprovalExportPreview {
+  const record = asRecord(data);
+  const rawTrigger = asRecord(record?.trigger);
+  const rawCondition = asRecord(record?.condition);
+  const rawRows = record?.rows;
+  const rawReviews = record?.reviews;
+  const rawDrifts = record?.drifts;
+  const triggerStates = [
+    "passed",
+    "waiting_node",
+    "waiting_final",
+    "not_passed",
+    "rolled_back",
+  ] as const;
+  const triggerState = triggerStates.find(
+    (state) => state === rawTrigger?.state,
+  );
+  return {
+    ruleId: asNumber(record?.rule_id, 0),
+    ruleTitle: asString(record?.rule_title),
+    instanceCode: asString(record?.instance_code),
+    trigger: {
+      // 认不出的状态折成 `not_passed`：它不是「已通过」，不会让界面说假话。
+      state: triggerState ?? "not_passed",
+      passed: rawTrigger?.passed === true,
+      nodeId: asNullableString(rawTrigger?.node_id),
+    },
+    condition: {
+      matched: rawCondition?.matched === true,
+      drifts: Array.isArray(rawCondition?.drifts)
+        ? rawCondition.drifts.filter(
+            (drift): drift is string => typeof drift === "string",
+          )
+        : [],
+    },
+    rows: Array.isArray(rawRows)
+      ? rawRows
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((row) => ({
+            rowKey: asString(row.row_key),
+            fields: asRecord(row.fields) ?? {},
+            payloadHash: asString(row.payload_hash),
+          }))
+      : [],
+    reviews: Array.isArray(rawReviews)
+      ? rawReviews
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((review) => ({
+            rowKey: asString(review.row_key),
+            reason: asString(review.reason),
+          }))
+      : [],
+    drifts: Array.isArray(rawDrifts)
+      ? rawDrifts.filter((drift): drift is string => typeof drift === "string")
+      : [],
+    error: asNullableString(record?.error),
+  };
+}
+
+/* ----- 写请求 ----- */
+
+/// 一条字段映射的入参（与后端 `ExportMapInput` 同键）。
+export type ApprovalExportMapInput = {
+  sourceKind: ApprovalExportMap["sourceKind"];
+  sourceWidgetId: string;
+  sourceSystemKey: string;
+  constantValue: string | null;
+  targetFieldId: string;
+  converter: string;
+  optionMap: Record<string, string>;
+  required: boolean;
+};
+
+/// 创建 / 更新规则的提交物（更新只是多一个 rule_id）。
+export type ApprovalExportRuleInput = {
+  title: string;
+  approvalCode: string;
+  triggerMode: string;
+  triggerNodeIds: string[];
+  requireFinalApproval: boolean;
+  detailWidgetId: string;
+  rowFilter: string;
+  condition: ApprovalExportCondition | null;
+  targetBaseToken: string;
+  targetTableId: string;
+  statusField: string | null;
+  markEnabled: boolean;
+  enabled: boolean;
+  maps: ApprovalExportMapInput[];
+};
+
+function buildApprovalExportRuleBody(
+  input: ApprovalExportRuleInput,
+): Record<string, unknown> {
+  const conditionJson = serializeExportCondition(input.condition);
+  const statusField = input.statusField?.trim() ?? "";
+  return {
+    title: input.title.trim(),
+    approval_code: input.approvalCode.trim(),
+    trigger_mode: input.triggerMode,
+    trigger_node_ids: input.triggerNodeIds,
+    require_final_approval: input.requireFinalApproval,
+    detail_widget_id: input.detailWidgetId,
+    row_filter: input.rowFilter,
+    ...(conditionJson === null ? {} : { condition_json: conditionJson }),
+    target_base_token: input.targetBaseToken.trim(),
+    target_table_id: input.targetTableId.trim(),
+    ...(statusField === "" ? {} : { status_field: statusField }),
+    mark_enabled: input.markEnabled,
+    enabled: input.enabled,
+    maps: input.maps.map((map) => {
+      const optionMap = Object.fromEntries(
+        Object.entries(map.optionMap).filter(
+          ([key, value]) => key.trim() !== "" && value.trim() !== "",
+        ),
+      );
+      return {
+        source_kind: map.sourceKind,
+        source_widget_id:
+          map.sourceKind === "detail" || map.sourceKind === "top"
+            ? map.sourceWidgetId
+            : "",
+        source_system_key:
+          map.sourceKind === "system" ? map.sourceSystemKey : "",
+        ...(map.sourceKind === "constant" &&
+        (map.constantValue ?? "").trim() !== ""
+          ? { constant_value: map.constantValue }
+          : {}),
+        target_field_id: map.targetFieldId,
+        converter: map.converter,
+        ...(Object.keys(optionMap).length === 0
+          ? {}
+          : { option_map: optionMap }),
+        required: map.required,
+      };
+    }),
+  };
+}
+
+/// 规则列表（`export_list_rules`）。
+export async function listApprovalExportRules(
+  query: ApprovalExportRulesQuery,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalExportRule>> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.listRules,
+    buildApprovalExportRuleListBody(query),
+    signal,
+  );
+  return parsePage(result.data, parseApprovalExportRule);
+}
+
+/// 创建规则；回执带新主键（试算要用它，所以必须回读）。
+export async function createApprovalExportRule(
+  input: ApprovalExportRuleInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ ruleId: number; approvalName: string; mapsCount: number }> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.createRule,
+    buildApprovalExportRuleBody(input),
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    ruleId: asNumber(data?.rule_id, 0),
+    approvalName: asString(data?.approval_name),
+    mapsCount: asNumber(data?.maps_count, 0),
+  };
+}
+
+/// 更新规则：全量替换规则字段与映射（映射先删后插）。
+export async function updateApprovalExportRule(
+  ruleId: number,
+  input: ApprovalExportRuleInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<void> {
+  await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.updateRule,
+    { rule_id: ruleId, ...buildApprovalExportRuleBody(input) },
+    signal,
+  );
+}
+
+/// 删除规则：映射同事务删除，运行记录保留（已写入的目标记录是来源证据）。
+export async function deleteApprovalExportRule(
+  ruleId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ deletedMaps: number }> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.deleteRule,
+    { rule_id: ruleId },
+    signal,
+  );
+  return { deletedMaps: asNumber(asRecord(result.data)?.deleted_maps, 0) };
+}
+
+/// 批量体检启用的规则（按保存期同一套校验重放，只读不落库）。
+export async function checkApprovalExportRules(
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalExportCheckResult> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.checkRules,
+    {},
+    signal,
+  );
+  const data = asRecord(result.data);
+  const rawProblems = data?.problems;
+  return {
+    total: asNumber(data?.total, 0),
+    okCount: asNumber(data?.ok_count, 0),
+    problemCount: asNumber(data?.problem_count, 0),
+    invalidCount: asNumber(data?.invalid_count, 0),
+    errorCount: asNumber(data?.error_count, 0),
+    problems: Array.isArray(rawProblems)
+      ? rawProblems
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map(parseApprovalExportRuleProblem)
+          .filter((item): item is ApprovalExportRuleProblem => item !== null)
+      : [],
+  };
+}
+
+/// 运行台账（`export_list_runs`）。
+export async function listApprovalExportRuns(
+  query: ApprovalExportRunsQuery,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalExportRun>> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.listRuns,
+    buildApprovalExportRunListBody(query),
+    signal,
+  );
+  return parsePage(result.data, parseApprovalExportRun);
+}
+
+/// 人工重试：只接受 pending / retry / review；同时唤醒同实例的规则级行。
+export async function retryApprovalExportRun(
+  runId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ previousStatus: string; wokeRule: boolean }> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.retryRun,
+    { run_id: runId },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    previousStatus: asString(data?.previous_status),
+    wokeRule: data?.woke_rule === true,
+  };
+}
+
+/// 强制重建：目标行被手工删除后，代次 +1、换新幂等 Token 重新创建。
+export async function forceRecreateApprovalExportRun(
+  runId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ generation: number }> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.forceRecreate,
+    { run_id: runId },
+    signal,
+  );
+  return { generation: asNumber(asRecord(result.data)?.generation, 0) };
+}
+
+/// 试算：**只接受已保存的规则 id**（后端按 rule_id 读规则与映射），所以向导的
+/// 「保存并试算」是先保存、再用返回的主键试算。
+export async function previewApprovalExport(
+  ruleId: number,
+  instanceCode: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalExportPreview> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.preview,
+    { rule_id: ruleId, instance_code: instanceCode.trim() },
+    signal,
+  );
+  return parseApprovalExportPreview(result.data);
+}
+
+/* ----- hooks ----- */
+
+/// 规则列表。目录里没有读权限时不发请求。
+export function useApprovalExportRuleList(
+  query: ApprovalExportRulesQuery,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalExportRule>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled: canReadApprovalExport(catalogData) && options.enabled !== false,
+    queryKey: feishuQueryKeys.approvalExportRuleList(query),
+    queryFn: ({ signal }) =>
+      listApprovalExportRules(query, { catalog: catalogData, session }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+  });
+}
+
+/// 运行台账。`ruleId` 未给时看全部；页面通常按某条规则下钻。
+export function useApprovalExportRunList(
+  query: ApprovalExportRunsQuery,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalExportRun>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled:
+      hasOperation(catalogData, EXPORT_OPERATION_IDS.listRuns) &&
+      options.enabled !== false,
+    queryKey: feishuQueryKeys.approvalExportRunList(query),
+    queryFn: ({ signal }) =>
+      listApprovalExportRuns(query, { catalog: catalogData, session }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+  });
+}
+
+/// 规则页与向导要用的「已绑定目录与会话」的写操作入口。
+/// 变更函数本身不缓存失效——页面提交后回读列表。
+export type ApprovalExportActions = {
+  canRead: boolean;
+  canWrite: boolean;
+  canCheck: boolean;
+  canRetry: boolean;
+  canForceRecreate: boolean;
+  checkRules: () => Promise<ApprovalExportCheckResult>;
+  deleteRule: (ruleId: number) => Promise<{ deletedMaps: number }>;
+  retryRun: (
+    runId: number,
+  ) => Promise<{ previousStatus: string; wokeRule: boolean }>;
+  forceRecreateRun: (runId: number) => Promise<{ generation: number }>;
+};
+
+export function useApprovalExportActions(): ApprovalExportActions {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  const queryClient = useQueryClient();
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  const checkRules = useCallback(() => checkApprovalExportRules(deps), [deps]);
+  const deleteRule = useCallback(
+    async (ruleId: number) => {
+      const result = await deleteApprovalExportRule(ruleId, deps);
+      await queryClient.invalidateQueries({
+        queryKey: feishuQueryKeys.approvalExportRules(),
+      });
+      return result;
+    },
+    [deps, queryClient],
+  );
+  const retryRun = useCallback(
+    async (runId: number) => {
+      const result = await retryApprovalExportRun(runId, deps);
+      await queryClient.invalidateQueries({
+        queryKey: feishuQueryKeys.approvalExportRuns(),
+      });
+      return result;
+    },
+    [deps, queryClient],
+  );
+  const forceRecreateRun = useCallback(
+    async (runId: number) => {
+      const result = await forceRecreateApprovalExportRun(runId, deps);
+      await queryClient.invalidateQueries({
+        queryKey: feishuQueryKeys.approvalExportRuns(),
+      });
+      return result;
+    },
+    [deps, queryClient],
+  );
+
+  return {
+    canRead: canReadApprovalExport(catalogData),
+    canWrite: canWriteApprovalExport(catalogData),
+    canCheck: hasOperation(catalogData, EXPORT_OPERATION_IDS.checkRules),
+    canRetry: hasOperation(catalogData, EXPORT_OPERATION_IDS.retryRun),
+    canForceRecreate: hasOperation(
+      catalogData,
+      EXPORT_OPERATION_IDS.forceRecreate,
+    ),
+    checkRules,
+    deleteRule,
+    retryRun,
+    forceRecreateRun,
+  };
+}
+
+/// 建 / 改回写规则的向导要用的一组数据访问入口（照 `ApprovalWizardClient` 的
+/// 注入范式：组件不摸会话与目录，可脱离应用壳渲染与测试）。
+export type ApprovalExportWizardClient = {
+  /// 当前身份是否同时持有 `feishu.datasource.write`（选表 / 选列的前提）。
+  /// `false` 时向导不发出站查询，直接走手填坐标。
+  canPickBitable: boolean;
+  listTables: (appToken: string) => Promise<BitableTable[]>;
+  listFields: (appToken: string, tableId: string) => Promise<BitableField[]>;
+  listDefinition: (approvalCode: string) => Promise<ApprovalDefinitionPreview>;
+  createRule: (input: ApprovalExportRuleInput) => Promise<number>;
+  updateRule: (ruleId: number, input: ApprovalExportRuleInput) => Promise<void>;
+  preview: (
+    ruleId: number,
+    instanceCode: string,
+  ) => Promise<ApprovalExportPreview>;
+};
+
+export function useApprovalExportWizardClient(): ApprovalExportWizardClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      canPickBitable: hasOperation(catalogData, TABLE_OPERATION_IDS.listTables),
+      listTables: (appToken: string) => listBitableTables(appToken, deps),
+      listFields: (appToken: string, tableId: string) =>
+        listBitableFields(appToken, tableId, deps),
+      listDefinition: (approvalCode: string) =>
+        fetchApprovalDefinition(approvalCode, deps),
+      createRule: async (input: ApprovalExportRuleInput) =>
+        (await createApprovalExportRule(input, deps)).ruleId,
+      updateRule: (ruleId: number, input: ApprovalExportRuleInput) =>
+        updateApprovalExportRule(ruleId, input, deps),
+      preview: (ruleId: number, instanceCode: string) =>
+        previewApprovalExport(ruleId, instanceCode, deps),
+    }),
+    [catalogData, deps],
   );
 }
 

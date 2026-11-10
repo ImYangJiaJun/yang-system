@@ -123,8 +123,31 @@ pub(super) async fn handle(
     } else {
         Vec::new()
     };
+
+    // 回写规则的触发节点选择要的是 `node_list`。真机样本里它不是实例节点的
+    // 全集（自动通过节点可能缺席），所以原样透传，由界面提示用户可能的缺口。
+    let nodes: Vec<serde_json::Value> = definition
+        .node_list
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|node| {
+            serde_json::json!({
+                "name": node.name,
+                "node_id": node.node_id,
+                "custom_node_id": node.custom_node_id,
+                "node_type": node.node_type,
+                "need_approver": node.need_approver,
+            })
+        })
+        .collect();
+
     ApiResponse::success(
-        serde_json::json!({ "widgets": items, "option_sources": option_sources }),
+        serde_json::json!({
+            "widgets": items,
+            "nodes": nodes,
+            "option_sources": option_sources,
+        }),
         "查询成功",
     )
 }

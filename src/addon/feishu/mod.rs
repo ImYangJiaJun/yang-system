@@ -60,6 +60,11 @@ pub(crate) fn build_addon(
     .module(approval::build_task_applicant_module()?)
     // 审批事件落地表（store-then-process 缓冲）。
     .module(approval::build_event_module()?)
+    // 审批 → 多维表格回写：三张表 = 三个 module，读写由回写 Action / worker 经
+    // `FeishuContext` 跨表完成。
+    .module(approval::build_export_rule_module()?)
+    .module(approval::build_export_field_map_module()?)
+    .module(approval::build_export_run_module()?)
     // 飞书用户身份（OAuth user_access_token）单例行：同样只有表，
     // 读写由派发的姓名解析路径与提醒 worker 经 `FeishuContext` 完成。
     .module(approval::build_user_token_module()?)
@@ -147,6 +152,18 @@ pub(crate) fn build_context(
         ),
         Repository::new(
             approval::domain::event_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::export_rule_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::export_field_map_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::export_run_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         password_engine,
