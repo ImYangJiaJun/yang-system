@@ -4,8 +4,9 @@ pub mod addon;
 pub mod app;
 pub mod bootstrap;
 pub mod config;
-mod db;
+
 mod infrastructure;
+pub(crate) use infrastructure::db;
 
 pub use infrastructure::{
     audit, authorization, feishu_approval_worker, feishu_event_worker, feishu_oauth_reminder,

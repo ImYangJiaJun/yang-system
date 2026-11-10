@@ -7218,7 +7218,7 @@ mod tests {
 
         assert_eq!(outcome.seeded, 0);
         assert_eq!(outcome.reopened, 1, "点击人自己的单条任务照常重开");
-        assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.skipped, 1, "r2 的申请人不是点击人，应计入跳过");
         assert_eq!(outcome.touched, vec![r3.clone()], "只碰点击人自己的记录");
         assert!(!outcome.empty_notified);
 
