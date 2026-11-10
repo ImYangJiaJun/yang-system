@@ -9,6 +9,8 @@
 //!    的时间过滤旧任务，再判通过。
 //! 3. `AND` / `SEQUENTIAL`：过滤后的任务**全部** `APPROVED`（`AUTO_PASS` 算通过）；
 //!    `OR`：任一通过。`DONE` / `PENDING` / `REJECTED` / `ROLLBACK` 都不算通过。
+//!    转交（`TRANSFERRED`）是旧任务的交接记录，结论在接收人的新任务上，不能阻塞
+//!    节点通过。
 //! 4. 实例最终通过 = `status == "APPROVED"` 且 `reverted != true`。
 
 use std::collections::BTreeMap;
@@ -152,6 +154,9 @@ fn node_state(tasks: &[TaskNode], node_id: &str, rollback_at: Option<i64>) -> No
         .iter()
         .filter(|task| task.node_id.as_deref() == Some(node_id))
         .collect();
+    // 转交后的旧任务只是交接记录，节点结论由接收人的新任务承载；把它算进
+    // AND 的「全部通过」会让「转交 + 同意」的节点永远等不到通过。
+    node_tasks.retain(|task| task.status.as_deref() != Some("TRANSFERRED"));
     if node_tasks.is_empty() {
         return NodeState::NotReached;
     }
@@ -399,6 +404,25 @@ mod tests {
             vec![],
         );
         assert!(compute_node_passed(&rule, &detail).is_passed());
+    }
+
+    #[test]
+    fn transferred_task_does_not_block_an_approved_node() {
+        let rule = rule(TriggerMode::NodePassed, &["n1"], false);
+        let detail = detail(
+            "PENDING",
+            None,
+            vec![
+                // 转交后飞书保留旧任务为 TRANSFERRED，接收人的新任务才是结论。
+                task("1", "n1", "AND", "TRANSFERRED", "1000"),
+                task("2", "n1", "AND", "APPROVED", "1001"),
+            ],
+            vec![],
+        );
+        assert!(
+            compute_node_passed(&rule, &detail).is_passed(),
+            "TRANSFERRED 是交接记录，不应让节点永远停在未通过"
+        );
     }
 
     #[test]
