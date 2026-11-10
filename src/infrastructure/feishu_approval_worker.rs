@@ -4943,6 +4943,31 @@ mod tests {
         let _ = field_type;
     }
 
+    /// 单条点击的唤醒信号必须携带被点记录 id；批量受理才允许 `None`。
+    #[test]
+    fn dispatch_request_carries_record_id_and_aggregate() {
+        let (handle, mut receiver) = ApprovalDispatchHandle::new();
+        handle
+            .request_dispatch(
+                7,
+                Some("ou_test".to_string()),
+                Some("rec-1".to_string()),
+                false,
+            )
+            .unwrap_or_else(|error| panic!("唤醒信号应可发送: {error}"));
+        assert_eq!(
+            receiver
+                .try_recv()
+                .unwrap_or_else(|error| panic!("唤醒信号应进通道: {error}")),
+            (
+                7,
+                Some("ou_test".to_string()),
+                Some("rec-1".to_string()),
+                false
+            )
+        );
+    }
+
     /// 单条与聚合组共用同一份审批编号链接：编号是链接文本，href 只来自实例 Code；
     /// 缺实例码时保持纯文本。
     #[test]

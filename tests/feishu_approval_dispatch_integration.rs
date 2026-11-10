@@ -751,15 +751,13 @@ async fn dispatch_without_initiator_is_rejected_and_logged() {
     finish(outcome, "缺发起人直接拒").await;
 }
 
-/// 单条点击**带着发起人**时：出站失败（夹具没有通讯录解析所需的凭证），但唤醒
-/// 信号必须携带被点记录 id 与请求参数解析出的发起人。
-///
-/// 夹具走 dummy 凭证，姓名解析必然失败 →结论 `failed`，信号里的发起人为空
-/// （只有解析成功才有 open_id 可带）。所以这里钉的是**信号形状**：被点记录 id
-/// 必须精确到那一行，不能是 `None`（那是批量语义，会把发起人广播给整批）。
+/// 受理前就拒绝的单条点击（此处发起人解析失败，`claim` 为空）**不得唤醒**
+/// worker：没有任务行的唤醒会让 worker 为一条明确被拒的记录重新播种，制造终态
+/// 任务并把同一句拒绝再发一遍。信号携带 `record_id` 的通道形态由
+/// `dispatch_request_carries_record_id_and_aggregate` 单测钉住。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn single_dispatch_signal_carries_the_clicked_record_id() {
+async fn single_dispatch_rejection_does_not_wake_worker() {
     let outcome = async {
         let database = connect_database().await?;
         reset_database(&database).await?;
@@ -768,10 +766,10 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
             .context("同步 Schema 失败")?;
         let database = connect_database().await?;
         let redis = connect_redis().await?;
-        let (config_id, config_key) =
+        let (_, config_key) =
             seed_config(&database, "appSignalTest", "tblSignalTest", true).await?;
 
-        // 接收端保持存活：worker 没起，信号只是进通道。
+        // 接收端保持存活：worker 没起，若有唤醒信号会留在通道里。
         let (handle, mut receiver) = ApprovalDispatchHandle::new();
         let app = build_feishu_app(
             &database,
@@ -782,8 +780,7 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         )
         .await?;
 
-        // 带发起人（请求参数，姓名）：出站建栈/解析会失败，但信号必须已经投递。
-        let response = dispatch_as_workflow(
+        let _ = dispatch_as_workflow(
             &app,
             &config_key,
             json!({
@@ -795,31 +792,19 @@ async fn single_dispatch_signal_carries_the_clicked_record_id() {
         .await
         .context("单条派发不应冒泡为 Err")?;
 
-        let (got_config, applicant, record_id, aggregate) = receiver
-            .try_recv()
-            .context("单条派发必须唤醒 worker（信号进通道）")?;
         ensure!(
-            got_config == config_id,
-            "信号必须携带命中的配置: {got_config}"
-        );
-        ensure!(
-            record_id.as_deref() == Some("recSignal"),
-            "单条点击的唤醒信号必须携带被点记录 id，否则发起人会被广播: {record_id:?}"
-        );
-        ensure!(
-            !aggregate,
-            "单条点击恒不聚合（独立建单），信号里的聚合意图必须为 false: {aggregate}"
-        );
-        ensure!(
-            applicant.is_none(),
-            "dummy 凭证下姓名解析不可能成功，信号里的发起人必须为空: {applicant:?} / {response:?}"
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "受理前拒绝的点击不得唤醒 worker"
         );
 
         Ok(())
     }
     .await;
 
-    finish(outcome, "单条派发信号携带 record_id").await;
+    finish(outcome, "单条派发拒绝不唤醒").await;
 }
 
 /// provision 失败（夹具不装 HTTP 客户端，`outbound_setup::build` 必然失败）：
