@@ -234,9 +234,11 @@ mod tests {
             .await?;
         let day = 24 * 3600;
         let retention = SESSION_RETENTION_SECONDS as i64;
+        // UNIX_TIMESTAMP() 只有秒精度，查询与删除之间的耗时会把「恰好等于边界」
+        // 的行推成过期；留 60 秒余量，避免测试随秒边界抖动。
         for (session_id, last_seen_at) in [
-            ("stale-session", now - retention - 1),
-            ("boundary-session", now - retention),
+            ("stale-session", now - retention - 60),
+            ("boundary-session", now - retention + 60),
             ("fresh-session", now - day),
         ] {
             sqlx::query(
