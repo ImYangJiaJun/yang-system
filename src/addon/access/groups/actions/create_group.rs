@@ -72,13 +72,8 @@ fn reject_reserved_group_key(group_key: &str) -> Result<(), BaseError> {
 /// 只认「撞 `uk_permission_group_key` 的唯一键冲突」：外键/非空/CHECK 等其它约束
 /// 错误必须原样放行——那是真实数据故障，不该伪装成输入错误。
 fn fold_duplicate_group_key(error: BaseError) -> BaseError {
-    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
-        if message.contains("Duplicate entry") && message.contains("uk_permission_group_key") {
-            return BaseError::ParamInvalid(
-                "group_key".to_string(),
-                "该组标识已被占用".to_string(),
-            );
-        }
+    if crate::db::constraint_matches(&error, "uk_permission_group_key") {
+        return BaseError::ParamInvalid("group_key".to_string(), "该组标识已被占用".to_string());
     }
     error
 }

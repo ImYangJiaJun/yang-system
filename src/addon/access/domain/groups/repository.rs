@@ -126,7 +126,7 @@ impl GroupRepository {
             .await
         {
             Ok(id) => Ok(id),
-            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => self
+            Err(error) if crate::db::is_constraint_violation(&error) => self
                 .find_by_key_in_tx(ctx, transaction, SYSTEM_ADMIN_GROUP_KEY)
                 .await?
                 .map(|record| record.id)

@@ -69,11 +69,12 @@ pub(super) async fn handle(
             .users()
             .update_username_in_tx(&ctx, &mut transaction, user_id, &new_username)
             .await
-            .map_err(|error| match error {
-                BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_)) => {
+            .map_err(|error| {
+                if crate::db::is_unique_violation(&error) {
                     BaseError::ParamInvalid("new_username".to_string(), "用户名已存在".to_string())
+                } else {
+                    error
                 }
-                other => other,
             })?;
         Account::increment_versions_in_tx(&mut transaction, &locked).await?;
         account

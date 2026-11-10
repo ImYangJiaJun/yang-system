@@ -207,15 +207,11 @@ impl CreatePortalInput {
 /// 预检（[`ensure_custom_slug_available`]）挡的是先到的那一个；并发创建只能靠
 /// 唯一索引兜底，而底层把它包成 `DatabaseExecuteFailed`——不折算就是 500。
 fn fold_duplicate_custom_slug(error: BaseError) -> BaseError {
-    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
-        if message.contains("Duplicate entry")
-            && message.contains("uk_feishu_datasource_portal_custom_slug")
-        {
-            return BaseError::ParamInvalid(
-                "custom_slug".to_string(),
-                "该短链已被占用，请换一个".to_string(),
-            );
-        }
+    if crate::db::constraint_matches(&error, "uk_feishu_datasource_portal_custom_slug") {
+        return BaseError::ParamInvalid(
+            "custom_slug".to_string(),
+            "该短链已被占用，请换一个".to_string(),
+        );
     }
     error
 }

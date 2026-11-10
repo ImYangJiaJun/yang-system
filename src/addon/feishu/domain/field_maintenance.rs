@@ -464,15 +464,11 @@ pub(crate) fn validate_source_key(
 
 /// 把 `source_key` 的唯一键冲突折算成参数错误（与创建路径同一口径）。
 pub(crate) fn fold_duplicate_source_key(error: BaseError) -> BaseError {
-    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
-        if message.contains("Duplicate entry")
-            && message.contains("uk_feishu_datasource_field_source_key")
-        {
-            return BaseError::ParamInvalid(
-                "source_key".to_string(),
-                "数据源标识已被占用，请换一个标识".to_string(),
-            );
-        }
+    if crate::db::constraint_matches(&error, "uk_feishu_datasource_field_source_key") {
+        return BaseError::ParamInvalid(
+            "source_key".to_string(),
+            "数据源标识已被占用，请换一个标识".to_string(),
+        );
     }
     error
 }

@@ -76,14 +76,15 @@ pub(super) async fn handle(
                 email_verified_at,
             )
             .await
-            .map_err(|error| match error {
-                BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_)) => {
+            .map_err(|error| {
+                if crate::db::is_unique_violation(&error) {
                     BaseError::ParamInvalid(
                         "new_email".to_string(),
                         "该邮箱已被其他账号使用".to_string(),
                     )
+                } else {
+                    error
                 }
-                other => other,
             })?;
         Account::increment_versions_in_tx(&mut transaction, &locked).await?;
         account

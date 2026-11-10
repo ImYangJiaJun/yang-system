@@ -144,11 +144,10 @@ impl CreateConfigInput {
 /// `ConstraintError` 同时覆盖唯一键(1062)与外键(1452)的混叠——配置表无外键列，
 /// 风险可控。
 fn map_insert_error(error: BaseError) -> BaseError {
-    match error {
-        BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_)) => {
-            BaseError::ParamInvalid("base_token".to_string(), CONFIG_ALREADY_EXISTS.to_string())
-        }
-        other => other,
+    if crate::db::is_unique_violation(&error) {
+        BaseError::ParamInvalid("base_token".to_string(), CONFIG_ALREADY_EXISTS.to_string())
+    } else {
+        error
     }
 }
 

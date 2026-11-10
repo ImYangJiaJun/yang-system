@@ -46,7 +46,7 @@ impl SystemOwnerClaimer for AccessSystemOwnerClaimer {
             .await
         {
             Ok(()) => {}
-            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
+            Err(error) if crate::db::is_constraint_violation(&error) => {
                 return Ok(OwnerClaimOutcome::AlreadyClaimed);
             }
             Err(error) => return Err(error),

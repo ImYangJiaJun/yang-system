@@ -277,10 +277,7 @@ async fn join_group_once(
 /// 不再构成歧义：唯一键冲突已被 [`join_group_once`] 开头的用户行锁排除（并发重复加
 /// 同一成员会串行化后在幂等分支返回，走不到 INSERT），剩下的只有外键这一种。
 fn is_referential_constraint(error: &BaseError) -> bool {
-    matches!(
-        error,
-        BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))
-    )
+    crate::db::is_constraint_violation(error)
 }
 
 /// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。

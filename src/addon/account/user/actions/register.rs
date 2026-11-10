@@ -58,7 +58,7 @@ pub(super) async fn handle(
             .await
         {
             Ok(id) => id,
-            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
+            Err(error) if crate::db::is_unique_violation(&error) => {
                 return Err(BaseError::ParamInvalid(
                     "registration".to_string(),
                     "用户名已被其他请求注册".to_string(),

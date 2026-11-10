@@ -7,6 +7,46 @@
 
 pub(crate) use yang_base::database::AnyTransaction as Transaction;
 use yang_base::BaseError;
+use yang_db::{DbError, SqlErrorKind};
+
+/// 是否是数据库完整性约束错误（新旧变体统一判定）。
+///
+/// 新框架把 `sqlx::Error::Database` 映射成 `DbError::DatabaseError(SqlErrorInfo)`，
+/// 旧的 `ConstraintError` 只保留给手工构造；下游不能只 match 旧变体。
+pub(crate) fn is_constraint_violation(error: &BaseError) -> bool {
+    matches!(
+        error,
+        BaseError::DatabaseExecuteFailed(database) if database.is_constraint_violation()
+    )
+}
+
+/// 是否是唯一键冲突（旧的 `ConstraintError` 视为兼容的兜底）。
+pub(crate) fn is_unique_violation(error: &BaseError) -> bool {
+    match error {
+        BaseError::DatabaseExecuteFailed(DbError::ConstraintError(_)) => true,
+        BaseError::DatabaseExecuteFailed(database) => database
+            .sql_error()
+            .is_some_and(|info| info.kind() == SqlErrorKind::UniqueViolation),
+        _ => false,
+    }
+}
+
+/// 约束错误的约束名或报文是否包含指定索引名。
+///
+/// MySQL 的结构化错误有时不给 `constraint()`，所以报文兜底；旧的
+/// `ConstraintError` 只有报文。
+pub(crate) fn constraint_matches(error: &BaseError, needle: &str) -> bool {
+    match error {
+        BaseError::DatabaseExecuteFailed(DbError::ConstraintError(message)) => {
+            message.contains(needle)
+        }
+        BaseError::DatabaseExecuteFailed(database) => database.sql_error().is_some_and(|info| {
+            info.constraint().is_some_and(|name| name.contains(needle))
+                || info.message().contains(needle)
+        }),
+        _ => false,
+    }
+}
 
 /// 从 MySQL `Database` 开启一个统一事务句柄。
 ///

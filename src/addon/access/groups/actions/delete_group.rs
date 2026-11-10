@@ -129,10 +129,7 @@ fn group_has_members(member_count: Option<u64>) -> BaseError {
 /// RESTRICT）能被 DELETE 违反，因此认出「约束类错误」就足够，不必去解析 MySQL
 /// 的报文案（跨库、跨版本都不稳定）。
 fn is_referential_constraint(error: &BaseError) -> bool {
-    matches!(
-        error,
-        BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))
-    )
+    crate::db::is_constraint_violation(error)
 }
 
 /// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。

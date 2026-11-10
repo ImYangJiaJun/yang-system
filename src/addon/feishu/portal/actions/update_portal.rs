@@ -166,15 +166,11 @@ impl UpdatePortalInput {
 
 /// `custom_slug` 的唯一键冲突折算成参数错误（与创建路径同一口径）。
 fn fold_duplicate_custom_slug(error: BaseError) -> BaseError {
-    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
-        if message.contains("Duplicate entry")
-            && message.contains("uk_feishu_datasource_portal_custom_slug")
-        {
-            return BaseError::ParamInvalid(
-                "custom_slug".to_string(),
-                "该短链已被占用，请换一个".to_string(),
-            );
-        }
+    if crate::db::constraint_matches(&error, "uk_feishu_datasource_portal_custom_slug") {
+        return BaseError::ParamInvalid(
+            "custom_slug".to_string(),
+            "该短链已被占用，请换一个".to_string(),
+        );
     }
     error
 }
