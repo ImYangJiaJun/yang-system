@@ -5,6 +5,7 @@
 //! `domain/` 内，module 层只做装配。
 
 pub(crate) mod approval;
+pub(crate) mod approval_export;
 pub(crate) mod datasource;
 pub(crate) mod domain;
 pub(crate) mod event;
@@ -65,6 +66,13 @@ pub(crate) fn build_addon(
     .module(approval::build_export_rule_module()?)
     .module(approval::build_export_field_map_module()?)
     .module(approval::build_export_run_module()?)
+    // 回写控制台：独立于审批派发的侧边栏入口，Action 与运行台账都不再挂在
+    // `feishu.approval` 下。
+    .module(approval_export::build_module(
+        Arc::clone(&context),
+        settings.as_deref(),
+        authorization_validator.clone(),
+    )?)
     // 飞书用户身份（OAuth user_access_token）单例行：同样只有表，
     // 读写由派发的姓名解析路径与提醒 worker 经 `FeishuContext` 完成。
     .module(approval::build_user_token_module()?)

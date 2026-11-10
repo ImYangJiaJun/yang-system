@@ -6,8 +6,9 @@
  * - 运行记录：按规则下钻，展示 `write_status` / `mark_status` / 目标记录 /
  *   错误，支持人工重试与强制重建。
  *
- * 页面与「回写」tab 都按 operation id 门控（目录里有没有那一粒 Action），
- * 不解析 JWT，也不把 `presentation.availability` 当权限。
+ * 独立侧边栏页面（`/feishu/approval-export`）；规则与运行日志都按 operation id
+ * 门控（目录里有没有那一粒 Action），不解析 JWT，也不把
+ * `presentation.availability` 当权限。
  */
 
 import { useEffect, useState } from "react";
@@ -114,6 +115,8 @@ export default function ApprovalExportPage() {
     parsedRule !== null && Number.isSafeInteger(parsedRule) && parsedRule > 0
       ? parsedRule
       : null;
+  // 独立页面的两个视图：规则 / 日志。`rule` 仍表示日志下钻到某条规则。
+  const logsMode = params.get("view") === "logs" || ruleId !== null;
   const pageValue = Number(params.get("page") ?? 1);
   const page = Number.isSafeInteger(pageValue) && pageValue > 0 ? pageValue : 1;
   const sizeValue = Number(params.get("pageSize") ?? 10);
@@ -143,7 +146,7 @@ export default function ApprovalExportPage() {
 
   const rulesQuery = useApprovalExportRuleList(
     { page, pageSize, search: debouncedSearch },
-    { enabled: ruleId === null },
+    { enabled: !logsMode },
   );
   const runsQuery = useApprovalExportRunList(
     {
@@ -153,7 +156,7 @@ export default function ApprovalExportPage() {
       instanceCode: instanceFilter,
       writeStatus: writeFilter,
     },
-    { enabled: ruleId !== null },
+    { enabled: logsMode },
   );
 
   const items = rulesQuery.data?.items ?? [];
@@ -181,11 +184,10 @@ export default function ApprovalExportPage() {
 
   // 页码越界时回到最后一页（删除、筛选把结果集缩小后会出现）。
   useEffect(() => {
-    const last = ruleId === null ? lastPage : runsLastPage;
-    const busy =
-      ruleId === null
-        ? rulesQuery.isPending || rulesQuery.isError
-        : runsQuery.isPending || runsQuery.isError;
+    const last = logsMode ? runsLastPage : lastPage;
+    const busy = logsMode
+      ? runsQuery.isPending || runsQuery.isError
+      : rulesQuery.isPending || rulesQuery.isError;
     if (busy || last === null || page <= last) return;
     setParams(
       (current) => {
@@ -196,7 +198,7 @@ export default function ApprovalExportPage() {
       { replace: true },
     );
   }, [
-    ruleId,
+    logsMode,
     lastPage,
     runsLastPage,
     page,
@@ -229,7 +231,8 @@ export default function ApprovalExportPage() {
         }；运行记录保留`,
       );
       setDeleteTarget(null);
-      if (ruleId === deleteTarget.id) changeParams({ rule: null, page: "1" });
+      if (ruleId === deleteTarget.id)
+        changeParams({ view: null, rule: null, page: "1" });
       await refresh();
     } catch (cause) {
       toast.error(messageOf(cause));
@@ -295,7 +298,7 @@ export default function ApprovalExportPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8">
-      {ruleId !== null ? (
+      {logsMode ? (
         <>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -304,6 +307,7 @@ export default function ApprovalExportPage() {
                 className="mb-2 h-auto p-0"
                 onClick={() =>
                   changeParams({
+                    view: null,
                     rule: null,
                     page: "1",
                     write: null,
@@ -314,7 +318,9 @@ export default function ApprovalExportPage() {
                 <span aria-hidden="true">←</span> 返回规则列表
               </Button>
               <h1 className="text-2xl font-semibold tracking-tight">
-                回写运行记录 · 规则 #{ruleId}
+                {ruleId === null
+                  ? "回写日志"
+                  : `回写运行记录 · 规则 #${ruleId}`}
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
                 规则级行（__rule__）记录触发与条件状态；行级行（row:N）记录每条明细的写入与标记。
@@ -507,6 +513,16 @@ export default function ApprovalExportPage() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {canListRuns ? (
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    changeParams({ view: "logs", rule: null, page: "1" }, true)
+                  }
+                >
+                  日志
+                </Button>
+              ) : null}
               {actions.canCheck ? (
                 <Button
                   variant="outline"
@@ -654,6 +670,7 @@ export default function ApprovalExportPage() {
                                 variant="ghost"
                                 onClick={() =>
                                   changeParams({
+                                    view: "logs",
                                     rule: String(rule.id),
                                     page: "1",
                                     write: null,

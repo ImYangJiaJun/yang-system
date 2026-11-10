@@ -321,17 +321,28 @@ fn parse_local(draft: &ExportRuleDraft) -> Result<LocalRule, Vec<String>> {
         }
     };
 
-    let base_token = draft.target_base_token.trim().to_string();
-    let table_id = draft.target_table_id.trim().to_string();
-    if let Err(error) =
-        super::super::bitable::validate_path_segment("target_base_token", base_token.as_str())
-    {
-        reasons.push(format!("目标 Base Token 非法：{error}"));
-    }
-    if let Err(error) =
-        super::super::bitable::validate_path_segment("target_table_id", table_id.as_str())
-    {
-        reasons.push(format!("目标数据表 ID 非法：{error}"));
+    // 目标坐标允许「完整多维表格链接」：用户直接粘贴
+    // `https://…/base/<token>?table=<table_id>` 时，Base Token 与数据表 ID
+    // 都从链接里取；同时保留旧的裸 token + 单独 table_id 输入。两种来源都给出
+    // 且指向不同坐标时 `resolve_bitable_link` 会拒绝，避免读写错表。
+    let (base_token, table_id) = match super::super::bitable::resolve_bitable_link(
+        draft.target_base_token.as_str(),
+        Some(draft.target_table_id.as_str()),
+        None,
+    ) {
+        Ok(parsed) => (parsed.app_token, parsed.table_id.unwrap_or_default()),
+        Err(error) => {
+            reasons.push(format!("目标多维表格链接非法：{error}"));
+            (
+                draft.target_base_token.trim().to_string(),
+                draft.target_table_id.trim().to_string(),
+            )
+        }
+    };
+    if table_id.is_empty() {
+        reasons.push(
+            "目标数据表 ID 缺失：请选择数据表，或粘贴包含 ?table= 的完整多维表格链接".to_string(),
+        );
     }
 
     let status_field = draft
@@ -1270,6 +1281,31 @@ mod tests {
         assert_eq!(local.row_filter, RowFilter::MatchedRows);
         assert_eq!(local.maps.len(), 1);
         assert!(local.maps[0].required);
+    }
+
+    #[test]
+    fn complete_bitable_link_supplies_target_coordinates() {
+        let mut value = draft();
+        value.target_base_token =
+            "https://tenant.example/base/bascnLink?table=tblLink&view=vewA".to_string();
+        value.target_table_id.clear();
+        let local = parse_local(&value).unwrap_or_else(|reasons| panic!("{reasons:?}"));
+        assert_eq!(local.target_base_token, "bascnLink");
+        assert_eq!(local.target_table_id, "tblLink");
+    }
+
+    #[test]
+    fn conflicting_link_and_table_id_are_rejected() {
+        let mut value = draft();
+        value.target_base_token = "https://tenant.example/base/bascnLink?table=tblLink".to_string();
+        value.target_table_id = "tblOther".to_string();
+        let reasons = parse_local(&value).err().unwrap_or_default();
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("目标多维表格链接非法")),
+            "{reasons:?}"
+        );
     }
 
     #[test]

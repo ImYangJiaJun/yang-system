@@ -17,7 +17,7 @@ use yang_base::table::Record;
 use yang_base::BaseError;
 use yang_db::{field, table, CompareOp, QueryBuilder};
 
-use crate::addon::feishu::approval::actions::export_create_rule::{
+use crate::addon::feishu::approval_export::actions::export_create_rule::{
     config_error, fill_rule_record, json_text, map_insert_error, truncate_chars, ExportMapInput,
 };
 use crate::addon::feishu::domain::approval::subscribe_approval;

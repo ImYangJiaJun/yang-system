@@ -994,7 +994,7 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // `order_by:id` / `order_by:updated_at` 两个弱档站点。两列都在
         // `feishu_approval_export_rule` 的声明上（id 与 updated_at 均 sortable），
         // 缺口由该表声明的单测与列表 Action 的分组单测兜住。
-        "approval/actions/export_list_rules.rs",
+        "approval_export/actions/export_list_rules.rs",
         // 纯组装逻辑，不碰仓库：`request_log_writer` 的 `into_record` 只是把请求
         // 事实折成 Record——没有查询/写调用可锚。缺口由该模块的
         // `record_keys_are_declared_on_the_request_log_table` 单测原地补上

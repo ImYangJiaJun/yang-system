@@ -153,29 +153,29 @@ export const APPROVAL_OPERATION_IDS = {
 
 /// 审批回写控制台的 9 个 Action。
 ///
-/// 与派发控制台同一命名纪律：模块名 `feishu.approval` + 动作名。前五个只读写本库，
+/// 独立模块 `feishu.approval_export` + 动作名。前五个只读写本库，
 /// **无条件注册**；保存 / 体检 / 试算要打飞书，凭证缺失时服务端**不注册**它们
 /// （路由 404）——所以界面上「新建 / 检查」按钮是否渲染不能只看权限，还要看目录里
 /// 有没有这一粒（`hasOperation` 恰好同时回答这两个问题）。
 export const EXPORT_OPERATION_IDS = {
   /// 规则列表（含映射）。读权限，无条件注册。
-  listRules: "feishu.approval.export_list_rules",
+  listRules: "feishu.approval_export.export_list_rules",
   /// 运行台账。读权限，无条件注册。
-  listRuns: "feishu.approval.export_list_runs",
+  listRuns: "feishu.approval_export.export_list_runs",
   /// 删除规则（映射同事务删除，运行记录保留）。写权限，无条件注册。
-  deleteRule: "feishu.approval.export_delete_rule",
+  deleteRule: "feishu.approval_export.export_delete_rule",
   /// 重试一条可恢复状态的运行记录。写权限，无条件注册。
-  retryRun: "feishu.approval.export_retry_run",
+  retryRun: "feishu.approval_export.export_retry_run",
   /// 强制重建一条已写入的目标记录（代次 +1、换新幂等 Token）。
-  forceRecreate: "feishu.approval.export_force_recreate",
+  forceRecreate: "feishu.approval_export.export_force_recreate",
   /// 创建规则：保存期全量校验（定义控件 / 目标列 / 条件引用）。
-  createRule: "feishu.approval.export_create_rule",
+  createRule: "feishu.approval_export.export_create_rule",
   /// 更新规则：全量替换规则字段与字段映射。
-  updateRule: "feishu.approval.export_update_rule",
+  updateRule: "feishu.approval_export.export_update_rule",
   /// 批量体检启用的规则。
-  checkRules: "feishu.approval.export_check_rules",
+  checkRules: "feishu.approval_export.export_check_rules",
   /// 试算（dry-run）：按已保存规则与实例计算触发、条件与将写入的行。
-  preview: "feishu.approval.export_preview",
+  preview: "feishu.approval_export.export_preview",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。

@@ -911,15 +911,28 @@ export function ApprovalExportRuleDialog({
         {step === 4 ? (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="export-base-token">目标 Base Token</Label>
+              <Label htmlFor="export-base-token">
+                目标多维表格链接 / Base Token
+              </Label>
               <Input
                 id="export-base-token"
                 value={baseToken}
                 disabled={tablesPending}
-                onChange={(event) => setBaseToken(event.target.value)}
-                placeholder="appbcbWCzen6… 或粘贴多维表格链接"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setBaseToken(value);
+                  // 完整表格链接自带 ?table=；直接带出数据表 ID，手填用户
+                  // 不必再从链接里抄一遍。
+                  const parsed = parseBitableLink(value);
+                  if (parsed?.tableId) setTableId(parsed.tableId);
+                }}
+                placeholder="粘贴完整数据表链接，或 appbcbWCzen6…"
                 autoComplete="off"
               />
+              <p className="text-xs text-muted-foreground">
+                支持完整链接（自动解析 Base Token 与数据表 ID），也支持旧的手填
+                Base Token。
+              </p>
             </div>
             {client.canPickBitable ? (
               <Button

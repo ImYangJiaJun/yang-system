@@ -7,8 +7,8 @@
 //!
 //! - **控制台 Action 无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
 //!   （`create_config` / `list_widgets` 运行时按其自身逻辑校验凭证并返回 50301），
-//!   所以注册在 `can_pull()` 门禁**之前**。回写台账的 5 个只读写本库的 Action
-//!   也归这一档；回写的保存 / 体检 / 试算要打飞书，与授权回调同一门禁。
+//!   所以注册在 `can_pull()` 门禁**之前**。回写是独立 module
+//!   （`feishu.approval_export`），不在本注册表内。
 //! - **派发端点只在集成可用时注册**：与 `option` module 的机器入口同一条纪律——
 //!   派发端点打飞书开放平台，需要 `app_id`/`app_secret` 齐备（`FeishuSettings::can_pull()`
 //!   判定）。凭证缺失时注册出来只会返回「凭证未配置」，让人误以为端点可用；不注册则
@@ -28,15 +28,6 @@ pub(super) mod check_configs;
 pub(super) mod create_config;
 pub(super) mod delete_config;
 pub(super) mod dispatch;
-pub(super) mod export_check_rules;
-pub(super) mod export_create_rule;
-pub(super) mod export_delete_rule;
-pub(super) mod export_force_recreate;
-pub(super) mod export_list_rules;
-pub(super) mod export_list_runs;
-pub(super) mod export_preview;
-pub(super) mod export_retry_run;
-pub(super) mod export_update_rule;
 pub(super) mod list_configs;
 pub(super) mod list_events;
 pub(super) mod list_requests;
@@ -86,14 +77,6 @@ pub(super) fn register_all(
     let module = rotate_config_token::register(module, Arc::clone(&context));
     let module = reveal_config_token::register(module, Arc::clone(&context));
 
-    // 回写运行台账的人工操作只读写本库，不打飞书，因此不过 `can_pull()` 门禁：
-    // 凭证缺失时也应当能查看与发布「重试 / 强制重建」。
-    let module = export_list_rules::register(module, Arc::clone(&context));
-    let module = export_list_runs::register(module, Arc::clone(&context));
-    let module = export_delete_rule::register(module, Arc::clone(&context));
-    let module = export_retry_run::register(module, Arc::clone(&context));
-    let module = export_force_recreate::register(module, Arc::clone(&context));
-
     let Some(settings) = settings.filter(|value| value.can_pull()) else {
         return Ok(module);
     };
@@ -102,14 +85,7 @@ pub(super) fn register_all(
 
     // 授权回调要打飞书的令牌端点，与派发端点同一条门禁。
     let module = oauth_callback::register(module, Arc::clone(&context));
-    let module = dispatch::register(module, Arc::clone(&context));
-
-    // 回写规则的保存 / 体检 / 试算都要打飞书（取定义快照、目标列、实例详情），
-    // 与授权回调同一条门禁：缺凭证时 404 比「注册出来永远失败」语义更准。
-    let module = export_create_rule::register(module, Arc::clone(&context));
-    let module = export_update_rule::register(module, Arc::clone(&context));
-    let module = export_check_rules::register(module, Arc::clone(&context));
-    let module = export_preview::register(module, context);
+    let module = dispatch::register(module, context);
     Ok(module)
 }
 
@@ -150,44 +126,9 @@ mod tests {
         ("retry_event", "/api/v1/feishu/approval/events/{id}/retry"),
         ("oauth_status", "/api/v1/feishu/oauth/status"),
         ("oauth_authorize_url", "/api/v1/feishu/oauth/authorize-url"),
-        (
-            "export_list_rules",
-            "/api/v1/feishu/approval/export/rules/query",
-        ),
-        (
-            "export_list_runs",
-            "/api/v1/feishu/approval/export/runs/query",
-        ),
-        (
-            "export_delete_rule",
-            "/api/v1/feishu/approval/export/rules/delete",
-        ),
-        (
-            "export_retry_run",
-            "/api/v1/feishu/approval/export/runs/retry",
-        ),
-        (
-            "export_force_recreate",
-            "/api/v1/feishu/approval/export/runs/force-recreate",
-        ),
     ];
 
-    /// 回写出站 Action：凭证可用时才注册（与授权回调 / 派发同一条门禁）。
-    const GATED_CONSOLE_ROUTES: &[(&str, &str)] = &[
-        (
-            "export_create_rule",
-            "/api/v1/feishu/approval/export/rules/create",
-        ),
-        (
-            "export_update_rule",
-            "/api/v1/feishu/approval/export/rules/update",
-        ),
-        (
-            "export_check_rules",
-            "/api/v1/feishu/approval/export/rules/check",
-        ),
-        ("export_preview", "/api/v1/feishu/approval/export/preview"),
-    ];
+    // 回写出站 Action 已迁到 `feishu.approval_export`，本 module 不再登记。
 
     /// 装配好的 module（带一个可用的 `FeishuSettings`）。
     ///
@@ -278,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn console_routes_are_registered_with_credentials() {
         let module = registered_module(true);
-        for (_, path) in CONSOLE_ROUTES.iter().chain(GATED_CONSOLE_ROUTES.iter()) {
+        for (_, path) in CONSOLE_ROUTES {
             assert!(
                 routes(&module).contains(&(HttpMethod::Post, path.to_string())),
                 "带凭证时控制台路由 {path} 必须注册：{:?}",
@@ -296,12 +237,6 @@ mod tests {
                 routes(&module).contains(&(HttpMethod::Post, path.to_string())),
                 "无凭证时控制台路由 {path} 必须注册：{:?}",
                 routes(&module)
-            );
-        }
-        for (_, path) in GATED_CONSOLE_ROUTES {
-            assert!(
-                !routes(&module).contains(&(HttpMethod::Post, path.to_string())),
-                "无凭证时出站路由 {path} 不得注册"
             );
         }
     }

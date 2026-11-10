@@ -1,16 +1,19 @@
 import { useRef } from "react";
-import { useSearchParams } from "react-router";
+import { Navigate, useSearchParams } from "react-router";
 import { hasOperation, useUiCatalog } from "@/engine";
 import { Button } from "@/shared/ui/button";
-import { APPROVAL_OPERATION_IDS, EXPORT_OPERATION_IDS } from "../api";
+import { APPROVAL_OPERATION_IDS } from "../api";
 import ApprovalConfigsPage from "./ApprovalConfigsPage";
-import ApprovalExportPage from "./ApprovalExportPage";
 import ApprovalRequestsPage from "./ApprovalRequestsPage";
 
 export default function ApprovalConsolePage() {
   const { data: catalog } = useUiCatalog();
   const [params, setParams] = useSearchParams();
   const refs = useRef(new Map<string, HTMLButtonElement>());
+  // 回写曾短暂作为本页 tab；旧书签/外链跳到独立页面。
+  if (params.get("tab") === "export") {
+    return <Navigate to="/feishu/approval-export" replace />;
+  }
   const tabs = [
     {
       id: "configs",
@@ -21,11 +24,6 @@ export default function ApprovalConsolePage() {
       id: "requests",
       title: "派发记录",
       operation: APPROVAL_OPERATION_IDS.listRequests,
-    },
-    {
-      id: "export",
-      title: "回写",
-      operation: EXPORT_OPERATION_IDS.listRules,
     },
   ].filter((tab) => hasOperation(catalog, tab.operation));
   const selected = tabs.find((tab) => tab.id === params.get("tab")) ?? tabs[0];
@@ -93,8 +91,6 @@ export default function ApprovalConsolePage() {
       >
         {selected.id === "configs" ? (
           <ApprovalConfigsPage />
-        ) : selected.id === "export" ? (
-          <ApprovalExportPage />
         ) : (
           <ApprovalRequestsPage />
         )}

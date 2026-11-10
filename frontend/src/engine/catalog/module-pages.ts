@@ -42,6 +42,7 @@ const iconTokens: Readonly<Record<string, string>> = {
   admin_panel_settings: "admin_panel_settings",
   database: "database",
   send: "send",
+  sync: "sync",
 };
 
 function iconFor(token: string): string {

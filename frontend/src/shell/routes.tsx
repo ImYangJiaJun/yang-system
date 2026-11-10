@@ -156,6 +156,16 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
+            // 审批回写是独立功能，不再挂在「审批派发」的 tab 下。
+            path: "feishu/approval-export",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/ApprovalExportPage")
+              ).default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
             // 旧 URL 保留为可替换历史记录的重定向。
             path: "feishu/approval/configs",
             element: <Navigate to="/feishu/approval?tab=configs" replace />,
@@ -163,6 +173,10 @@ export const appRoutes = [
           {
             path: "feishu/approval/requests",
             element: <Navigate to="/feishu/approval?tab=requests" replace />,
+          },
+          {
+            path: "feishu/approval/export",
+            element: <Navigate to="/feishu/approval-export" replace />,
           },
           {
             // 权限工作台：三视图（按用户/按功能/按组），同样路由级 lazy，

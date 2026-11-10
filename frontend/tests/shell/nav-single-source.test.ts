@@ -8,6 +8,7 @@ describe("Catalog 控制台落点", () => {
     "access/workspace",
     "feishu/datasources",
     "feishu/approval",
+    "feishu/approval-export",
   ])("/%s 匹配实际终端路由而非兜底页", (path) => {
     expect(
       matchRoutes<RouteObject>(appRoutes, `/${path}`)?.at(-1)?.route.path,
