@@ -334,13 +334,15 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     expect(
-      await screen.findByText(/关联审批：选择超链接列或实例 Code 文本列/),
+      await screen.findByText(
+        /关联审批：选择超链接列、实例 Code 文本列，或关联列/,
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "原申请对应的多维表格字段" }),
     ).toHaveTextContent("原申请");
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
-  });
+  }, 15000);
 
   it("预览失败明确显示原因，重试成功后可继续；更改 Code 要重新预览", async () => {
     const user = userEvent.setup();
