@@ -58,7 +58,8 @@ use crate::addon::feishu::domain::approval_aggregation::{
 };
 use crate::addon::feishu::domain::approval_attachment::{preflight, source_identities, transfer};
 use crate::addon::feishu::domain::approval_convert::{
-    amount_currency, build_signature, format_local, FixedOffset, FormInput, WidgetMap,
+    amount_currency, build_legacy_signature, build_signature, format_local, FixedOffset, FormInput,
+    WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_field_conflict, backfill_in_chunks, dispatch_group, dispatch_one,
@@ -3401,6 +3402,10 @@ async fn group_once(runner: &RoundRunner, task: &ClaimedTask, group_key: &str) -
 ///
 /// 返回 `Some(原因)` 表示不一致。签名用**这条记录自己的**已解析控件集合算，
 /// 与播种期同一函数（`build_signature`）同一输入，可比。
+///
+/// 2026-11-10 起签名不再包含顶层公式控件；升级前播种的组行存的是旧口径摘要。
+/// 因此新口径「全员一致但与 `stored` 不等」时，再用 [`build_legacy_signature`]
+/// 复核一次：旧口径仍一致且等于 `stored` ⇒ 只是签名格式变了，数据没有漂移。
 fn verify_group_signature(
     widgets: &[WidgetMap],
     form_snapshot: &str,
@@ -3408,6 +3413,7 @@ fn verify_group_signature(
     timezone_offset: FixedOffset,
     stored: &str,
     signatures: &mut Vec<String>,
+    legacy_signatures: &mut Vec<String>,
 ) -> Option<String> {
     let Ok(identities) = source_identities(widgets, cells) else {
         return Some("组内记录的附件结构非法，无法复核一致性。请核对后重新点击。".into());
@@ -3426,9 +3432,27 @@ fn verify_group_signature(
             ))
         }
     };
+    if let Ok(legacy) = build_legacy_signature(&FormInput {
+        widgets,
+        form_snapshot,
+        cells,
+        attachment_codes: &identities,
+        timezone_offset,
+    }) {
+        legacy_signatures.push(signature_hash(&legacy));
+    }
     signatures.push(signature_hash(&signature));
     if signatures.iter().all(|hash| *hash == signatures[0]) {
         if signatures[0] == stored {
+            return None;
+        }
+        // 旧口径摘要仍与组行一致：本次差异只来自公式控件的签名口径变化。
+        if legacy_signatures.len() == signatures.len()
+            && legacy_signatures
+                .iter()
+                .all(|hash| *hash == legacy_signatures[0])
+            && legacy_signatures[0] == stored
+        {
             return None;
         }
         return Some(
@@ -3498,6 +3522,8 @@ async fn run_group_dispatch(
     let mut detached = 0usize;
     let mut pooled = task.widgets.clone();
     let mut signature_hashes: Vec<String> = Vec::with_capacity(members.len());
+    // 旧口径摘要（含顶层 formula），只用于升级兼容（见 verify_group_signature）。
+    let mut legacy_signature_hashes: Vec<String> = Vec::with_capacity(members.len());
     for member in members.iter() {
         let task_id: i64 = match member.require("id") {
             Ok(id) => id,
@@ -3631,6 +3657,7 @@ async fn run_group_dispatch(
                 task.timezone_offset,
                 stored,
                 &mut signature_hashes,
+                &mut legacy_signature_hashes,
             ) {
                 tracing::info!(
                     stage = "signature",
@@ -5534,6 +5561,7 @@ mod tests {
 
         // 两名成员都是「报销」：与组行摘要一致，不暂停。
         let mut hashes = Vec::new();
+        let mut legacy_hashes = Vec::new();
         for _ in 0..2 {
             assert!(
                 verify_group_signature(
@@ -5543,6 +5571,7 @@ mod tests {
                     timezone,
                     &stored,
                     &mut hashes,
+                    &mut legacy_hashes,
                 )
                 .is_none(),
                 "同签名成员不得被判暂停"
@@ -5552,6 +5581,7 @@ mod tests {
 
         // 与组行摘要不同（排队期间被改）：暂停。
         let mut hashes = Vec::new();
+        let mut legacy_hashes = Vec::new();
         let drift = verify_group_signature(
             &widgets,
             AGGREGATE_FORM_SNAPSHOT,
@@ -5559,6 +5589,7 @@ mod tests {
             timezone,
             &stored,
             &mut hashes,
+            &mut legacy_hashes,
         );
         assert!(
             drift
@@ -5569,6 +5600,7 @@ mod tests {
 
         // 两名成员彼此不一致：暂停。
         let mut hashes = Vec::new();
+        let mut legacy_hashes = Vec::new();
         assert!(verify_group_signature(
             &widgets,
             AGGREGATE_FORM_SNAPSHOT,
@@ -5576,6 +5608,7 @@ mod tests {
             timezone,
             &stored,
             &mut hashes,
+            &mut legacy_hashes,
         )
         .is_none());
         let mismatch = verify_group_signature(
@@ -5585,12 +5618,66 @@ mod tests {
             timezone,
             &stored,
             &mut hashes,
+            &mut legacy_hashes,
         );
         assert!(
             mismatch
                 .as_deref()
                 .is_some_and(|reason| reason.contains("不再一致")),
             "{mismatch:?}"
+        );
+    }
+
+    /// 升级兼容：组行存的是旧口径（含顶层 formula）摘要，新口径全员一致但
+    /// 与之不等时，按旧口径复核仍一致且等于 `stored`，不得误判为数据漂移。
+    #[test]
+    fn group_signature_check_accepts_legacy_formula_hash() {
+        let widgets = aggregate_formula_widgets();
+        let timezone =
+            FixedOffset::from_seconds(8 * 3600).unwrap_or_else(|error| panic!("{error}"));
+        let cells = |text: &str, total: &str| {
+            serde_json::Map::from_iter([
+                ("fldText".to_string(), serde_json::json!(text)),
+                ("fldTotal".to_string(), serde_json::json!(total)),
+            ])
+        };
+        let stored = legacy_formula_signature_hash("报销", "0.01");
+
+        let mut hashes = Vec::new();
+        let mut legacy_hashes = Vec::new();
+        assert!(
+            verify_group_signature(
+                &widgets,
+                FORMULA_FORM_SNAPSHOT,
+                &cells("报销", "0.01"),
+                timezone,
+                &stored,
+                &mut hashes,
+                &mut legacy_hashes,
+            )
+            .is_none(),
+            "仅签名口径变化不得判暂停"
+        );
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(legacy_hashes.len(), 1);
+
+        // 非公式字段真的变了：旧口径摘要也对不上 stored，仍必须暂停。
+        let mut hashes = Vec::new();
+        let mut legacy_hashes = Vec::new();
+        let drift = verify_group_signature(
+            &widgets,
+            FORMULA_FORM_SNAPSHOT,
+            &cells("改了", "0.01"),
+            timezone,
+            &stored,
+            &mut hashes,
+            &mut legacy_hashes,
+        );
+        assert!(
+            drift
+                .as_deref()
+                .is_some_and(|reason| reason.contains("排队期间被修改")),
+            "{drift:?}"
         );
     }
 
@@ -8017,6 +8104,42 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}")),
         })
         .unwrap_or_else(|error| panic!("签名应可计算: {error}"));
+        signature_hash(&signature)
+    }
+
+    /// 带顶层公式控件的定义：用于升级兼容测试（旧口径签名含 formula）。
+    const FORMULA_FORM_SNAPSHOT: &str = r#"[{"id":"wName","type":"input","required":false},{"id":"wTotal","type":"formula","required":true}]"#;
+
+    fn aggregate_formula_widgets() -> Vec<WidgetMap> {
+        let mut widgets = aggregate_widgets();
+        widgets.push(WidgetMap {
+            widget_id: "wTotal".to_string(),
+            widget_type: "formula".to_string(),
+            required: true,
+            bitable_field: "fldTotal".to_string(),
+            interval_end_field: None,
+            converter: crate::addon::feishu::domain::approval_convert::Converter::Direct,
+            option_map: BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+        });
+        widgets
+    }
+
+    fn legacy_formula_signature_hash(text: &str, total: &str) -> String {
+        let cells = serde_json::Map::from_iter([
+            ("fldText".to_string(), serde_json::json!(text)),
+            ("fldTotal".to_string(), serde_json::json!(total)),
+        ]);
+        let signature = build_legacy_signature(&FormInput {
+            widgets: &aggregate_formula_widgets(),
+            form_snapshot: FORMULA_FORM_SNAPSHOT,
+            cells: &cells,
+            attachment_codes: &BTreeMap::new(),
+            timezone_offset: FixedOffset::from_seconds(8 * 3600)
+                .unwrap_or_else(|error| panic!("{error}")),
+        })
+        .unwrap_or_else(|error| panic!("旧口径签名应可计算: {error}"));
         signature_hash(&signature)
     }
 

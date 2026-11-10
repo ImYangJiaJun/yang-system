@@ -344,8 +344,9 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
 ///
 /// 与 [`build_form`] 的差别只有明细的填法：顶层 `fieldList` **恰好每条记录一行**，
 /// 任一成员的明细为空即报 `BadValue`（不跳过——少一行意味着审批实例缺一条业务
-/// 数据）；非明细控件取第一行（leader）的值。进入某行之后的嵌套 `fieldList`
-/// 只接收该行的单行切片。
+/// 数据）；非明细控件取第一行（leader）的值，**顶层公式控件例外**：它是整单
+/// 合计，按成员求和（见 [`assemble_group_formula`]）。进入某行之后的嵌套
+/// `fieldList` 只接收该行的单行切片。
 pub(crate) fn build_group_form(input: &GroupFormInput<'_>) -> Result<String, ConvertError> {
     assemble(
         input.widgets,
@@ -394,6 +395,8 @@ fn assemble(
 /// 聚合派发用它判断同批记录能否合成一个实例，所以规则必须与表单侧对齐：
 ///
 /// - **任意深度**的 `fieldList` 整棵跳过（明细值不进顶层表单，也不该拆组）；
+/// - **顶层公式控件**跳过：它是按成员求和的整单合计（见 [`assemble_group_formula`]），
+///   天然随各成员的明细金额不同而不同；
 /// - 控件组递归，只收已映射的子控件；
 /// - 空值（含必填缺失）统一编码 `null`，**不抛** `MissingRequired`——签名阶段
 ///   只回答「两条记录像不像」，必填是否满足由处理期的真实校验决定；
@@ -402,9 +405,33 @@ fn assemble(
 ///   `transfer`，签名阶段禁止网络副作用）；
 /// - 不支持的控件类型、转换器不匹配等配置错误仍然返回 `Err`，该记录单独成组。
 pub(crate) fn build_signature(input: &FormInput<'_>) -> Result<String, ConvertError> {
+    build_signature_inner(input, true)
+}
+
+/// 旧口径签名：顶层 formula 也参与摘要。
+///
+/// 只服务升级兼容——2026-11-10 之前播种的组行里存的是这个口径的
+/// `signature_hash`。处理期在「成员彼此一致、但都不等于组行存的摘要」时，
+/// 再用它复核一次，避免把「仅公式口径变化」误判成「排队期间数据被改」。
+/// 新代码不得用它做分组。
+pub(crate) fn build_legacy_signature(input: &FormInput<'_>) -> Result<String, ConvertError> {
+    build_signature_inner(input, false)
+}
+
+fn build_signature_inner(
+    input: &FormInput<'_>,
+    exclude_formula: bool,
+) -> Result<String, ConvertError> {
     let (definition, mappings) = prepare_definition(input.form_snapshot, input.widgets)?;
     let mut values = Map::new();
-    collect_signature(&definition, &mappings, input, &mut values)?;
+    collect_signature(
+        &definition,
+        &mappings,
+        input,
+        &mut values,
+        false,
+        exclude_formula,
+    )?;
     serde_json::to_string(&Value::Object(values)).map_err(|error| ConvertError::BadValue {
         widget_id: String::new(),
         reason: format!("签名序列化失败：{error}"),
@@ -412,19 +439,39 @@ pub(crate) fn build_signature(input: &FormInput<'_>) -> Result<String, ConvertEr
 }
 
 /// 按定义顺序遍历定义树，把已映射控件的规范值写进签名。
+///
+/// `inside_container` 只用于区分「顶层公式控件」：控件组里的公式子控件按
+/// 配置期白名单本就不会进映射，万一有旧映射，仍按既有语义参与签名（不聚合）。
+/// `exclude_formula=false` 是旧口径（见 [`build_legacy_signature`]）。
 fn collect_signature(
     nodes: &[FormWidget],
     mappings: &BTreeMap<&str, &WidgetMap>,
     input: &FormInput<'_>,
     values: &mut Map<String, Value>,
+    inside_container: bool,
+    exclude_formula: bool,
 ) -> Result<(), ConvertError> {
     for node in nodes {
         // 明细子树在任意深度都整棵跳过（含 workGroup 内嵌的 fieldList）。
         if node.r#type == "fieldList" {
             continue;
         }
+        // 顶层公式控件是「合计」派生值（付款总金额、合计付款金额），聚合时
+        // 按成员求和（见 [`assemble_group_formula`]），天然会随每条记录的
+        // 明细金额不同而不同；它若参与签名，同一次批量点击的每条记录都会
+        // 各成一组，永远合并不了。
+        if exclude_formula && node.r#type == "formula" && !inside_container {
+            continue;
+        }
         if is_container(&node.r#type) {
-            collect_signature(&node.children, mappings, input, values)?;
+            collect_signature(
+                &node.children,
+                mappings,
+                input,
+                values,
+                true,
+                exclude_formula,
+            )?;
             continue;
         }
         let Some(mapping) = mappings.get(node.id.as_str()) else {
@@ -502,7 +549,8 @@ fn canonical_number(number: &serde_json::Number) -> String {
 
 /// 按定义顺序组装一行（或聚合模式下的多行明细）。
 ///
-/// - 非明细控件取 `rows[0]`（leader）的单元格；
+/// - 非明细控件取 `rows[0]`（leader）的单元格；**顶层公式控件在聚合模式下
+///   按成员求和**（见 [`assemble_group_formula`]）；
 /// - 顶层 `fieldList` 在 `enforce_member_rows` 时**每条记录一行**，任一成员明细
 ///   为空直接报 `BadValue`（不跳过：少一行会让审批实例缺一条业务数据）；
 /// - 进入某行的递归带 `inside_detail_row=true` 且只传该行的单行切片，嵌套
@@ -612,12 +660,20 @@ fn assemble_definition(
         } else if let Some(mapping) = mappings.get(node.id.as_str()) {
             let mut mapping = (*mapping).clone();
             mapping.required |= node.required;
-            if let Some(value) = assemble_widget(
-                &mapping,
-                primary.cells,
-                primary.attachment_codes,
-                timezone_offset,
-            )? {
+            // 聚合组的顶层公式控件是整单合计：按成员求和，不能取 leader。
+            // 明细行内的公式（inside_detail_row）仍按该行自己的值组装。
+            let assembled =
+                if enforce_member_rows && !inside_detail_row && mapping.widget_type == "formula" {
+                    assemble_group_formula(&mapping, rows)?
+                } else {
+                    assemble_widget(
+                        &mapping,
+                        primary.cells,
+                        primary.attachment_codes,
+                        timezone_offset,
+                    )?
+                };
+            if let Some(value) = assembled {
                 if let Err(reason) = node.connect_definition_codes() {
                     return Err(ConvertError::InvalidDefinition(format!(
                         "关联审批控件「{}」配置无效：{reason}，请刷新配置",
@@ -713,6 +769,13 @@ fn assemble_widget(
         }
     };
 
+    Ok(Some(wrap_widget_value(widget, value)))
+}
+
+/// 把控件值包装成 `form` 数组元素：`id` / `type` / `value`，金额另带 `currency`。
+///
+/// 单条与聚合组共用同一包装，避免两处各写一份后静默漂移。
+fn wrap_widget_value(widget: &WidgetMap, value: Value) -> Value {
     let mut object = Map::new();
     object.insert("id".to_string(), Value::String(widget.widget_id.clone()));
     object.insert(
@@ -725,11 +788,96 @@ fn assemble_widget(
     } else {
         object.insert("value".to_string(), value);
     }
-    // 金额控件的币种是 `value` 的**兄弟**字段，不在 value 里。
     if let Some(currency) = &widget.currency {
         object.insert("currency".to_string(), Value::String(currency.clone()));
     }
-    Ok(Some(Value::Object(object)))
+    Value::Object(object)
+}
+
+/// 聚合组里顶层公式控件的值：各成员的公式值相加（整单合计）。
+///
+/// 公式控件在审批定义里表示「依赖其他控件计算得出」的派生值（付款总金额、
+/// 合计付款金额）。聚合后每位成员的合计相加才是整单的合计；取 leader 会
+/// 少算其他成员的金额。
+///
+/// 任一成员缺值时不提交「部分合计」：必填控件报 `MissingRequired`，可选控件
+/// 报 `BadValue` 并点名记录——只加一部分比整组暂停更难发现。
+fn assemble_group_formula(
+    widget: &WidgetMap,
+    rows: &[GroupFormRow<'_>],
+) -> Result<Option<Value>, ConvertError> {
+    let mut missing: Vec<&str> = Vec::new();
+    let mut sum = 0.0_f64;
+    // 求和结果按成员值里最多的有效小数位收敛。不能先乘 1e10 再除：金额到
+    // 百万级时 `sum * 1e10` 已越过 f64 的精确整数范围，反而制造尾差
+    // （1000000.00 + 234567.89 → 1234567.8900000001）。
+    let mut scale = 0usize;
+    for row in rows {
+        match row
+            .cells
+            .get(&widget.bitable_field)
+            .filter(|value| !is_empty(value))
+        {
+            Some(cell) => {
+                let value = number_from_cell(widget, cell)?;
+                let number = value.as_f64().ok_or_else(|| ConvertError::BadValue {
+                    widget_id: widget.widget_id.clone(),
+                    reason: format!("公式值不是数值：{value}"),
+                })?;
+                scale = scale.max(decimal_places(cell));
+                sum += number;
+            }
+            None => missing.push(row.record_id),
+        }
+    }
+    if !missing.is_empty() {
+        if missing.len() == rows.len() && !widget.required {
+            return Ok(None);
+        }
+        if widget.required {
+            return Err(ConvertError::MissingRequired {
+                widget_id: widget.widget_id.clone(),
+            });
+        }
+        return Err(ConvertError::BadValue {
+            widget_id: widget.widget_id.clone(),
+            reason: format!("记录 {} 的合计为空", missing.join("、")),
+        });
+    }
+    // 按输入的小数位格式化，等价于「保留业务精度」的十进制四舍五入。
+    let mut text = format!("{sum:.scale$}", scale = scale.min(15));
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    if text == "-0" {
+        text = "0".to_string();
+    }
+    let value: Value = serde_json::from_str(&text).map_err(|error| ConvertError::BadValue {
+        widget_id: widget.widget_id.clone(),
+        reason: format!("公式合计不是有效数值：{text}（{error}）"),
+    })?;
+    Ok(Some(wrap_widget_value(widget, value)))
+}
+
+/// 单元格文本的有效小数位（去掉末尾 0；指数形态按 10 位兜底）。
+fn decimal_places(cell: &Value) -> usize {
+    let value = cell.get("value").unwrap_or(cell);
+    let scalar = match value {
+        Value::Array(items) if items.len() == 1 => &items[0],
+        other => other,
+    };
+    let text = match scalar {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.trim().to_string(),
+        _ => return 0,
+    };
+    if text.contains('e') || text.contains('E') {
+        return 10;
+    }
+    match text.split_once('.') {
+        Some((_, fraction)) => fraction.trim_end_matches('0').len(),
+        None => 0,
+    }
 }
 
 /// 转换器与控件类型必须匹配。
@@ -2625,6 +2773,80 @@ mod tests {
     }
 
     #[test]
+    fn signature_excludes_top_level_formula_totals() {
+        // 公式控件是「合计」派生值：聚合时按成员求和，天然会随每条记录的
+        // 明细金额不同而不同。若它参与签名，同一次批量点击的每条记录都会
+        // 各成一组，永远合并不了。
+        let snapshot = r#"[
+            {"id":"total","type":"formula","required":true},
+            {"id":"top","type":"input"},
+            {"id":"detail","type":"fieldList","children":[{"id":"amount","type":"number"}]}
+        ]"#;
+        let mut total = widget("total", "formula");
+        total.bitable_field = "fld_total".to_string();
+        total.required = true;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let mut amount = widget("amount", "number");
+        amount.bitable_field = "fld_amount".to_string();
+        let widgets = [total, top, amount];
+        let codes = BTreeMap::new();
+
+        let first = signature(
+            snapshot,
+            &widgets,
+            &cells(&[
+                ("fld_total", json!("0.01")),
+                ("fld_top", json!("共同")),
+                ("fld_amount", json!(0.01)),
+            ]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let second = signature(
+            snapshot,
+            &widgets,
+            &cells(&[
+                ("fld_total", json!("0.02")),
+                ("fld_top", json!("共同")),
+                ("fld_amount", json!(0.02)),
+            ]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(first, second, "合计不同不能拆组");
+
+        let changed = signature(
+            snapshot,
+            &widgets,
+            &cells(&[
+                ("fld_total", json!("0.02")),
+                ("fld_top", json!("不同")),
+                ("fld_amount", json!(0.02)),
+            ]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(changed, first, "其他非明细字段的差异仍必须拆组");
+
+        // 旧口径（升级兼容）仍包含顶层 formula：仅用于核对旧组摘要。
+        let legacy = build_legacy_signature(&FormInput {
+            widgets: &widgets,
+            form_snapshot: snapshot,
+            cells: &cells(&[
+                ("fld_total", json!("0.01")),
+                ("fld_top", json!("共同")),
+                ("fld_amount", json!(0.01)),
+            ]),
+            attachment_codes: &codes,
+            timezone_offset: shanghai(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(legacy, first, "旧口径必须仍包含 formula");
+        assert!(legacy.contains("\"total\""), "{legacy}");
+    }
+
+    #[test]
     fn signature_normalizes_number_forms_and_encodes_missing_as_null() {
         let snapshot =
             r#"[{"id":"num","type":"number"},{"id":"req","type":"input","required":true}]"#;
@@ -2802,6 +3024,142 @@ mod tests {
         assert_eq!(
             actual,
             json!([{"id":"top","type":"input","value":"第一行"}])
+        );
+    }
+
+    #[test]
+    fn group_form_sums_top_level_formula_across_members() {
+        // 顶层公式控件是「整单合计」：0.1 + 0.2 必须提交 0.3，而不是 leader
+        // 的 0.1；浮点尾差也不能漏进请求。
+        let snapshot = r#"[
+            {"id":"total","type":"formula","required":true},
+            {"id":"top","type":"input"},
+            {"id":"detail","type":"fieldList","children":[{"id":"amount","type":"number"}]}
+        ]"#;
+        let mut total = widget("total", "formula");
+        total.bitable_field = "fld_total".to_string();
+        total.required = true;
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let mut amount = widget("amount", "number");
+        amount.bitable_field = "fld_amount".to_string();
+        let actual = render_group(
+            snapshot,
+            &[total, top, amount],
+            &[
+                (
+                    "recA",
+                    cells(&[
+                        ("fld_total", json!("0.1")),
+                        ("fld_top", json!("共同")),
+                        ("fld_amount", json!(0.1)),
+                    ]),
+                ),
+                (
+                    "recB",
+                    cells(&[
+                        ("fld_total", json!("0.2")),
+                        ("fld_top", json!("共同")),
+                        ("fld_amount", json!(0.2)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([
+                {"id":"total","type":"formula","value":0.3},
+                {"id":"top","type":"input","value":"共同"},
+                {"id":"detail","type":"fieldList","value":[
+                    [{"id":"amount","type":"number","value":0.1}],
+                    [{"id":"amount","type":"number","value":0.2}]
+                ]}
+            ])
+        );
+    }
+
+    #[test]
+    fn group_form_formula_sum_keeps_cents_at_million_scale() {
+        // 金额到百万级时，先乘 1e10 再除会越过 f64 的精确整数范围，
+        // 把 1234567.89 变成 1234567.8900000001。按输入小数位格式化不能有尾差。
+        let snapshot = r#"[{"id":"total","type":"formula","required":true}]"#;
+        let mut total = widget("total", "formula");
+        total.bitable_field = "fld_total".to_string();
+        total.required = true;
+        let actual = render_group(
+            snapshot,
+            &[total],
+            &[
+                ("recA", cells(&[("fld_total", json!("1000000.00"))])),
+                ("recB", cells(&[("fld_total", json!("234567.89"))])),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{"id":"total","type":"formula","value":1234567.89}])
+        );
+    }
+
+    #[test]
+    fn group_form_requires_every_members_formula_total() {
+        // 只加一部分会静默少算整单金额；任何成员缺合计都必须整组暂停。
+        let snapshot = r#"[
+            {"id":"total","type":"formula","required":true},
+            {"id":"detail","type":"fieldList","children":[{"id":"amount","type":"number"}]}
+        ]"#;
+        let mut total = widget("total", "formula");
+        total.bitable_field = "fld_total".to_string();
+        total.required = true;
+        let mut amount = widget("amount", "number");
+        amount.bitable_field = "fld_amount".to_string();
+        let error = match render_group(
+            snapshot,
+            &[total, amount],
+            &[
+                (
+                    "recA",
+                    cells(&[("fld_total", json!("0.01")), ("fld_amount", json!(0.01))]),
+                ),
+                ("recB", cells(&[("fld_amount", json!(0.02))])),
+            ],
+        ) {
+            Ok(rendered) => panic!("缺成员合计必须报错，实际生成：{rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, ConvertError::MissingRequired { widget_id } if widget_id == "total"),
+            "缺合计必须报必填错误：{error}"
+        );
+    }
+
+    #[test]
+    fn group_form_keeps_detail_formulas_per_member() {
+        // 明细行内的公式是「按行」计算值，不能按整组求和。
+        let snapshot = r#"[{"id":"detail","type":"fieldList","children":[
+            {"id":"rowTotal","type":"formula","required":true}
+        ]}]"#;
+        let mut row_total = widget("rowTotal", "formula");
+        row_total.bitable_field = "fld_row_total".to_string();
+        row_total.required = true;
+        let actual = render_group(
+            snapshot,
+            &[row_total],
+            &[
+                ("recA", cells(&[("fld_row_total", json!(1))])),
+                ("recB", cells(&[("fld_row_total", json!(2))])),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{
+                "id":"detail","type":"fieldList","value":[
+                    [{"id":"rowTotal","type":"formula","value":1}],
+                    [{"id":"rowTotal","type":"formula","value":2}]
+                ]
+            }])
         );
     }
 
