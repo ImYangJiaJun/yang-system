@@ -3841,9 +3841,11 @@ dependencies = [
 name = "yang-db"
 version = "0.2.1"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "deadpool-redis",
+ "futures-util",
  "log",
  "redis",
  "serde",
@@ -3852,6 +3854,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
