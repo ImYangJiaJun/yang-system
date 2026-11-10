@@ -104,9 +104,9 @@ url = "redis://127.0.0.1:6379"
 # 默认：20
 max_connections = 20
 
-# 连接池保底下限。
-# 默认：2
-min_connections = 2
+# 兼容字段：deadpool-redis 0.12 不支持 min_connections，框架会拒绝非 0；
+# 这里保留注释只为提示旧配置可以继续存在，应用读取后不再下发。
+# min_connections = 2
 
 # 建立新连接的超时。
 # 默认：5
@@ -120,13 +120,13 @@ wait_timeout_seconds = 10
 # 默认：300
 idle_timeout_seconds = 300
 
-# 单连接最大存活时长；语义同 mysql.max_lifetime_seconds。
-# 默认：1800
-max_lifetime_seconds = 1800
+# 兼容字段：deadpool-redis 0.12 不支持 max_lifetime，框架会拒绝非 None；
+# 这里保留注释只为提示旧配置可以继续存在，应用读取后不再下发。
+# max_lifetime_seconds = 1800
 
-# 取连接前先探活。
-# 默认：true
-test_before_acquire = true
+# 兼容字段：deadpool-redis 0.12 不支持 test_before_acquire，框架会拒绝 true；
+# 这里保留注释只为提示旧配置可以继续存在，应用读取后不再下发。
+# test_before_acquire = true
 
 [token]
 # Access/Refresh Token 的签发 key 标识（JWT kid）；轮换时旧 key 移入

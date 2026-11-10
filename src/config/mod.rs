@@ -935,14 +935,14 @@ impl Settings {
     }
 
     pub fn redis_config(&self) -> RedisConfig {
+        // deadpool-redis 0.12 不支持 min_connections / max_lifetime /
+        // test_before_acquire，框架的 RedisConfig::validate 对非默认值直接拒绝。
+        // 这些字段保留只为兼容旧配置文件，读取后不再下发。
         RedisConfig::default()
             .with_max_connections(self.redis.max_connections)
-            .with_min_connections(self.redis.min_connections)
             .with_connect_timeout(self.redis.connect_timeout_seconds)
             .with_wait_timeout(self.redis.wait_timeout_seconds)
             .with_idle_timeout(self.redis.idle_timeout_seconds)
-            .with_max_lifetime(self.redis.max_lifetime_seconds)
-            .with_test_before_acquire(self.redis.test_before_acquire)
     }
 
     fn validate(&self) -> anyhow::Result<()> {

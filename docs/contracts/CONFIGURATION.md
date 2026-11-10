@@ -60,9 +60,9 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `mysql.max_connections` / `min_connections` | `20` / `2` |
 | `mysql.connect_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `10` / `600` / `1800` |
 | `mysql.test_before_acquire` | `true` |
-| `redis.max_connections` / `min_connections` | `20` / `2` |
-| `redis.connect_timeout_seconds` / `wait_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `5` / `10` / `300` / `1800` |
-| `redis.test_before_acquire` | `true` |
+| `redis.max_connections` | `20`（`min_connections` 仅为兼容字段，deadpool 0.12 不支持，应用忽略） |
+| `redis.connect_timeout_seconds` / `wait_timeout_seconds` / `idle_timeout_seconds` | `5` / `10` / `300` |
+| `redis.max_lifetime_seconds` / `test_before_acquire` | 仅为兼容字段，deadpool 0.12 不支持，应用忽略 |
 | `authorization.outbox_poll_interval_ms` | `250`（传播 p99 ≤ 2s 契约上限，不允许调大） |
 | `authorization.outbox_batch_size` / `outbox_lease_seconds` / `outbox_max_retry_seconds` | `100` / `10` / `60` |
 | `token.issuer` / `token.audience` | `yang-system` / `yang-system-api` |
@@ -182,8 +182,10 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
    就绪后再下线旧实例，保证零停机；
 4. 确认全部实例已用新凭据运行后，回依赖侧吊销旧凭据。
 
-连接池内已建立的旧连接最长存活 `max_lifetime_seconds`（MySQL/Redis 默认
-1800 秒），吊销旧凭据前预留至少一个该周期，避免池内连接被集中踢断。
+连接池内已建立的旧连接最长存活 `max_lifetime_seconds`（MySQL 默认 1800 秒；
+Redis 的该字段与 `min_connections` / `test_before_acquire` 仅为兼容字段，
+deadpool 0.12 不支持，不参与连接回收），吊销旧凭据前预留至少一个该周期，
+避免池内连接被集中踢断。
 
 ### MySQL
 
