@@ -57,7 +57,7 @@ pub(super) async fn handle(
     Account::ensure_active(observed.status)?;
 
     // 凭证插入与成功审计同事务原子提交：崩溃时二者要么都落库、要么都不落库。
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let issued = account
             .issue_password_reset_by_in_tx(&mut transaction, input.id, Some(operator_id))

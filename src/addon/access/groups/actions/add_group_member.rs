@@ -86,7 +86,7 @@ async fn join_group_once(
     input: &AddGroupMemberInput,
     operator_id: i64,
 ) -> Result<bool, BaseError> {
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 第一把锁：users 行。按 `user_id` 升序一次性锁定本事务会触碰的两类用户行
         // ——**操作者自己**与**目标用户**。

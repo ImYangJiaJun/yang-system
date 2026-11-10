@@ -1696,10 +1696,11 @@ mod tests {
         // 关联列的预解析是派发层的职责。漏掉那一步必须在这里响亮失败，
         // 而不是把 record_id 当实例 Code 静默提交。
         let cell = json!({"link_record_ids": ["recAAA", "recBBB"]});
-        assert_eq!(
-            connection_codes(&cell).unwrap_err(),
-            "关联审批单元格需要 link 或 text"
-        );
+        let error = match connection_codes(&cell) {
+            Ok(value) => panic!("关联审批单元格应被拒绝，实际 {value:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "关联审批单元格需要 link 或 text");
         let snapshot = r#"[{"id":"w1","type":"connect","option":{"notLimitScope":true}}]"#;
         let error = render_definition(
             snapshot,

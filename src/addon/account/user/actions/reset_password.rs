@@ -66,7 +66,7 @@ pub(super) async fn handle(
         .require::<String>(USERNAME)?;
     validate_password_field("new_password", &input.new_password, Some(&username))?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 所有创建与消费路径统一先锁用户、再锁凭证，避免同用户并发形成反向锁序。
         let locked_user = account

@@ -11,12 +11,12 @@ use super::admin::{
 use super::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::context::Access;
 use crate::addon::account::{OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer};
+use crate::db::Transaction;
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 把首个成功竞争到引导哨兵的注册账号提升为系统管理员。
 pub(crate) struct AccessSystemOwnerClaimer {
@@ -156,12 +156,7 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
     }
 
     async fn system_admin_member_ids(&self, ctx: &ActionContext) -> Result<Vec<i64>, BaseError> {
-        let mut transaction = ctx
-            .tools()
-            .mysql()?
-            .read_only_transaction()
-            .await
-            .map_err(BaseError::from)?;
+        let mut transaction = crate::db::begin_mysql_read_only(ctx.tools().mysql()?).await?;
         let result = async {
             let Some(group) = self
                 .access

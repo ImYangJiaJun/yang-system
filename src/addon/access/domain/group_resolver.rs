@@ -6,11 +6,11 @@
 use super::context::Access;
 use super::groups::resolution::{catalog_permissions, resolve_group_permissions};
 use crate::addon::account::{AuthorizationGrants, GrantResolver};
+use crate::db::Transaction;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 把解析出的权限集合合并为稳定去重的授权快照。
 pub(crate) fn grants_from_resolved<I>(permissions: I) -> AuthorizationGrants

@@ -65,7 +65,7 @@ pub(super) async fn handle(
     }
 
     // 同一事务：写授权事实 + 递增目标用户授权版本 + 追加 Outbox（writer 契约）。
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = access
             .authorization()

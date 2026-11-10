@@ -507,11 +507,12 @@ ancestor_key = 从根到直接父逐级折叠（derive::ancestor_key）
 - **但**：`pull.rs` 的 `apply_option_rows`（`domain/option_write.rs`）已经把这件事做对了
   ——这正是导入该复用它而不是自己拼 `insert_batch` 的理由。
 - **事务获取方式：导入 Action 用 `ctx.begin_transaction()`（A13）。**
-  `ActionContext::begin_transaction()` 支持 `Transaction::table(&TableRef) -> QueryBuilder`
-  与 `insert_batch`。
+  `ActionContext::begin_transaction()` 返回框架统一的 `AnyTransaction`；
+  行锁走 `crate::db::select_for_update(&mut tx, query)`，MySQL 专用链式 API
+  经 `crate::db::mysql_transaction(&mut tx)?` 取得。
 - **不要照抄 `pull.rs` 的取事务方式**：`pull.rs` 的模块文档明写
   **「本模块不依赖 `ActionContext`」**（后台 worker 没有可用 ctx），
-  所以它走 `deps.database.transaction()`。导入是 Action，**有 ctx，就该用 ctx**。
+  所以它走 `crate::db::begin_mysql(deps.database)`。导入是 Action，**有 ctx，就该用 ctx**。
   （09-23 版把这一点写反了，见 §3.3。）
 - `scripts/check_architecture.py` 的批量写入规则**不触发**：该正则只在
   `tenant_code_boundaries` 内生效，而它遍历的 `src/addon/{org,work}` 不存在

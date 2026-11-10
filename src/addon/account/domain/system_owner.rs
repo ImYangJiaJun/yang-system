@@ -1,11 +1,11 @@
 //! 账号域对外暴露的两个跨域端口：首个注册账号的引导声明，以及账号生命周期
 //! 所需的授权事实（最后管理员不变量与账号事实清理）。
 
+use crate::db::Transaction;
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 系统最终管理员声明结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

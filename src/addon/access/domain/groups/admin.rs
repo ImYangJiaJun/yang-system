@@ -61,10 +61,10 @@ use super::super::sensitive_permissions::{admin_equivalent_entry, AdminEquivalen
 use super::repository::{GroupRecord, MAX_GROUP_MEMBERS, SYSTEM_ADMIN_GROUP_KEY};
 use super::resolution::{catalog_permissions, resolve_group_permissions};
 use crate::addon::access::domain::context::Access;
+use crate::db::Transaction;
 use std::collections::BTreeSet;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// access.groups 域的全局读写权限键。
 ///

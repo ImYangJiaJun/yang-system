@@ -1,10 +1,11 @@
 //! 授权事实 writer 共享的用户版本锁与递增原语。
 //! authorization-writer: account-security-version
 
+use crate::db::Transaction;
 use async_trait::async_trait;
 use sqlx::MySqlPool;
 use yang_base::BaseError;
-use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
+use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr};
 
 use super::status::UserStatus;
 use crate::authorization::{
@@ -97,18 +98,17 @@ impl AuthorizationVersionWriter for AccountAuthorizationPort {
         transaction: &mut Transaction,
         user_id: i64,
     ) -> Result<LockedAuthorization, BaseError> {
-        let (status, authz_version) = transaction
-            .select_for_update::<(String, i64)>(
-                QueryBuilder::from_pool(pool, table!("users"))
-                    .field(field!("status"))
-                    .field(field!("authz_version"))
-                    .where_and(field!("id"), CompareOp::Eq, user_id)?,
-            )
-            .await
-            .map_err(BaseError::from)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+        let (status, authz_version) = crate::db::select_for_update::<(String, i64)>(
+            transaction,
+            QueryBuilder::from_pool(pool, table!("users"))
+                .field(field!("status"))
+                .field(field!("authz_version"))
+                .where_and(field!("id"), CompareOp::Eq, user_id)?,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
         if authz_version < 1 {
             return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
         }
@@ -130,7 +130,7 @@ impl AuthorizationVersionWriter for AccountAuthorizationPort {
         locked: &LockedAuthorization,
     ) -> Result<i64, BaseError> {
         let next_authz = next_authz_version(locked.authz_version())?;
-        let affected = transaction
+        let affected = crate::db::mysql_transaction(transaction)?
             .table(table!("users"))
             .where_and(field!("id"), CompareOp::Eq, locked.user_id())?
             .where_and(
@@ -158,8 +158,9 @@ pub(crate) async fn lock_user_credential(
     transaction: &mut Transaction,
     user_id: i64,
 ) -> Result<LockedUserCredential, BaseError> {
-    let (status, password_hash, authz_version, credential_version) = transaction
-        .select_for_update::<(String, String, i64, i64)>(
+    let (status, password_hash, authz_version, credential_version) =
+        crate::db::select_for_update::<(String, String, i64, i64)>(
+            transaction,
             QueryBuilder::from_pool(pool, table!("users"))
                 .field(field!("status"))
                 .field(field!("password_hash"))
@@ -167,8 +168,7 @@ pub(crate) async fn lock_user_credential(
                 .field(field!("credential_version"))
                 .where_and(field!("id"), CompareOp::Eq, user_id)?,
         )
-        .await
-        .map_err(BaseError::from)?
+        .await?
         .into_iter()
         .next()
         .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
@@ -191,7 +191,7 @@ pub(crate) async fn increment_locked_credential_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let affected = transaction
+    let affected = crate::db::mysql_transaction(transaction)?
         .table(table!("users"))
         .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
         .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)?
@@ -235,7 +235,7 @@ pub(crate) async fn anonymize_locked_user_and_increment_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let affected = transaction
+    let affected = crate::db::mysql_transaction(transaction)?
         .table(table!("users"))
         .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
         .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
@@ -280,7 +280,7 @@ pub(crate) async fn activate_locked_user_and_increment_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let affected = transaction
+    let affected = crate::db::mysql_transaction(transaction)?
         .table(table!("users"))
         .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
         .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
@@ -312,7 +312,7 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let affected = transaction
+    let affected = crate::db::mysql_transaction(transaction)?
         .table(table!("users"))
         .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
         .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
@@ -342,7 +342,7 @@ pub(crate) async fn append_authorization_outbox(
     user_id: i64,
     authz_version: i64,
 ) -> Result<(), BaseError> {
-    transaction
+    crate::db::mysql_transaction(transaction)?
         .table(table!("authorization_outbox"))
         .set_expr(field!("available_at"), SqlExpr::unix_timestamp())
         .set_expr(field!("created_at"), SqlExpr::unix_timestamp())

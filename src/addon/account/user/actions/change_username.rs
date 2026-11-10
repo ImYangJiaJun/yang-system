@@ -53,7 +53,7 @@ pub(super) async fn handle(
         .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
     Account::ensure_active(observed.status)?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)

@@ -1,11 +1,12 @@
 //! 密码重置凭证的生成、摘要与持久化仓储边界。
 
+use crate::db::Transaction;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
 use std::fmt::Write;
 use yang_base::BaseError;
-use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
+use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr};
 
 const RAW_TOKEN_BYTES: usize = 32;
 const RAW_TOKEN_CHARS: usize = RAW_TOKEN_BYTES * 2;
@@ -133,7 +134,7 @@ pub(crate) async fn insert_issued_by_in_tx(
 ) -> Result<(), BaseError> {
     let ttl = i64::try_from(ttl_seconds)
         .map_err(|_| BaseError::ConfigError("密码重置凭证 TTL 超出 i64 范围".to_string()))?;
-    transaction
+    crate::db::mysql_transaction(transaction)?
         .table(table!("password_reset_token"))
         .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
         .set_expr(field!("expires_at"), SqlExpr::unix_timestamp_add(ttl))
@@ -198,37 +199,37 @@ pub(crate) async fn lock_in_tx(
     transaction: &mut Transaction,
     reference: &PasswordResetReference,
 ) -> Result<LockedPasswordReset, BaseError> {
-    transaction
-        .select_for_update(
-            QueryBuilder::from_pool(pool, table!("password_reset_token"))
-                .field(field!("id"))
-                .field(field!("user_user"))
-                .field(field!("expires_at"))
-                .field(field!("consumed_at"))
-                .field(field!("invalidated_at"))
-                .select_expr(SqlExpr::unix_timestamp(), field!("database_now"))
-                .where_and(
-                    field!("token_digest"),
-                    CompareOp::Eq,
-                    reference.digest.as_str(),
-                )?,
-        )
-        .await?
-        .into_iter()
-        .next()
-        .map(
-            |(id, user_id, expires_at, consumed_at, invalidated_at, database_now)| {
-                LockedPasswordReset {
-                    id,
-                    user_id,
-                    expires_at,
-                    consumed_at,
-                    invalidated_at,
-                    database_now,
-                }
-            },
-        )
-        .ok_or_else(invalid_reset_token)
+    crate::db::select_for_update(
+        transaction,
+        QueryBuilder::from_pool(pool, table!("password_reset_token"))
+            .field(field!("id"))
+            .field(field!("user_user"))
+            .field(field!("expires_at"))
+            .field(field!("consumed_at"))
+            .field(field!("invalidated_at"))
+            .select_expr(SqlExpr::unix_timestamp(), field!("database_now"))
+            .where_and(
+                field!("token_digest"),
+                CompareOp::Eq,
+                reference.digest.as_str(),
+            )?,
+    )
+    .await?
+    .into_iter()
+    .next()
+    .map(
+        |(id, user_id, expires_at, consumed_at, invalidated_at, database_now)| {
+            LockedPasswordReset {
+                id,
+                user_id,
+                expires_at,
+                consumed_at,
+                invalidated_at,
+                database_now,
+            }
+        },
+    )
+    .ok_or_else(invalid_reset_token)
 }
 
 pub(crate) async fn consume_in_tx(
@@ -238,7 +239,7 @@ pub(crate) async fn consume_in_tx(
     if !locked.is_usable() {
         return Err(invalid_reset_token());
     }
-    let consumed = transaction
+    let consumed = crate::db::mysql_transaction(transaction)?
         .table(table!("password_reset_token"))
         .set_expr(field!("consumed_at"), SqlExpr::unix_timestamp())
         .where_and(field!("id"), CompareOp::Eq, locked.id)?
@@ -254,7 +255,7 @@ pub(crate) async fn consume_in_tx(
     if consumed != 1 {
         return Err(invalid_reset_token());
     }
-    transaction
+    crate::db::mysql_transaction(transaction)?
         .table(table!("password_reset_token"))
         .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
         .where_and(field!("user_user"), CompareOp::Eq, locked.user_id)?
@@ -274,7 +275,7 @@ pub(crate) async fn invalidate_all_for_user_in_tx(
     transaction: &mut Transaction,
     user_id: i64,
 ) -> Result<(), BaseError> {
-    transaction
+    crate::db::mysql_transaction(transaction)?
         .table(table!("password_reset_token"))
         .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
         .where_and(field!("user_user"), CompareOp::Eq, user_id)?

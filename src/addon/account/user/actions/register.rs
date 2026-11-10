@@ -50,7 +50,7 @@ pub(super) async fn handle(
     }
     let password_hash = account.passwords().hash(&input.password).await?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let id = match account
             .users()

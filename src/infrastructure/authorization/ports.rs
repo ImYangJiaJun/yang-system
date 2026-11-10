@@ -5,11 +5,11 @@
 //! 单一 writer 文件），组合根（`app.rs`）装配一次后分发给 Token 校验器
 //! 与需要使授权失效的业务 Addon。
 
+use crate::db::Transaction;
 use async_trait::async_trait;
 use sqlx::MySqlPool;
 use std::sync::Arc;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 授权版本回源快照（与账号域的存储表示解耦）。
 #[derive(Debug, Clone)]

@@ -85,7 +85,7 @@ pub(super) async fn handle(
         .authenticated_user()
         .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION));
     // 只读列表：不写任何事实，也不需要扇出失效。
-    let mut transaction = ctx.tools().mysql()?.read_only_transaction().await?;
+    let mut transaction = crate::db::begin_mysql_read_only(ctx.tools().mysql()?).await?;
     let result = async {
         let catalog = catalog_permissions(access.permission_catalog())?;
         let mut views = Vec::new();

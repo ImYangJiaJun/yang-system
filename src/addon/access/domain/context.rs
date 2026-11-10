@@ -7,8 +7,8 @@ use super::groups::GroupRepository;
 use super::permission_catalog::PermissionCatalogHandle;
 use super::repository::GrantRepository;
 use crate::authorization::AuthorizationPort;
+use crate::db::Transaction;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// access 模块上下文：聚合授权存储、权限组事实与权限目录投影、授权失效公共端口。
 pub(crate) struct Access {

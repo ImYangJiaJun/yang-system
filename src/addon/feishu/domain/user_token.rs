@@ -603,7 +603,7 @@ fn is_duplicate_key_error(error: &BaseError) -> bool {
 /// 刷新之后写回凭证。**不碰 `authorized_at`**（见 [`store_authorization`]）。
 async fn update_tokens(
     tokens: &Repository,
-    transaction: &mut yang_db::Transaction,
+    transaction: &mut crate::db::Transaction,
     id: i64,
     bundle: &TokenBundle,
 ) -> Result<(), BaseError> {
@@ -707,15 +707,12 @@ pub(crate) async fn user_access_token(
         yang_db::Database::from_pool(tokens.pool().clone(), yang_db::DatabaseConfig::default())
             .map_err(BaseError::from)
             .map_err(storage)?;
-    let mut transaction = database
-        .transaction()
-        .await
-        .map_err(BaseError::from)
-        .map_err(storage)?;
+    let mut transaction = crate::db::begin_mysql(&database).await.map_err(storage)?;
     // 锁等待有界；取消/失败由事务回滚释放，不能靠会过期的租约放行第二个刷新。
     let locked = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        transaction.select_for_update::<UserTokenRow>(
+        crate::db::select_for_update::<UserTokenRow>(
+            &mut transaction,
             yang_db::QueryBuilder::from_pool(tokens.pool(), yang_db::table!("feishu_user_token"))
                 .fields(&[
                     yang_db::field!("id"),
@@ -736,7 +733,6 @@ pub(crate) async fn user_access_token(
     .map_err(|_| UserTokenError::Failed {
         message: "等待用户凭证刷新事务超时，请稍后重试".into(),
     })?
-    .map_err(BaseError::from)
     .map_err(storage)?;
     let Some(row) = locked.into_iter().next() else {
         return Err(UserTokenError::NotAuthorized);
@@ -1211,7 +1207,7 @@ mod tests {
 
         // ---- 刷新分支：只换凭证，**不碰** `authorized_at` ----
         let third = bundle("access-third", "refresh-third", 300);
-        let mut transaction = database.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(&database).await?;
         update_tokens(tokens, &mut transaction, loaded.id, &third).await?;
         transaction.commit().await?;
         let loaded = expect_row(tokens, "刷新后应仍有一行").await?;
@@ -1220,21 +1216,14 @@ mod tests {
         assert_eq!(loaded.authorized_at, 1_800_000_000, "刷新不得重置授权时钟");
 
         // 独立连接模拟另一进程的持锁刷新：进程内 Mutex 无法提供这层保护。
-        let mut competing = database.transaction().await?;
-        let _: Vec<(i64,)> = competing
-            .select_for_update(
-                yang_db::QueryBuilder::from_pool(
-                    database.pool(),
-                    yang_db::table!("feishu_user_token"),
-                )
+        let mut competing = crate::db::begin_mysql(&database).await?;
+        let _: Vec<(i64,)> = crate::db::select_for_update(
+            &mut competing,
+            yang_db::QueryBuilder::from_pool(database.pool(), yang_db::table!("feishu_user_token"))
                 .field(yang_db::field!("id"))
-                .where_and(
-                    yang_db::field!("slot"),
-                    yang_db::CompareOp::Eq,
-                    SINGLE_SLOT,
-                )?,
-            )
-            .await?;
+                .where_and(yang_db::field!("slot"), yang_db::CompareOp::Eq, SINGLE_SLOT)?,
+        )
+        .await?;
         let transport = std::sync::Arc::new(PausedRefresh {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),

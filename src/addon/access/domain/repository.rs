@@ -91,7 +91,7 @@ impl GrantRepository {
     pub(crate) async fn list_by_user_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
     ) -> Result<Vec<GrantRecord>, BaseError> {
         let now = current_unix_timestamp()?;
@@ -120,7 +120,7 @@ impl GrantRepository {
     pub(crate) async fn list_all_by_user_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
     ) -> Result<Vec<GrantRecord>, BaseError> {
         let rows = self
@@ -140,7 +140,7 @@ impl GrantRepository {
     pub(crate) async fn list_by_permission_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         permission: &str,
     ) -> Result<Vec<GrantRecord>, BaseError> {
         let rows = self
@@ -162,7 +162,7 @@ impl GrantRepository {
     pub(crate) async fn list_by_users_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_ids: &[i64],
     ) -> Result<Vec<GrantRecord>, BaseError> {
         let values = user_ids
@@ -186,11 +186,11 @@ impl GrantRepository {
     pub(crate) async fn list_expired_unconverged_in_tx(
         &self,
         _ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         now: i64,
         limit: usize,
     ) -> Result<Vec<ExpiredGrant>, BaseError> {
-        let rows: Vec<(i64, i64, Option<i64>)> = transaction
+        let rows: Vec<(i64, i64, Option<i64>)> = crate::db::mysql_transaction(transaction)?
             .table(table!("authz_grant"))
             .field(field!("id"))
             .field(field!("user_id"))
@@ -225,7 +225,7 @@ impl GrantRepository {
     pub(crate) async fn mark_converged_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         observed_expires_at: i64,
         now: i64,
@@ -250,7 +250,7 @@ impl GrantRepository {
     pub(crate) async fn find_expiry_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
         permission: &str,
     ) -> Result<Option<Option<i64>>, BaseError> {
@@ -275,7 +275,7 @@ impl GrantRepository {
     pub(crate) async fn insert_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
         permission: &str,
         granted_by: i64,
@@ -303,7 +303,7 @@ impl GrantRepository {
     pub(crate) async fn renew_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
         permission: &str,
         granted_by: i64,
@@ -344,7 +344,7 @@ impl GrantRepository {
     pub(crate) async fn delete_all_of_user_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
     ) -> Result<u64, BaseError> {
         let affected = self
@@ -359,7 +359,7 @@ impl GrantRepository {
     pub(crate) async fn delete_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
         permission: &str,
     ) -> Result<u64, BaseError> {

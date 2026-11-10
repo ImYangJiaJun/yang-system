@@ -55,7 +55,7 @@ impl GrantExpiryHandle {
         limit: usize,
     ) -> Result<GrantExpiryReport, BaseError> {
         let now = current_unix_timestamp()?;
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let mut transaction = ctx.begin_transaction().await?;
         let result = async {
             let expired = self
                 .access
@@ -354,7 +354,7 @@ mod tests {
         );
 
         // 续期必须清掉收敛标记；未来再次过期时可以重新收敛。
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let mut transaction = ctx.begin_transaction().await?;
         access
             .grants()
             .renew_in_tx(

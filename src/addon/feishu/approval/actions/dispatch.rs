@@ -3166,7 +3166,7 @@ mod tests {
         let context = e2e_context_with_pool(pool.clone());
         let source = format!("att_{}", uuid::Uuid::new_v4().simple());
         let name = format!("附件验证选项_{source}");
-        let mut transaction = database.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(&database).await?;
         let (_, datasource_id) = context
             .datasources()
             .query()
@@ -3215,7 +3215,7 @@ mod tests {
                 status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
                 batch_scope_field: None,
             }).await?;
-            let mut transaction = database.transaction().await?;
+            let mut transaction = crate::db::begin_mysql(&database).await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
             transaction.commit().await?;
             saved_config_id = Some(config_id);

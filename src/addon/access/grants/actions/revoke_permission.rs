@@ -48,7 +48,7 @@ pub(super) async fn handle(
     // 撤销不做目录成员校验：已从 Catalog 移除的权限也必须能清理。
 
     // 同一事务：删授权事实 + 递增目标用户授权版本 + 追加 Outbox（writer 契约）。
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = access
             .authorization()

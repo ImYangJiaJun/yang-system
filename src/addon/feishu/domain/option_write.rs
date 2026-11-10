@@ -43,9 +43,9 @@
 //! 照旧报 `{inserted, updated}`——同一张表两条写入入口的计数口径**从此分叉**，
 //! 读日志时别把它们当同一个数。
 
+use crate::db::Transaction;
 use yang_base::table::Record;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 use super::repository::Repository;
 

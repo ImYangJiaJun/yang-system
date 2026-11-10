@@ -7,11 +7,11 @@
 //!
 //! 该仓储不触碰 `users` 授权事实，不属于 authorization-writer allowlist。
 
+use crate::db::Transaction;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 解码后图片字节上限：base64 编码后约 54 KB，低于 TEXT 的 64 KB 上限。
 pub(crate) const AVATAR_MAX_BYTES: usize = 40 * 1024;

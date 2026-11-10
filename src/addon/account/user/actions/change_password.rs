@@ -73,7 +73,7 @@ pub(super) async fn handle(
     // 两次昂贵 Argon2 运算均在事务和用户行锁之外完成。
     let new_password_hash = account.passwords().hash(&input.new_password).await?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)

@@ -32,13 +32,13 @@
 
 use std::sync::Arc;
 
+use crate::db::Transaction;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use yang_base::action::{ActionContext, ApiResponse, Request, UploadedFile};
 use yang_base::definition::{HttpMethod, ModuleSpec, MultipartSpec, ParamInput, Params};
 use yang_base::table::Record;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::derive::{

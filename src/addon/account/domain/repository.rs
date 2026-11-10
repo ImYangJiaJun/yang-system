@@ -261,7 +261,7 @@ impl UserRepository {
     pub(crate) async fn find_authorization_state_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
     ) -> Result<Option<AuthorizationStateRecord>, BaseError> {
         let rows = self
@@ -279,7 +279,7 @@ impl UserRepository {
     pub(crate) async fn insert_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         username: &str,
         password_hash: &str,
     ) -> Result<i64, BaseError> {
@@ -297,7 +297,7 @@ impl UserRepository {
     pub(crate) async fn update_password_hash_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         password_hash: &str,
     ) -> Result<(), BaseError> {
@@ -340,7 +340,7 @@ impl UserRepository {
     pub(crate) async fn activate_totp_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         encrypted_secret: &str,
         activated_at: i64,
@@ -371,7 +371,7 @@ impl UserRepository {
     pub(crate) async fn deactivate_totp_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
     ) -> Result<(), BaseError> {
         let affected = self
@@ -415,7 +415,7 @@ impl UserRepository {
     pub(crate) async fn consume_recovery_code_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         code: &str,
     ) -> Result<bool, BaseError> {
@@ -423,15 +423,14 @@ impl UserRepository {
         // 随后读到已移除该摘要的版本并返回 false，修复无锁 SELECT + 无条件回写的
         // TOCTOU 双消费（此前两并发请求可同时读到同一摘要集并各自成功）。
         let pool = ctx.tools().mysql()?.pool().clone();
-        let locked = transaction
-            .select_for_update::<(i64, i64)>(
-                QueryBuilder::from_pool(&pool, table!("users"))
-                    .field(field!("id"))
-                    .field(field!("authz_version"))
-                    .where_and(field!("id"), CompareOp::Eq, id)?,
-            )
-            .await
-            .map_err(BaseError::from)?;
+        let locked = crate::db::select_for_update::<(i64, i64)>(
+            transaction,
+            QueryBuilder::from_pool(&pool, table!("users"))
+                .field(field!("id"))
+                .field(field!("authz_version"))
+                .where_and(field!("id"), CompareOp::Eq, id)?,
+        )
+        .await?;
         let Some((_user_id, authz_version)) = locked.into_iter().next() else {
             return Ok(false);
         };
@@ -471,7 +470,7 @@ impl UserRepository {
         // 恢复码消费使授权事实发生变化（恢复码是认证器丢失的逃生通道，消费后必须使
         // 旧 Access Token 失效）。在已持有的用户行锁内递增授权版本并写入 Outbox。
         let next_authz = super::authz_version::next_authz_version(authz_version)?;
-        let updated = transaction
+        let updated = crate::db::mysql_transaction(transaction)?
             .table(table!("users"))
             .where_and(field!("id"), CompareOp::Eq, id)?
             .where_and(field!("authz_version"), CompareOp::Eq, authz_version)?
@@ -491,7 +490,7 @@ impl UserRepository {
     pub(crate) async fn update_email_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         email: &str,
         email_verified_at: i64,
@@ -522,7 +521,7 @@ impl UserRepository {
     pub(crate) async fn update_username_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         id: i64,
         username: &str,
     ) -> Result<(), BaseError> {

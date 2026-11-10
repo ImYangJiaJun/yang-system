@@ -75,7 +75,7 @@ impl LoginEventRepository {
     pub(crate) async fn delete_all_for_user_in_tx(
         &self,
         ctx: &ActionContext,
-        transaction: &mut yang_db::Transaction,
+        transaction: &mut crate::db::Transaction,
         user_id: i64,
     ) -> Result<u64, BaseError> {
         let affected = self

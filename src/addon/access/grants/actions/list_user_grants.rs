@@ -60,12 +60,7 @@ pub(super) async fn handle(
         return Err(BaseError::UserNotFound(input.user_id.to_string()));
     }
 
-    let mut transaction = ctx
-        .tools()
-        .mysql()?
-        .read_only_transaction()
-        .await
-        .map_err(BaseError::from)?;
+    let mut transaction = crate::db::begin_mysql_read_only(ctx.tools().mysql()?).await?;
     // 审计视图读取全部行（含过期行）：与解析侧（list_by_user_in_tx 的 SQL 过滤）
     // 相反，这里要连过期行一起展示，expired 派生标记由展示层按同一时钟计算。
     let result = access

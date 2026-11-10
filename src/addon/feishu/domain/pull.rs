@@ -669,7 +669,7 @@ async fn persist_binding(
     // 摘要与选项行同事务提交：半提交会让「摘要已推进但行没写完」永久错位。
     binding_update.insert("snapshot_digest", serde_json::json!(plan.digest));
 
-    let mut transaction = deps.database.transaction().await?;
+    let mut transaction = crate::db::begin_mysql(deps.database).await?;
     let result = async {
         let mut written = BindingWrite::default();
         if plan.replace_options {
@@ -717,7 +717,7 @@ pub(crate) async fn record_table_success(
     deps: &PullDeps<'_>,
     table_id: i64,
 ) -> Result<(), BaseError> {
-    let mut transaction = deps.database.transaction().await?;
+    let mut transaction = crate::db::begin_mysql(deps.database).await?;
     let mut update = Record::new();
     update.insert("last_pull_at", serde_json::json!(now_seconds()));
     update.insert("last_success_at", serde_json::json!(now_seconds()));
@@ -766,7 +766,7 @@ pub(crate) async fn record_table_partial(
     let failures: i64 = current.optional("consecutive_failures")?.unwrap_or(0);
     let message: String = message.chars().take(1000).collect();
 
-    let mut transaction = deps.database.transaction().await?;
+    let mut transaction = crate::db::begin_mysql(deps.database).await?;
     let mut update = Record::new();
     update.insert("consecutive_failures", serde_json::json!(failures + 1));
     update.insert("last_pull_at", serde_json::json!(now_seconds()));
@@ -822,7 +822,7 @@ pub(crate) async fn record_table_failure(
     // 错误文案可能很长（含飞书原始响应），截断后再落库。
     let message: String = message.chars().take(1000).collect();
 
-    let mut transaction = deps.database.transaction().await?;
+    let mut transaction = crate::db::begin_mysql(deps.database).await?;
     let mut update = Record::new();
     update.insert("consecutive_failures", serde_json::json!(failures + 1));
     // 失败也是一次**尝试**：`last_pull_at` 是「最近拉取时间」，试过就该推进它。

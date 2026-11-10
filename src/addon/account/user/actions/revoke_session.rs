@@ -48,7 +48,7 @@ pub(super) async fn handle(
 
     let now = current_unix_timestamp()?;
     // 行标记撤销 + 成功审计同事务原子提交：崩溃时二者要么都落库、要么都不落库。
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let affected = account
             .sessions()

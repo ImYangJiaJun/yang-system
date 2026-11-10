@@ -1,11 +1,11 @@
 //! 账号身份签发 Token 时使用的授权快照扩展点。
 
+use crate::db::Transaction;
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 一次 Token 签发所需的角色与权限快照。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

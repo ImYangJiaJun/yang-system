@@ -145,23 +145,22 @@ pub(super) async fn handle(
 /// §十）。组行在**本事务内** `FOR UPDATE` 读取，避免「读到无实例 → 同时被确认创建
 /// → 仍按无实例删除」。
 async fn delete_config_in_tx(
-    transaction: &mut yang_db::Transaction,
+    transaction: &mut crate::db::Transaction,
     context: &FeishuContext,
     config_id: i64,
 ) -> Result<DeletionSummary, BaseError> {
     // 与受理事务锁同一配置行，避免检查通过后又插入一个在途任务。
-    transaction
-        .select_for_update::<yang_base::table::Record>(
-            yang_db::QueryBuilder::from_pool(
-                context.approval_configs().pool(),
-                yang_db::table!("feishu_approval_config"),
-            )
-            .fields(&[yang_db::field!("id")])
-            .where_and(yang_db::field!("id"), yang_db::CompareOp::Eq, config_id)
-            .map_err(BaseError::from)?,
+    crate::db::select_for_update::<yang_base::table::Record>(
+        transaction,
+        yang_db::QueryBuilder::from_pool(
+            context.approval_configs().pool(),
+            yang_db::table!("feishu_approval_config"),
         )
-        .await
-        .map_err(BaseError::from)?;
+        .fields(&[yang_db::field!("id")])
+        .where_and(yang_db::field!("id"), yang_db::CompareOp::Eq, config_id)
+        .map_err(BaseError::from)?,
+    )
+    .await?;
     let active = context
         .approval_tasks()
         .query()
@@ -264,29 +263,28 @@ async fn delete_config_in_tx(
 
 /// 事务内锁住本配置的组行，返回 `组键 → 是否已有实例码`。
 async fn lock_group_instances_in_tx(
-    transaction: &mut yang_db::Transaction,
+    transaction: &mut crate::db::Transaction,
     context: &FeishuContext,
     config_id: i64,
 ) -> Result<HashMap<String, bool>, BaseError> {
-    let rows = transaction
-        .select_for_update::<yang_base::table::Record>(
-            yang_db::QueryBuilder::from_pool(
-                context.approval_groups().pool(),
-                yang_db::table!("feishu_approval_group"),
-            )
-            .fields(&[
-                yang_db::field!("group_key"),
-                yang_db::field!("instance_code"),
-            ])
-            .where_and(
-                yang_db::field!("config_id"),
-                yang_db::CompareOp::Eq,
-                config_id,
-            )
-            .map_err(BaseError::from)?,
+    let rows = crate::db::select_for_update::<yang_base::table::Record>(
+        transaction,
+        yang_db::QueryBuilder::from_pool(
+            context.approval_groups().pool(),
+            yang_db::table!("feishu_approval_group"),
         )
-        .await
-        .map_err(BaseError::from)?;
+        .fields(&[
+            yang_db::field!("group_key"),
+            yang_db::field!("instance_code"),
+        ])
+        .where_and(
+            yang_db::field!("config_id"),
+            yang_db::CompareOp::Eq,
+            config_id,
+        )
+        .map_err(BaseError::from)?,
+    )
+    .await?;
     let mut map = HashMap::with_capacity(rows.len());
     for row in rows {
         let key: String = row.require("group_key")?;
@@ -440,7 +438,7 @@ mod tests {
         )
         .await?;
 
-        let mut transaction = database.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(&database).await?;
         let summary = delete_config_in_tx(&mut transaction, &context, config_id).await?;
         transaction.commit().await?;
         assert_eq!(summary.deleted_groups, 1);
@@ -482,7 +480,7 @@ mod tests {
         )
         .await?;
 
-        let mut transaction = database.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(&database).await?;
         let summary = delete_config_in_tx(&mut transaction, &context, config_id).await?;
         transaction.commit().await?;
         assert_eq!(summary.deleted_groups, 1);
@@ -519,7 +517,7 @@ mod tests {
         )
         .await?;
 
-        let mut transaction = database.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(&database).await?;
         let result = delete_config_in_tx(&mut transaction, &context, config_id).await;
         transaction.rollback().await?;
         assert!(

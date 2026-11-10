@@ -16,11 +16,12 @@ use crate::addon::access::domain::groups::tables::{
 use crate::addon::access::groups::table::{
     GROUP_CREATED_BY, GROUP_DESCRIPTION, GROUP_ID, GROUP_KEY, GROUP_RECORD_FIELDS, GROUP_TITLE,
 };
+use crate::db::Transaction;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
-use yang_db::{field, table, CompareOp, QueryBuilder, Transaction};
+use yang_db::{field, table, CompareOp, QueryBuilder};
 
 /// 内置全权组的固定标识：引导首个账号时幂等创建。
 pub(crate) const SYSTEM_ADMIN_GROUP_KEY: &str = "system_admin";
@@ -505,18 +506,17 @@ impl GroupRepository {
         transaction: &mut Transaction,
         group_id: i64,
     ) -> Result<Option<GroupRecord>, BaseError> {
-        let rows = transaction
-            .select_for_update::<(i64, String, String, Option<String>, i64)>(
-                QueryBuilder::from_pool(ctx.tools().mysql()?.pool(), table!("permission_group"))
-                    .field(field!("id"))
-                    .field(field!("group_key"))
-                    .field(field!("title"))
-                    .field(field!("description"))
-                    .field(field!("created_by"))
-                    .where_and(field!("id"), CompareOp::Eq, group_id)?,
-            )
-            .await
-            .map_err(BaseError::from)?;
+        let rows = crate::db::select_for_update::<(i64, String, String, Option<String>, i64)>(
+            transaction,
+            QueryBuilder::from_pool(ctx.tools().mysql()?.pool(), table!("permission_group"))
+                .field(field!("id"))
+                .field(field!("group_key"))
+                .field(field!("title"))
+                .field(field!("description"))
+                .field(field!("created_by"))
+                .where_and(field!("id"), CompareOp::Eq, group_id)?,
+        )
+        .await?;
         Ok(rows
             .into_iter()
             .next()

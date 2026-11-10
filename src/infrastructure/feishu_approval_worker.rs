@@ -84,8 +84,8 @@ use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
 use crate::config::FeishuSettings;
+use crate::db::Transaction;
 use crate::infrastructure::audit;
-use yang_db::Transaction;
 
 /// 一次认领最多取多少条。
 ///
@@ -1521,7 +1521,7 @@ async fn seed_batch_click(
     let table_id: String = config.require("table_id")?;
     let approval_code: String = config.require("approval_code")?;
 
-    let mut transaction = runner.tools.mysql()?.transaction().await?;
+    let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
     let result: anyhow::Result<SeedOutcome> = async {
         anyhow::ensure!(
             approval_aggregation::repository::lock_config_in_tx(
@@ -7884,7 +7884,7 @@ mod tests {
         let runner = build_seed_runner(database, Arc::clone(&context), transport).await?;
 
         // 1. 有效租约：复位、摘组、删行全部拒绝。
-        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
         assert!(
             !approval_aggregation::repository::reopen_group_leader_in_tx(
                 &mut transaction,
@@ -7939,7 +7939,7 @@ mod tests {
             .bind(member_id)
             .execute(&pool)
             .await?;
-        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
         assert_eq!(
             approval_aggregation::repository::delete_task_rows_in_tx(
                 &mut transaction,
@@ -7959,7 +7959,7 @@ mod tests {
         .bind(member_id)
         .execute(&pool)
         .await?;
-        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
         assert_eq!(
             approval_aggregation::repository::delete_task_rows_in_tx(
                 &mut transaction,
@@ -7980,7 +7980,7 @@ mod tests {
         .bind(leader_id)
         .execute(&pool)
         .await?;
-        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
         assert!(
             !approval_aggregation::repository::reopen_group_leader_in_tx(
                 &mut transaction,
@@ -8992,7 +8992,7 @@ mod tests {
             build_seed_runner(database, Arc::clone(&context), Arc::clone(&transport)).await?;
         let config = load_seed_config(&context, config_id).await?;
 
-        let mut transaction = runner.tools.mysql()?.transaction().await?;
+        let mut transaction = crate::db::begin_mysql(runner.tools.mysql()?).await?;
         let seeded = seed_aggregate_groups(
             &mut transaction,
             &runner,

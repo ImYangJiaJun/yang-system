@@ -41,7 +41,7 @@ pub(super) async fn handle(
     }
 
     // 持久撤销：同一把用户行锁内递增两个安全版本并写授权 Outbox。
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)

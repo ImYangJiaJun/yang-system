@@ -47,7 +47,7 @@ pub(super) async fn handle(
         return Err(BaseError::ConfigError("TOTP 未激活，无需停用".to_string()));
     }
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)

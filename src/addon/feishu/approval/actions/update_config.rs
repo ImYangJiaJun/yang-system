@@ -299,25 +299,25 @@ pub(super) async fn handle(
     // 变更前快照与变更同事务提交：审计的 before/after 必须与库里的实际值一一对应。
     let mut transaction = ctx.begin_transaction().await?;
     let result: Result<serde_json::Value, BaseError> = async {
-        let before = transaction
-            .select_for_update::<Record>(
-                QueryBuilder::from_pool(
-                    ctx.tools().mysql()?.pool(),
-                    table!("feishu_approval_config"),
-                )
-                .fields(&[
-                    field!("title"),
-                    field!("enabled"),
-                    field!("base_timezone"),
-                    field!("batch_scope_field"),
-                    field!("aggregate_batch"),
-                ])
-                .where_and(field!("id"), CompareOp::Eq, input.config_id)?,
+        let before = crate::db::select_for_update::<Record>(
+            &mut transaction,
+            QueryBuilder::from_pool(
+                ctx.tools().mysql()?.pool(),
+                table!("feishu_approval_config"),
             )
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| BaseError::RecordNotFound("审批派发配置不存在".to_string()))?;
+            .fields(&[
+                field!("title"),
+                field!("enabled"),
+                field!("base_timezone"),
+                field!("batch_scope_field"),
+                field!("aggregate_batch"),
+            ])
+            .where_and(field!("id"), CompareOp::Eq, input.config_id)?,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| BaseError::RecordNotFound("审批派发配置不存在".to_string()))?;
         let old_title: String = before.require("title")?;
         let old_enabled: bool = before.require("enabled")?;
         let old_timezone: String = before.require("base_timezone")?;

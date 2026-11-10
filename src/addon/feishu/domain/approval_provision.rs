@@ -25,10 +25,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::db::Transaction;
 use serde_json::Value;
 use yang_base::table::{Record, SortOrder};
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 use super::approval::get_approval_definition;
 use super::approval_convert::{Converter, FixedOffset, WidgetMap};

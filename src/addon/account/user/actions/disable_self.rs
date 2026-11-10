@@ -48,7 +48,7 @@ pub(super) async fn handle(
         .system_authorization()
         .system_admin_member_ids(&ctx)
         .await?;
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let mut lock_set: BTreeSet<i64> = guard_members.iter().copied().collect();
         lock_set.insert(user_id);

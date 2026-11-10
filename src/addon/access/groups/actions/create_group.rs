@@ -92,7 +92,7 @@ pub(super) async fn handle(
     // 保留 key 先于事务拒绝：它是纯输入判定，不需要任何库事实，也就不会为一次注定
     // 被拒的请求开事务（更不会留下任何写入的中间态）。
     reject_reserved_group_key(&input.group_key)?;
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 组本身不是权限：建组既不需要过目录校验，也不改变任何人的有效权限，
         // 因此这里没有扇出失效。`group_key` 撞唯一键由 `fold_duplicate_group_key`

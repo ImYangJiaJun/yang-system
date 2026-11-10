@@ -20,9 +20,9 @@
 //! 任务行，并在行锁内复检 `worker_id`/`lease_until`/`state`/`effect_phase`——连接池
 //! 普通读与随后的 UPDATE/DELETE 之间，`claim_ready` 可以把该行认领走（设计 §6.1）。
 
+use crate::db::Transaction;
 use serde_json::Value;
 use yang_base::table::Record;
-use yang_db::Transaction;
 
 use super::super::context::FeishuContext;
 
@@ -42,17 +42,17 @@ pub(crate) async fn lock_config_in_tx(
     context: &FeishuContext,
     config_id: i64,
 ) -> anyhow::Result<bool> {
-    let rows = transaction
-        .select_for_update::<Record>(
-            yang_db::QueryBuilder::from_pool(
-                context.approval_configs().pool(),
-                yang_db::table!("feishu_approval_config"),
-            )
-            .fields(&[yang_db::field!("id"), yang_db::field!("enabled")])
-            .where_and(yang_db::field!("id"), yang_db::CompareOp::Eq, config_id)
-            .map_err(anyhow::Error::from)?,
+    let rows = crate::db::select_for_update::<Record>(
+        transaction,
+        yang_db::QueryBuilder::from_pool(
+            context.approval_configs().pool(),
+            yang_db::table!("feishu_approval_config"),
         )
-        .await?;
+        .fields(&[yang_db::field!("id"), yang_db::field!("enabled")])
+        .where_and(yang_db::field!("id"), yang_db::CompareOp::Eq, config_id)
+        .map_err(anyhow::Error::from)?,
+    )
+    .await?;
     Ok(rows
         .first()
         .and_then(|row| row.get("enabled"))
@@ -499,40 +499,40 @@ pub(crate) async fn lock_group_members_in_tx(
     config_id: i64,
     group_key: &str,
 ) -> anyhow::Result<Vec<Record>> {
-    let rows = transaction
-        .select_for_update::<Record>(
-            yang_db::QueryBuilder::from_pool(
-                context.approval_tasks().pool(),
-                yang_db::table!("feishu_approval_task"),
-            )
-            .fields(&[
-                yang_db::field!("id"),
-                yang_db::field!("record_id"),
-                yang_db::field!("group_seq"),
-                yang_db::field!("state"),
-                yang_db::field!("effect_phase"),
-                yang_db::field!("instance_code"),
-                yang_db::field!("serial_number"),
-                yang_db::field!("worker_id"),
-                yang_db::field!("lease_until"),
-            ])
-            .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
-            .where_and(
-                yang_db::field!("config_id"),
-                yang_db::CompareOp::Eq,
-                config_id,
-            )
-            .map_err(anyhow::Error::from)?
-            .where_and(
-                yang_db::field!("group_id"),
-                yang_db::CompareOp::Eq,
-                group_key,
-            )
-            .map_err(anyhow::Error::from)?
-            .order(yang_db::field!("group_seq"), yang_db::SortOrder::Asc)
-            .order(yang_db::field!("id"), yang_db::SortOrder::Asc),
+    let rows = crate::db::select_for_update::<Record>(
+        transaction,
+        yang_db::QueryBuilder::from_pool(
+            context.approval_tasks().pool(),
+            yang_db::table!("feishu_approval_task"),
         )
-        .await?;
+        .fields(&[
+            yang_db::field!("id"),
+            yang_db::field!("record_id"),
+            yang_db::field!("group_seq"),
+            yang_db::field!("state"),
+            yang_db::field!("effect_phase"),
+            yang_db::field!("instance_code"),
+            yang_db::field!("serial_number"),
+            yang_db::field!("worker_id"),
+            yang_db::field!("lease_until"),
+        ])
+        .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
+        .where_and(
+            yang_db::field!("config_id"),
+            yang_db::CompareOp::Eq,
+            config_id,
+        )
+        .map_err(anyhow::Error::from)?
+        .where_and(
+            yang_db::field!("group_id"),
+            yang_db::CompareOp::Eq,
+            group_key,
+        )
+        .map_err(anyhow::Error::from)?
+        .order(yang_db::field!("group_seq"), yang_db::SortOrder::Asc)
+        .order(yang_db::field!("id"), yang_db::SortOrder::Asc),
+    )
+    .await?;
     Ok(rows)
 }
 
@@ -605,23 +605,23 @@ async fn lock_task_rows_in_tx(
     task_ids: &[i64],
     require_deletable: bool,
 ) -> anyhow::Result<Option<Vec<Record>>> {
-    let rows = transaction
-        .select_for_update::<Record>(
-            yang_db::QueryBuilder::from_pool(
-                context.approval_tasks().pool(),
-                yang_db::table!("feishu_approval_task"),
-            )
-            .fields(&[
-                yang_db::field!("id"),
-                yang_db::field!("state"),
-                yang_db::field!("effect_phase"),
-                yang_db::field!("worker_id"),
-                yang_db::field!("lease_until"),
-            ])
-            .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
-            .where_in(yang_db::field!("id"), task_ids.to_vec()),
+    let rows = crate::db::select_for_update::<Record>(
+        transaction,
+        yang_db::QueryBuilder::from_pool(
+            context.approval_tasks().pool(),
+            yang_db::table!("feishu_approval_task"),
         )
-        .await?;
+        .fields(&[
+            yang_db::field!("id"),
+            yang_db::field!("state"),
+            yang_db::field!("effect_phase"),
+            yang_db::field!("worker_id"),
+            yang_db::field!("lease_until"),
+        ])
+        .select_expr(yang_db::SqlExpr::unix_timestamp(), yang_db::field!("now"))
+        .where_in(yang_db::field!("id"), task_ids.to_vec()),
+    )
+    .await?;
     if !require_deletable {
         return Ok(Some(rows));
     }

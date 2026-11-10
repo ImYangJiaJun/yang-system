@@ -66,7 +66,7 @@ pub(super) async fn handle(
     // 探查只用来定锁集，因此它可以陈旧：锁集少算了一行只是少锁一行（扇出也不会去碰
     // 锁批之外的行，见下方），多算了一行只是多重锁一行。判据本身绝不取这份数据。
     let probed_members = {
-        let mut probe = ctx.tools().mysql()?.transaction().await?;
+        let mut probe = ctx.begin_transaction().await?;
         let members = access
             .groups()
             .list_members_in_tx(&ctx, &mut probe, input.group_id)
@@ -78,7 +78,7 @@ pub(super) async fn handle(
     // 用探查到的成员数判定，正是为了在加锁**之前**就拒绝。
     ensure_member_limit(probed_members.len() as u64)?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 第二步：本事务的**第一条语句**就是这批行锁——按 `user_id` 升序一次性锁住
         // {操作者} ∪ {组成员}。两个性质缺一不可：

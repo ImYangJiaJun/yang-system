@@ -4,6 +4,7 @@ pub mod addon;
 pub mod app;
 pub mod bootstrap;
 pub mod config;
+mod db;
 mod infrastructure;
 
 pub use infrastructure::{

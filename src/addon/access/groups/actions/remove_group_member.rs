@@ -64,7 +64,7 @@ pub(super) async fn handle(
     // `countable` 交集把少算折算成 fail-closed 的少计），多算一行只是多重锁一行。
     // 判据绝不取这份数据——守卫读的是组行锁之后的那份名单。
     let probed_members = {
-        let mut probe = ctx.tools().mysql()?.transaction().await?;
+        let mut probe = ctx.begin_transaction().await?;
         let admin_group_id = access
             .groups()
             .find_by_key_in_tx(&ctx, &mut probe, SYSTEM_ADMIN_GROUP_KEY)
@@ -82,7 +82,7 @@ pub(super) async fn handle(
         members
     };
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 第一把锁：users 行。按 `user_id` 升序一次性锁住「探查到的全权组成员 ∪ 操作者 ∪
         // 目标」。

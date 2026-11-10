@@ -149,7 +149,7 @@ pub(super) async fn handle(
     validate_revoke_items(&input.items)?;
 
     let operator_id = ctx.actor()?.user_id();
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 涉及的 user_id 去重后按升序锁行：全局锁序要求 users 行一律升序整批获取；
         // 锁句柄保留供版本递增（CAS 需要锁时的 authz_version）。

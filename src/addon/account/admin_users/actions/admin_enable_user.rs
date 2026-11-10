@@ -40,7 +40,7 @@ pub(super) async fn handle(
             "账号启用必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
         ));
     }
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, input.id)

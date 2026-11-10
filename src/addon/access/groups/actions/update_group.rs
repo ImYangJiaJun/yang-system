@@ -43,7 +43,7 @@ pub(super) async fn handle(
     access: Arc<Access>,
 ) -> Result<ApiResponse, BaseError> {
     let operator_id = ctx.actor()?.user_id();
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let group = access
             .groups()

@@ -74,7 +74,7 @@ pub(super) async fn handle(
     // 探查可以陈旧：少算一行只是少锁一行（扇出交集把它折算成欠授权，不影响正确性），
     // 多算一行只是多重锁一行。
     let probed_members = {
-        let mut probe = ctx.tools().mysql()?.transaction().await?;
+        let mut probe = ctx.begin_transaction().await?;
         let members = access
             .groups()
             .list_members_in_tx(&ctx, &mut probe, input.group_id)
@@ -85,7 +85,7 @@ pub(super) async fn handle(
     // 上限先于行锁：超限时不得进入 O(N) 行锁事务（spec §6.3）。
     ensure_member_limit(probed_members.len() as u64)?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 第二步：本事务的**第一条语句**就是这批行锁——按 `user_id` 升序一次性锁住
         // {操作者} ∪ {探查到的组成员}。

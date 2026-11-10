@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::db::Transaction;
 use yang_base::action::auth::PasswordEngine;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 use crate::config::FeishuSettings;
 

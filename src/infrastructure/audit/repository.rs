@@ -4,11 +4,12 @@
 //! 拒绝/失败结果可使用独立连接追加。两条路径都不提供 UPDATE/DELETE。
 
 use super::{AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary};
+use crate::db::Transaction;
 use serde_json::{json, Value};
 use sqlx::MySqlPool;
 use yang_base::action::{ActionContext, RequestId};
 use yang_base::BaseError;
-use yang_db::{table, QueryBuilder, Transaction};
+use yang_db::{table, QueryBuilder};
 
 pub(crate) fn entity(kind: &'static str, id: impl ToString) -> Result<AuditEntity, BaseError> {
     AuditEntity::new(kind, id.to_string()).map_err(invalid_event)
@@ -165,7 +166,7 @@ pub(crate) async fn append_in_tx(
     event: &AuditEvent,
 ) -> Result<(), BaseError> {
     // 单行 INSERT 成功即恰好影响一行；失败以错误返回，不再单独核对 rows_affected。
-    transaction
+    crate::db::mysql_transaction(transaction)?
         .table(table!("audit_event"))
         .insert(&insert_data(event)?)
         .await?;

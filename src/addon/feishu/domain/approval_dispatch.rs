@@ -2673,7 +2673,7 @@ mod tests {
         .await
         .ok()
         .flatten()
-        .expect("应解析出实例 Code");
+        .unwrap_or_else(|| panic!("应解析出实例 Code"));
         assert_eq!(resolved["fldRel"], json!([code]));
         assert_eq!(
             transport.requests(),
@@ -2703,7 +2703,7 @@ mod tests {
         )
         .await
         .err()
-        .expect("缺申请编号应判数据问题");
+        .unwrap_or_else(|| panic!("缺申请编号应判数据问题"));
         assert!(
             matches!(problem, RelationProblem::Data(ref reason) if reason.contains("还没有申请编号")),
             "{problem:?}"
@@ -2723,7 +2723,7 @@ mod tests {
         )
         .await
         .err()
-        .expect("跨表关联应判数据问题");
+        .unwrap_or_else(|| panic!("跨表关联应判数据问题"));
         assert!(
             matches!(problem, RelationProblem::Data(ref reason) if reason.contains("其它数据表")),
             "{problem:?}"

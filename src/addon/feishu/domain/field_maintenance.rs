@@ -11,10 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::db::Transaction;
 use serde::Serialize;
 use yang_base::table::Record;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 use super::bitable::{
     is_option_source_field_type, is_single_value_field_type, list_all_fields, BitableCoordinates,

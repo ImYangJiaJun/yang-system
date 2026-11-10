@@ -187,7 +187,7 @@ pub(super) async fn handle(
     validate_grant_items(&input.items, access.permission_catalog(), now)?;
 
     let operator_id = ctx.actor()?.user_id();
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         // 涉及的 user_id 去重后按升序锁行：全局锁序要求 users 行一律升序整批获取
         // （与 `lock_users_ascending_in_tx` 同一纪律），本函数保留锁句柄供

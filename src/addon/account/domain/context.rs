@@ -27,13 +27,13 @@ use crate::addon::account::domain::system_owner::{
 use crate::addon::account::user::table::{UserView, STATUS};
 use crate::audit;
 use crate::config::{SecuritySettings, TotpSettings};
+use crate::db::Transaction;
 use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::auth::{AuthRateLimiter, BrowserSession, PasswordEngine, TokenPairClaims};
 use yang_base::action::ActionContext;
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
-use yang_db::Transaction;
 
 /// 浏览器刷新会话 Cookie 名称（Host-only、HttpOnly、SameSite=Strict）。
 const REFRESH_COOKIE_NAME: &str = "yang_refresh";
@@ -247,7 +247,7 @@ impl Account {
             state.totp_recovery_digest.as_deref().unwrap_or("[]"),
             code,
         ) {
-            let mut transaction = ctx.tools().mysql()?.transaction().await?;
+            let mut transaction = ctx.begin_transaction().await?;
             let consumed = self
                 .users()
                 .consume_recovery_code_in_tx(ctx, &mut transaction, user_id, code)
@@ -575,12 +575,7 @@ impl Account {
         user_id: i64,
         refresh_session: Option<(&str, &str)>,
     ) -> Result<AuthorizationSnapshot, BaseError> {
-        let mut transaction = ctx
-            .tools()
-            .mysql()?
-            .read_only_transaction()
-            .await
-            .map_err(BaseError::from)?;
+        let mut transaction = crate::db::begin_mysql_read_only(ctx.tools().mysql()?).await?;
         let snapshot_result: Result<AuthorizationSnapshot, BaseError> = async {
             if let Some((session_id, refresh_jti)) = refresh_session {
                 if !self

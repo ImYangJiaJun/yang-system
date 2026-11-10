@@ -92,7 +92,7 @@ pub(super) async fn handle(
     let digests_json = serde_json::to_string(&recovery_digests)
         .map_err(|_| BaseError::ConfigError("恢复码摘要序列化失败".to_string()))?;
 
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let mut transaction = ctx.begin_transaction().await?;
     let result = async {
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)
