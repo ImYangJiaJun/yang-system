@@ -41,7 +41,11 @@ describe("认证门控", () => {
       await screen.findByRole("button", { name: "重试恢复会话" }),
     );
     await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 登录页挂载后还会查一次飞书入口状态；这里只钉会话恢复的两次 refresh。
+    const refreshCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/api/v1/users/refresh"),
+    );
+    expect(refreshCalls).toHaveLength(2);
   });
   it("restoreState 为 pending 时渲染全屏骨架，恢复失败后离开骨架", async () => {
     // refresh 挂起 → 会话保持 pending；测试末尾放行，避免模块级 activeRefresh
@@ -82,6 +86,21 @@ describe("认证门控", () => {
       await screen.findByRole("heading", { name: "用户登录" }),
     ).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/login");
+  });
+
+  it("anonymous 深链接把 pathname + search 带进 ?redirect=", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ code: 40102, message: "刷新会话 Cookie 缺失" }, 401),
+      ),
+    );
+    const { router } = renderAt("/batch-approval?filter=mine");
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+    expect(router.state.location.search).toBe(
+      `?redirect=${encodeURIComponent("/batch-approval?filter=mine")}`,
+    );
   });
 
   it("authenticated 访问 /login 重定向回首页", async () => {

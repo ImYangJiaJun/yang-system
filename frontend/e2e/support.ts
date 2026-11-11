@@ -41,6 +41,19 @@ export async function mockAnonymousSession(page: Page) {
       body: JSON.stringify({ code: 40102, message: "刷新会话 Cookie 缺失" }),
     }),
   );
+  // 登录页挂载即查询飞书入口总开关。E2E 不跑真实飞书：固定关闭，避免
+  // 请求落到真实后端造成按钮时有时无、截图基线漂移。
+  await page.route("**/api/v1/auth/feishu/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { enabled: false },
+      }),
+    }),
+  );
 }
 
 export async function loginWithMockedCredentials(page: Page) {

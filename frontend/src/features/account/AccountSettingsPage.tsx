@@ -24,6 +24,7 @@ import {
   uploadAvatar,
   useSecurityEvents,
 } from "./api";
+import { FeishuIdentitySection } from "./FeishuIdentitySection";
 import { prepareAvatarFile } from "./lib/prepare-avatar";
 import { TotpSetupDialog } from "./TotpSetupDialog";
 import { UserAvatar } from "./UserAvatar";
@@ -442,6 +443,8 @@ export default function AccountSettingsPage() {
           </dl>
         </section>
       )}
+
+      {profile && <FeishuIdentitySection accessToken={token} />}
 
       <section className="rounded-xl border border-border bg-card p-5">
         <h2 className="text-base font-medium">修改密码</h2>

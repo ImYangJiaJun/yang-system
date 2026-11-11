@@ -20,6 +20,8 @@
 // http —— Action 调用协议
 export { invokeAction, fetchUiCatalog } from "./http/client";
 export { ApiError } from "./http/errors";
+// 自定义视图需要自己拼 REST 请求时（如飞书 SSO / 批量审批），复用同一 base 与 JSON 解析。
+export { apiBase, parseJson } from "./http/http";
 export type { InvocationResult, SessionContext } from "./http/types";
 
 // session —— 会话协议

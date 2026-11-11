@@ -6,19 +6,22 @@
 
 pub(crate) mod approval;
 pub(crate) mod approval_export;
+pub(crate) mod batch_approval;
 pub(crate) mod datasource;
 pub(crate) mod domain;
 pub(crate) mod event;
 pub(crate) mod option;
 pub(crate) mod portal;
+pub(crate) mod sso;
 
 use std::sync::Arc;
 
 use sqlx::MySqlPool;
 use yang_base::action::auth::PasswordEngine;
-use yang_base::definition::{AddonName, AddonSpec};
+use yang_base::definition::{AddonName, AddonSpec, ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
+use crate::addon::account::ExternalLoginPort;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::config::{FeishuSettings, SecuritySettings};
 
@@ -33,9 +36,11 @@ pub(crate) fn build_addon(
     pool: Arc<MySqlPool>,
     settings: Option<Arc<FeishuSettings>>,
     security: Arc<SecuritySettings>,
+    external_login: Arc<dyn ExternalLoginPort>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
-    let context = build_context(Arc::clone(&pool), security, settings.clone())?;
+    let context = build_context(Arc::clone(&pool), security, settings.clone())?
+        .with_external_login(Arc::clone(&external_login));
 
     Ok(AddonSpec::new(
         AddonName::new("feishu").map_err(|error| BaseError::ConfigError(error.to_string()))?,
@@ -76,6 +81,10 @@ pub(crate) fn build_addon(
     // 飞书用户身份（OAuth user_access_token）单例行：同样只有表，
     // 读写由派发的姓名解析路径与提醒 worker 经 `FeishuContext` 完成。
     .module(approval::build_user_token_module()?)
+    // 每用户飞书凭证与批量审批明细：纯表 module，读写由 SSO / 批量 Action
+    // 与 worker 经 `FeishuContext` 完成。job 主表由 `batch_approval` 主 module 声明。
+    .module(build_user_credential_module()?)
+    .module(build_batch_job_item_module()?)
     // 查询门户：两张表 = 两个 module（框架硬形状）。
     // 主模块挂 Action + presentation，日志模块只挂表。
     .module(portal::build_module(
@@ -83,6 +92,17 @@ pub(crate) fn build_addon(
         authorization_validator.clone(),
     )?)
     .module(portal::build_log_module()?)
+    // 飞书 SSO：登录/账号选择/绑定/MFA；账号域能力经 ExternalLoginPort 注入。
+    .module(sso::build_module(
+        Arc::clone(&context),
+        external_login,
+        authorization_validator.clone(),
+    )?)
+    // 批量审批：待办/详情/用户搜索 + 异步 job。
+    .module(batch_approval::build_module(
+        Arc::clone(&context),
+        authorization_validator.clone(),
+    )?)
     // 事件订阅：challenge 应答端点 + 事件接收端点（public + verification_token 自校验）。
     .module(event::build_module(
         Arc::clone(&context),
@@ -93,6 +113,24 @@ pub(crate) fn build_addon(
         settings.as_deref(),
         authorization_validator,
     )?))
+}
+
+/// 每用户飞书凭证的纯表 module。
+fn build_user_credential_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(
+        ModuleName::new("feishu.user_credential")
+            .map_err(|error| BaseError::ConfigError(error.to_string()))?,
+    )
+    .table(domain::user_credential_table::table_spec()?))
+}
+
+/// 批量审批明细的纯表 module。
+fn build_batch_job_item_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(
+        ModuleName::new("feishu.batch_job_item")
+            .map_err(|error| BaseError::ConfigError(error.to_string()))?,
+    )
+    .table(domain::batch_job_item_table::table_spec()?))
 }
 
 /// 构建飞书 addon 的共享上下文（九张表的 Repository + 集成配置）。
@@ -148,6 +186,18 @@ pub(crate) fn build_context(
         ),
         Repository::new(
             approval::domain::user_token_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            domain::user_credential_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            domain::batch_job_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            domain::batch_job_item_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         Repository::new(

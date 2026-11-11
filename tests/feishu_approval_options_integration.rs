@@ -170,6 +170,7 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         approval_base_timezone: "Asia/Shanghai".to_string(),
         event_verification_token: None,
         event_encrypt_key: None,
+        ..FeishuSettings::default()
     })
 }
 

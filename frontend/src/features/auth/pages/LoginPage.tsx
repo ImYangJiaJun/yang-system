@@ -11,6 +11,7 @@ import {
   useSessionSnapshot,
 } from "@/engine/session/use-session";
 import {
+  fetchFeishuLoginStatus,
   requestLoginEmailCode,
   requestMfaEmailCode,
 } from "@/features/auth/api";
@@ -31,6 +32,38 @@ type LoginMode = "password" | "email-code";
 
 /// 仅做「明显非法」的前端基础提示，安全语义全在后端。
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/// 回调失败只带短码（§5.2）；文案覆盖 §5.7 的可行动项，未知码不暴露后端细节。
+const FEISHU_ERROR_TEXT: Record<string, string> = {
+  access_denied: "已取消飞书授权",
+  login_expired: "登录已过期，请重新点飞书登录",
+  state_expired: "登录已过期，请重新点飞书登录",
+  invalid_state: "登录已过期，请重新点飞书登录",
+  replay: "登录已过期，请重新点飞书登录",
+  missing_code: "授权未返回有效凭证，请重新点飞书登录",
+  exchange_failed: "飞书授权换取凭证失败，请重试",
+  login_disabled: "飞书登录未启用，请联系管理员",
+  rate_limited: "操作太频繁，请稍后再试",
+  invalid_redirect: "登录回跳地址不合法，请从系统内重新进入",
+  tenant_rejected: "当前飞书租户不允许登录本系统",
+  tenant_not_allowed: "当前飞书租户不允许登录本系统",
+  account_disabled: "账号已停用，请联系管理员",
+  no_account:
+    "该飞书账号尚未绑定系统账号，请用账号密码绑定；如需新建账号请联系管理员",
+  not_initialized: "系统尚未初始化，请先用账号密码注册首个管理员",
+  create_not_allowed:
+    "该飞书账号尚未绑定系统账号，请用账号密码绑定；如需新建账号请联系管理员",
+  app_scope: "飞书应用未开通审批/通讯录权限，请联系管理员",
+  20027: "飞书应用未开通审批/通讯录权限，请联系管理员",
+  missing_scope: "授权缺少审批权限，请重新授权并在授权页同意全部权限",
+  99991679: "授权缺少审批权限，请重新授权并在授权页同意全部权限",
+  already_bound: "该飞书账号已绑定其他系统账号",
+  already_linked: "当前账号已绑定其他飞书账号",
+};
+
+function feishuErrorText(code: string): string {
+  return FEISHU_ERROR_TEXT[code] ?? "飞书登录失败，请重新尝试";
+}
 
 export default function LoginPage() {
   const controller = useSessionController();
@@ -55,6 +88,9 @@ export default function LoginPage() {
   // 第二因子阶段：记录触发 MFA 的登录方式，第二段按原方式重发凭据。
   const [mfaMode, setMfaMode] = useState<LoginMode | null>(null);
   const [mfaError, setMfaError] = useState("");
+  // 飞书登录入口：挂载时问一次总开关；询问失败按不可用处理（隐藏入口）。
+  const [feishuEnabled, setFeishuEnabled] = useState(false);
+  const feishuErrorCode = searchParams.get("feishu_error");
   // 会话结束原因优先读控制器快照（失效传播），兼容外部链接的 ?reason= 参数。
   const endReason = snapshot.sessionEndReason ?? searchParams.get("reason");
   const reasonMessage =
@@ -63,6 +99,19 @@ export default function LoginPage() {
       : endReason === "session-expired"
         ? "登录状态已过期，请重新登录"
         : "";
+
+  useEffect(() => {
+    const abort = new AbortController();
+    void fetchFeishuLoginStatus(abort.signal)
+      .then((status) => {
+        if (!abort.signal.aborted) setFeishuEnabled(status.enabled);
+      })
+      .catch(() => {
+        // 配置查询失败不阻塞密码/验证码登录，也不显示一个必然失败的入口。
+        if (!abort.signal.aborted) setFeishuEnabled(false);
+      });
+    return () => abort.abort();
+  }, []);
 
   /// 统一的登录尝试：第一阶段（无码）或第二阶段（带 mfaCode）。
   const attemptLogin = async (mfaCode?: string) => {
@@ -389,10 +438,36 @@ export default function LoginPage() {
                 账号已创建，请登录
               </p>
             )}
+            {feishuErrorCode && (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {feishuErrorText(feishuErrorCode)}
+              </p>
+            )}
 
             <Button type="submit" className="w-full" disabled={submitting}>
               {submitting ? "登录中…" : "登录"}
             </Button>
+
+            {feishuEnabled && (
+              <>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <span className="h-px flex-1 bg-border" />
+                  或
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                <Button variant="outline" className="w-full" asChild>
+                  {/* 顶层链接：OAuth 必须在服务端发起，前端不 fetch 飞书。 */}
+                  <a
+                    href={`/api/v1/auth/feishu/authorize?redirect=${encodeURIComponent(redirectTarget)}`}
+                  >
+                    飞书登录
+                  </a>
+                </Button>
+              </>
+            )}
 
             <div className="flex justify-between text-sm">
               <Link

@@ -6,6 +6,7 @@ use crate::db::Transaction;
 use yang_base::action::auth::PasswordEngine;
 use yang_base::BaseError;
 
+use crate::addon::account::ExternalLoginPort;
 use crate::config::FeishuSettings;
 
 use super::repository::Repository;
@@ -44,6 +45,15 @@ pub(crate) struct FeishuContext {
     /// 飞书用户身份表（OAuth user_access_token 的单例行）。
     #[allow(dead_code)]
     user_token: Repository,
+    /// 每用户飞书 OAuth 凭证（批量审批使用）。
+    #[allow(dead_code)]
+    user_credential: Repository,
+    /// 批量审批 job。
+    #[allow(dead_code)]
+    batch_job: Repository,
+    /// 批量审批 job 明细。
+    #[allow(dead_code)]
+    batch_job_item: Repository,
     /// 查询门户表。
     #[allow(dead_code)]
     portal: Repository,
@@ -68,6 +78,8 @@ pub(crate) struct FeishuContext {
     settings: Option<Arc<FeishuSettings>>,
     /// probe 与导入共享容量，成功解析后的写库阶段也占用这一份预算。
     xlsx_parse_slots: Arc<tokio::sync::Semaphore>,
+    /// 账号域外部登录端口；批量审批 worker 用它复核用户是否仍 active。
+    external_login: Option<Arc<dyn ExternalLoginPort>>,
 }
 
 impl FeishuContext {
@@ -84,6 +96,9 @@ impl FeishuContext {
         approval_request_log: Repository,
         approval_task_applicant: Repository,
         user_token: Repository,
+        user_credential: Repository,
+        batch_job: Repository,
+        batch_job_item: Repository,
         portal: Repository,
         portal_log: Repository,
         approval_event: Repository,
@@ -104,6 +119,9 @@ impl FeishuContext {
             approval_request_log,
             approval_task_applicant,
             user_token,
+            user_credential,
+            batch_job,
+            batch_job_item,
             portal,
             portal_log,
             approval_event,
@@ -113,7 +131,24 @@ impl FeishuContext {
             password_engine,
             settings,
             xlsx_parse_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            external_login: None,
         }
+    }
+
+    /// 注入账号域外部登录端口（只在 addon 组合根调用）。
+    pub(crate) fn with_external_login(
+        mut self: Arc<Self>,
+        external_login: Arc<dyn ExternalLoginPort>,
+    ) -> Arc<Self> {
+        if let Some(context) = Arc::get_mut(&mut self) {
+            context.external_login = Some(external_login);
+        }
+        self
+    }
+
+    /// 账号域外部登录端口；批量审批 worker 用来确认用户仍然 active。
+    pub(crate) fn external_login(&self) -> Option<&Arc<dyn ExternalLoginPort>> {
+        self.external_login.as_ref()
     }
 
     /// 数据源表（表级）。
@@ -181,6 +216,24 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn user_tokens(&self) -> &Repository {
         &self.user_token
+    }
+
+    /// 每用户飞书凭证。消费者：SSO 登录、批量审批与 worker。
+    #[allow(dead_code)]
+    pub(crate) fn user_credentials(&self) -> &Repository {
+        &self.user_credential
+    }
+
+    /// 批量审批 job 表。
+    #[allow(dead_code)]
+    pub(crate) fn batch_jobs(&self) -> &Repository {
+        &self.batch_job
+    }
+
+    /// 批量审批 job 明细表。
+    #[allow(dead_code)]
+    pub(crate) fn batch_job_items(&self) -> &Repository {
+        &self.batch_job_item
     }
 
     /// 查询门户表。消费者（门户 Action）在后续批次接入。
@@ -307,6 +360,9 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
+            repository(crate::addon::feishu::domain::user_credential_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_job_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_job_item_table::table_spec()),
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::event_table::table_spec()),

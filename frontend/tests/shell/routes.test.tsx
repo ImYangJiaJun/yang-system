@@ -20,6 +20,7 @@ import { Outlet, RouterProvider, createMemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RouteFallback } from "@/shell/RouteFallback";
+import { RequireAuth } from "@/shell/auth-gate";
 import { appRoutes } from "@/shell/routes";
 import { renderTestApp } from "@test/helpers/render-app";
 
@@ -160,6 +161,56 @@ describe("兜底界面的接线", () => {
     expect(
       screen.getByRole("status", { name: "页面加载中" }),
     ).toHaveTextContent("正在加载页面…");
+  });
+
+  it("飞书登录公开路由是 lazy + RouteFallback，且不套认证门控", () => {
+    type Route = {
+      path?: string;
+      element?: { type?: unknown };
+      lazy?: unknown;
+      hydrateFallbackElement?: unknown;
+      children?: readonly Route[];
+    };
+    const rootChildren = (
+      appRoutes[0] as unknown as { children?: readonly Route[] }
+    ).children;
+    expect(rootChildren).toBeDefined();
+
+    for (const path of ["/login/feishu/choose", "/login/feishu/mfa"]) {
+      const route = rootChildren?.find((item) => item.path === path);
+      expect(route, `缺少公开路由 ${path}`).toBeDefined();
+      // 公开路由不得带 element：否则 RequireAuth/RedirectIfAuthed 会先于页面生效。
+      expect(route?.element).toBeUndefined();
+      expect(route?.lazy).toEqual(expect.any(Function));
+      expect(
+        (route?.hydrateFallbackElement as { type?: unknown } | undefined)?.type,
+      ).toBe(RouteFallback);
+    }
+  });
+
+  it("/batch-approval 是根层 RequireAuth 路由、不套 AppLayout，且 lazy + 兜底", () => {
+    type Route = {
+      path?: string;
+      element?: { type?: unknown };
+      lazy?: unknown;
+      hydrateFallbackElement?: unknown;
+      children?: readonly Route[];
+    };
+    const rootChildren = (
+      appRoutes[0] as unknown as { children?: readonly Route[] }
+    ).children;
+    const route = rootChildren?.find((item) => item.path === "/batch-approval");
+    expect(route).toBeDefined();
+    expect(route?.element?.type).toBe(RequireAuth);
+
+    const page = route?.children?.[0];
+    expect(page?.lazy).toEqual(expect.any(Function));
+    expect(
+      (page?.hydrateFallbackElement as { type?: unknown } | undefined)?.type,
+    ).toBe(RouteFallback);
+    // 它必须是根 children 的直接成员；挂进 "/" 的 children 就会套上 AppLayout。
+    const appLayoutRoute = rootChildren?.find((item) => item.path === "/");
+    expect(appLayoutRoute?.children ?? []).not.toContain(route);
   });
 });
 

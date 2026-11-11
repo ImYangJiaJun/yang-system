@@ -15,8 +15,11 @@ use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
 // 组合根与基础设施使用的账号端口。
+pub(crate) use domain::deletion::AccountDeletionHook;
 pub use domain::email_delivery;
+pub(crate) use domain::external_login::{ExternalIdentityView, ExternalLoginPort};
 pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
+pub(crate) use domain::identity::{ExternalIdentityProfile, PROVIDER_FEISHU};
 pub(crate) use domain::system_owner::{SystemAuthorizationPort, SystemOwnerClaimer};
 
 // 外围授权域（access）使用的账号端口：授权快照类型与可信用户投影。
@@ -46,19 +49,26 @@ pub(crate) fn authorization_port() -> crate::authorization::AuthorizationPort {
 ///
 /// Addon 边界负责声明产品能力及其 Module；应用层不应直接拼装 `account.user`。
 /// `account.user` 与 `account.admin_users` 共享同一份模块上下文 [`Account`]。
-pub(crate) fn build_addon(
+pub(crate) fn build_context(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     system_authorization: Arc<dyn SystemAuthorizationPort>,
-    authorization_validator: AuthorizationVersionValidator,
-) -> Result<AddonSpec, BaseError> {
-    let account = user::build_context(
+) -> Result<Arc<Account>, BaseError> {
+    user::build_context(
         security,
         grant_resolver,
         system_owner_claimer,
         system_authorization,
-    )?;
+    )
+}
+
+/// 用已构造的账号上下文装配 Addon（组合根需要把同一 `Account` 作为
+/// `ExternalLoginPort` 注入飞书 SSO module）。
+pub(crate) fn build_addon_with_context(
+    account: Arc<Account>,
+    authorization_validator: AuthorizationVersionValidator,
+) -> Result<AddonSpec, BaseError> {
     Ok(AddonSpec::new(yang_base::addon!("account"))
         .module(user::build_module(
             Arc::clone(&account),

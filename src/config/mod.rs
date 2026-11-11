@@ -696,6 +696,30 @@ pub struct FeishuSettings {
     /// challenge 端点同时支持明文和加密两种 challenge 验证。
     #[serde(default)]
     pub event_encrypt_key: Option<String>,
+    /// 飞书 SSO 登录/绑定回调地址；与 `oauth_redirect_uri` 是两条独立的注册值。
+    #[serde(default)]
+    pub login_redirect_uri: Option<String>,
+    /// 是否注册飞书 SSO 登录端点（独立于数据源 `enabled`）。
+    #[serde(default)]
+    pub login_enabled: bool,
+    /// 首次飞书登录的选择页是否允许「新建账号」。
+    #[serde(default = "default_feishu_login_allow_create")]
+    pub login_allow_create: bool,
+    /// 允许登录的飞书租户；空表示信任应用所属租户。
+    #[serde(default)]
+    pub login_allowed_tenant_keys: Vec<String>,
+    /// 登录后允许回跳的相对路径白名单。
+    #[serde(default = "default_feishu_login_allowed_redirects")]
+    pub login_allowed_redirects: Vec<String>,
+    /// 单个批量审批 job 的最大任务数。
+    #[serde(default = "default_feishu_batch_max_tasks")]
+    pub batch_max_tasks: u32,
+    /// 批量审批 worker 启动开关。
+    #[serde(default = "default_feishu_batch_worker_enabled")]
+    pub batch_worker_enabled: bool,
+    /// 批量审批 worker 轮询间隔（秒）。
+    #[serde(default = "default_feishu_batch_worker_interval_seconds")]
+    pub batch_worker_interval_seconds: u64,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
@@ -731,6 +755,30 @@ pub(crate) const fn default_approval_create_rate_per_minute() -> u32 {
 /// 审批派发轮询间隔的默认值（秒）。
 pub(crate) const fn default_approval_scan_interval_seconds() -> u64 {
     30
+}
+
+pub(crate) const fn default_feishu_login_allow_create() -> bool {
+    true
+}
+
+pub(crate) fn default_feishu_login_allowed_redirects() -> Vec<String> {
+    vec![
+        "/".to_string(),
+        "/batch-approval".to_string(),
+        "/account".to_string(),
+    ]
+}
+
+pub(crate) const fn default_feishu_batch_max_tasks() -> u32 {
+    50
+}
+
+pub(crate) const fn default_feishu_batch_worker_enabled() -> bool {
+    true
+}
+
+pub(crate) const fn default_feishu_batch_worker_interval_seconds() -> u64 {
+    2
 }
 
 /// 多维表格日期时区的默认值。
@@ -783,6 +831,61 @@ impl FeishuSettings {
                 .app_secret
                 .as_deref()
                 .is_some_and(credential_is_configured)
+    }
+
+    /// 飞书 SSO 登录是否具备注册条件。
+    ///
+    /// 刻意**不要求** `can_pull()`：数据源拉取开关不应决定用户能否登录。只要求
+    /// 应用凭证与独立的 `login_redirect_uri`。
+    pub fn login_configured(&self) -> bool {
+        self.enabled
+            && self.login_enabled
+            && self
+                .login_redirect_uri
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self.app_id.as_deref().is_some_and(credential_is_configured)
+            && self
+                .app_secret
+                .as_deref()
+                .is_some_and(credential_is_configured)
+    }
+
+    /// 登录回调的会话 Cookie 是否应带 `Secure`（由注册的回调 URL scheme 决定）。
+    pub fn login_cookie_secure(&self) -> bool {
+        self.login_redirect_uri
+            .as_deref()
+            .is_some_and(|value| value.trim().starts_with("https://"))
+    }
+}
+
+impl Default for FeishuSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            management_api_token: String::new(),
+            encryption_key: None,
+            app_id: None,
+            app_secret: None,
+            oauth_redirect_uri: None,
+            pull_interval_seconds: default_feishu_pull_interval_seconds(),
+            alert_recipients: Vec::new(),
+            alert_failure_threshold: default_feishu_alert_threshold(),
+            log_inbound_requests: false,
+            approval_create_rate_per_minute: default_approval_create_rate_per_minute(),
+            approval_scan_interval_seconds: default_approval_scan_interval_seconds(),
+            approval_base_timezone: default_approval_base_timezone(),
+            event_verification_token: None,
+            event_encrypt_key: None,
+            login_redirect_uri: None,
+            login_enabled: false,
+            login_allow_create: default_feishu_login_allow_create(),
+            login_allowed_tenant_keys: Vec::new(),
+            login_allowed_redirects: default_feishu_login_allowed_redirects(),
+            batch_max_tasks: default_feishu_batch_max_tasks(),
+            batch_worker_enabled: default_feishu_batch_worker_enabled(),
+            batch_worker_interval_seconds: default_feishu_batch_worker_interval_seconds(),
+        }
     }
 }
 
@@ -1111,6 +1214,65 @@ impl Settings {
                         "feishu.oauth_redirect_uri 必须是 http(s):// 开头的绝对地址（须与开发者后台注册的重定向 URL 逐字一致）"
                     );
                 }
+            }
+            if let Some(redirect_uri) = feishu.login_redirect_uri.as_deref() {
+                let value = redirect_uri.trim();
+                let usable = value.split_once("://").is_some_and(|(scheme, rest)| {
+                    matches!(scheme, "http" | "https") && !rest.is_empty()
+                });
+                if !usable {
+                    bail!(
+                        "feishu.login_redirect_uri 必须是 http(s):// 开头的绝对地址（须与开发者后台注册的重定向 URL 逐字一致）"
+                    );
+                }
+            }
+            if feishu.login_enabled {
+                if feishu
+                    .login_redirect_uri
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    bail!("feishu.login_enabled 需要同时配置 feishu.login_redirect_uri");
+                }
+                let app_id = feishu.app_id.as_deref().unwrap_or_default().trim();
+                let app_secret = feishu.app_secret.as_deref().unwrap_or_default().trim();
+                if app_id.is_empty()
+                    || app_secret.is_empty()
+                    || app_id.starts_with("replace-with")
+                    || app_secret.starts_with("replace-with")
+                {
+                    bail!("feishu.login_enabled 需要配置真实的 feishu.app_id / feishu.app_secret");
+                }
+            }
+            for path in &feishu.login_allowed_redirects {
+                let trimmed = path.trim();
+                if trimmed.is_empty()
+                    || !trimmed.starts_with('/')
+                    || trimmed.starts_with("//")
+                    || trimmed.contains('\\')
+                    || trimmed.contains("://")
+                {
+                    bail!(
+                        "feishu.login_allowed_redirects 的每一项必须是以 / 开头的站内相对路径（拒绝 //、反斜杠与绝对 URL）：{path}"
+                    );
+                }
+            }
+            if feishu
+                .login_allowed_tenant_keys
+                .iter()
+                .any(|key| key.trim().is_empty())
+            {
+                bail!(
+                    "feishu.login_allowed_tenant_keys 不允许空白项（空列表表示信任应用所属租户）"
+                );
+            }
+            if !(1..=100).contains(&feishu.batch_max_tasks) {
+                bail!("feishu.batch_max_tasks 必须在 1..=100 范围内");
+            }
+            if !(1..=60).contains(&feishu.batch_worker_interval_seconds) {
+                bail!("feishu.batch_worker_interval_seconds 必须在 1..=60 范围内");
             }
             if feishu.can_pull() {
                 let app_secret = feishu.app_secret.as_deref().unwrap_or_default();

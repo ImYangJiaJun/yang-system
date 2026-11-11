@@ -9,6 +9,7 @@ pub(super) mod table;
 
 use super::domain::avatar::AvatarRepository;
 use super::domain::context::Account;
+use super::domain::identity::IdentityRepository;
 use super::domain::login_event::LoginEventRepository;
 use super::domain::repository::UserRepository;
 use super::domain::session::SessionRepository;
@@ -34,10 +35,14 @@ pub(super) fn build_context(
     system_authorization: Arc<dyn SystemAuthorizationPort>,
 ) -> Result<Arc<Account>, BaseError> {
     let table = table::user_table_spec()?;
+    let identity_repository = IdentityRepository::new(
+        super::domain::identity::user_identity_table_spec()?.table_definition()?,
+    );
     let session_repository = SessionRepository::new(crate::schema::user_session()?);
     let login_event_repository = LoginEventRepository::new(crate::schema::login_event()?);
     Ok(Arc::new(Account::new(
         UserRepository::new(table.table_definition()?),
+        identity_repository,
         session_repository,
         login_event_repository,
         AvatarRepository::new(crate::schema::user_avatar()?),

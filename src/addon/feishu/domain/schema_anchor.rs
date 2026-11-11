@@ -181,6 +181,30 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "approval_export_runs()",
         ),
+        (
+            "feishu_batch_job",
+            spec(
+                crate::addon::feishu::domain::batch_job_table::table_spec(),
+                "批量审批任务",
+            ),
+            "batch_jobs()",
+        ),
+        (
+            "feishu_batch_job_item",
+            spec(
+                crate::addon::feishu::domain::batch_job_item_table::table_spec(),
+                "批量审批任务项",
+            ),
+            "batch_job_items()",
+        ),
+        (
+            "feishu_user_credential",
+            spec(
+                crate::addon::feishu::domain::user_credential_table::table_spec(),
+                "飞书用户凭证",
+            ),
+            "user_credentials()",
+        ),
     ]
 }
 

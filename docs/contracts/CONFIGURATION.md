@@ -339,6 +339,25 @@ deadpool 0.12 不支持，不参与连接回收），吊销旧凭据前预留至
   只认少数几个常用 IANA 名（上海/东京/新加坡/香港/UTC），**解析失败会让启动失败**
   ——「点了按钮一直没反应」比「启动报错」难查得多。单配置级的 `base_timezone`
   会覆盖这里（配置无效则回退回这个默认值，不把整条配置的记录判死）。
+- `feishu.oauth_redirect_uri`（文本，可选）：**管理员**飞书用户身份授权的回调地址，
+  须与开发者后台「安全设置 > 重定向 URL」逐字一致；省略表示不出站身份授权。
+  它与下面的 `login_redirect_uri` 是两条独立注册值。
+- `feishu.login_redirect_uri`（文本，可选）：**用户 SSO** 登录/绑定的回调地址，
+  同样须与开发者后台注册值逐字一致；`login_enabled=true` 时必填。
+- `feishu.login_enabled`（布尔，默认 `false`）：是否注册飞书 SSO 登录端点；
+  关闭时 `authorize`/`callback`/`choose*`/`mfa` 不注册，`status` 仍返回 `false`。
+- `feishu.login_allow_create`（布尔，默认 `true`）：首次登录选择页是否显示
+  「新建账号」；关闭后只能绑定已有账号或联系管理员。
+- `feishu.login_allowed_tenant_keys`（字符串数组，默认 `[]`）：允许登录的飞书租户；
+  空表示信任应用所属租户。非空时拿不到真实 `tenant_key` 会 fail-closed。
+- `feishu.login_allowed_redirects`（字符串数组，默认 `["/", "/batch-approval", "/account"]`）：
+  登录后允许回跳的站内相对路径；拒绝绝对 URL、`//` 与反斜杠。
+- `feishu.batch_max_tasks`（整数，默认 `50`，有效范围 `1..=100`）：单个批量审批
+  job 的最大任务数。
+- `feishu.batch_worker_enabled`（布尔，默认 `true`）：批量审批执行器开关；
+  关闭后 job 保留 `pending`，不执行。
+- `feishu.batch_worker_interval_seconds`（整数，默认 `2`，有效范围 `1..=60`）：
+  批量审批执行器轮询间隔（当前实现为创建后进程内执行，保留给独立 worker）。
 
 对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
 `YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。

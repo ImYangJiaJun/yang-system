@@ -1,4 +1,4 @@
-import { Navigate } from "react-router";
+import { Navigate, Outlet } from "react-router";
 import AppLayout from "@/shell/AppLayout";
 import AccountSettingsPage from "@/features/account/AccountSettingsPage";
 import DashboardPage from "@/shell/pages/DashboardPage";
@@ -71,6 +71,26 @@ export const appRoutes = [
         ),
       },
       {
+        // 飞书首次登录的账号选择页：**公开路由**，与 `/login` 平级。
+        // 它不能包 RedirectIfAuthed/RequireAuth：会话尚未建立，pending token
+        // 还没被消费；把它塞进受保护树会先被门控弹回登录页。
+        path: "/login/feishu/choose",
+        lazy: async () => ({
+          Component: (await import("@/features/auth/pages/FeishuChoosePage"))
+            .default,
+        }),
+        hydrateFallbackElement: <RouteFallback />,
+      },
+      {
+        // 飞书登录的第二因子：飞书身份是第一因子，TOTP 完成前同样不能要求会话。
+        path: "/login/feishu/mfa",
+        lazy: async () => ({
+          Component: (await import("@/features/auth/pages/FeishuMfaPage"))
+            .default,
+        }),
+        hydrateFallbackElement: <RouteFallback />,
+      },
+      {
         path: "/register",
         element: (
           <RedirectIfAuthed>
@@ -107,6 +127,27 @@ export const appRoutes = [
             .default,
         }),
         hydrateFallbackElement: <RouteFallback />,
+      },
+      {
+        // 批量审批是独立专注页：根层 RequireAuth、**不套 AppLayout**。
+        // 分享链接直接进页面；外层只做门控，页面本体仍按路由级 lazy 加载。
+        path: "/batch-approval",
+        element: (
+          <RequireAuth>
+            <Outlet />
+          </RequireAuth>
+        ),
+        children: [
+          {
+            index: true,
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/BatchApprovalPage")
+              ).default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+        ],
       },
       {
         path: "/",

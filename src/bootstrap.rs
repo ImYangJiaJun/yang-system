@@ -16,6 +16,7 @@ use crate::feishu_approval_worker::{
 use crate::feishu_event_worker::FeishuEventWorker;
 use crate::feishu_oauth_reminder::FeishuOauthReminderWorker;
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
+use crate::infrastructure::feishu_batch_worker::FeishuBatchWorker;
 use crate::infrastructure::grant_expiry_worker::GrantExpiryWorker;
 use crate::infrastructure::session_cleanup::SessionCleanupWorker;
 use anyhow::Context;
@@ -43,6 +44,7 @@ const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
 const PHASE_FEISHU_EVENT_WORKER: &str = "feishu_event_worker";
 const PHASE_FEISHU_EXPORT_WORKER: &str = "feishu_approval_export_worker";
+const PHASE_FEISHU_BATCH_WORKER: &str = "feishu_batch_worker";
 const PHASE_FEISHU_OAUTH_REMINDER_WORKER: &str = "feishu_oauth_reminder_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
@@ -451,6 +453,32 @@ async fn run_after_tools_created(
         }
         None => None,
     };
+    // 批量审批执行 Worker：与其它飞书 worker 同一条准入，另受
+    // `batch_worker_enabled` 显式开关控制。进程重启后由它接管未完成的 job。
+    let batch_worker = match settings
+        .feishu
+        .as_ref()
+        .filter(|feishu| feishu.can_pull() && feishu.batch_worker_enabled)
+    {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建批量审批上下文失败")?
+            .with_external_login(application.external_login());
+            Some(
+                FeishuBatchWorker::start(
+                    Arc::clone(&tools),
+                    feishu_context,
+                    Arc::new(feishu.clone()),
+                )
+                .context("启动批量审批 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
     let signal_readiness = readiness_gate.clone();
@@ -499,6 +527,12 @@ async fn run_after_tools_created(
                 {
                     return "feishu_approval_export_worker";
                 }
+                if batch_worker
+                    .as_ref()
+                    .is_some_and(FeishuBatchWorker::has_exited)
+                {
+                    return "feishu_batch_worker";
+                }
             }
         };
         tokio::pin!(worker_guard);
@@ -528,6 +562,9 @@ async fn run_after_tools_created(
     if let Some(worker) = &export_worker {
         worker.request_shutdown();
     }
+    if let Some(worker) = &batch_worker {
+        worker.request_shutdown();
+    }
     if let Some(worker) = &oauth_reminder_worker {
         worker.request_shutdown();
     }
@@ -537,7 +574,7 @@ async fn run_after_tools_created(
     // 10%（最多 1 秒）。超时取消关闭 future 时 OwnedTask 仍持有句柄并请求 abort。
     let reserve = (Duration::from_secs(settings.shutdown.total_timeout_seconds) / 10)
         .min(Duration::from_secs(1));
-    let (http, outbox, grants, sessions, pull, approval, event, export, oauth, management) = tokio::join!(
+    let (http, outbox, grants, sessions, pull, approval, event, export, batch, oauth, management) = tokio::join!(
         shutdown_budget.run_phase_with_reserve(PHASE_HTTP_DRAIN, reserve, async {
             match serve_result {
                 Some(result) => result,
@@ -583,6 +620,12 @@ async fn run_after_tools_created(
                 None => Ok(()),
             }
         }),
+        shutdown_budget.run_phase_with_reserve(PHASE_FEISHU_BATCH_WORKER, reserve, async {
+            match batch_worker {
+                Some(worker) => worker.shutdown().await,
+                None => Ok(()),
+            }
+        }),
         shutdown_budget.run_phase_with_reserve(
             PHASE_FEISHU_OAUTH_REMINDER_WORKER,
             reserve,
@@ -607,6 +650,7 @@ async fn run_after_tools_created(
         .and(approval)
         .and(event)
         .and(export)
+        .and(batch)
         .and(oauth)
         .and(management)
         .map_err(anyhow::Error::from);

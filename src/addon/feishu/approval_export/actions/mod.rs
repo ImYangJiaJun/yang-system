@@ -98,6 +98,9 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
+            repository(crate::addon::feishu::domain::user_credential_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_job_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_job_item_table::table_spec()),
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::event_table::table_spec()),
@@ -128,6 +131,7 @@ mod tests {
             approval_base_timezone: "Asia/Shanghai".to_string(),
             event_verification_token: None,
             event_encrypt_key: None,
+            ..FeishuSettings::default()
         });
         let spec = ModuleSpec::new(
             ModuleName::new("feishu.approval_export").unwrap_or_else(|error| panic!("{error}")),
