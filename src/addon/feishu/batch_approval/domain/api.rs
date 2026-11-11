@@ -4,6 +4,7 @@
 //! 返回值保留为 `serde_json::Value`，因为详情/表单/时间线的字段形状以真机为准，
 //! 过早强类型化只会在飞书字段调整时制造 502。
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,29 +23,73 @@ const MAX_PAGES: usize = 10;
 const PAGE_SIZE: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
+fn value_as_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn string_from_value<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    value_as_string(value).ok_or_else(|| de::Error::custom("期望字符串或数字"))
+}
+
+fn optional_string_from_value<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(value_as_string))
+}
+
+fn optional_bool_from_value<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Bool(value)) => Some(value),
+        Some(Value::Number(value)) => value.as_i64().map(|value| value != 0),
+        Some(Value::String(value)) => match value.as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        Some(Value::Null) | Some(Value::Array(_)) | Some(Value::Object(_)) | None => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TaskItem {
+    #[serde(deserialize_with = "string_from_value")]
     pub(crate) task_id: String,
+    #[serde(deserialize_with = "string_from_value")]
     pub(crate) instance_code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) definition_code: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) definition_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) initiator_name: Option<String>,
     #[serde(default)]
     pub(crate) summaries: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_bool_from_value")]
     pub(crate) support_api_operate: Option<bool>,
     #[serde(default)]
     pub(crate) link: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) instance_external_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) task_external_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) status: Option<String>,
 }
 
@@ -82,9 +127,9 @@ struct Envelope {
 struct TasksPage {
     #[serde(default)]
     tasks: Vec<TaskItem>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_bool_from_value")]
     has_more: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_from_value")]
     page_token: Option<String>,
 }
 
@@ -305,4 +350,43 @@ pub(crate) async fn task_action(
         Some(body),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskItem, TasksPage};
+
+    #[test]
+    fn task_item_accepts_numeric_ids_and_status() {
+        let item: TaskItem = serde_json::from_value(serde_json::json!({
+            "task_id": 123456789,
+            "instance_code": "INSTANCE-1",
+            "status": 1,
+            "support_api_operate": 1
+        }))
+        .unwrap_or_else(|error| panic!("numeric 形态应能解析: {error}"));
+
+        assert_eq!(item.task_id, "123456789");
+        assert_eq!(item.instance_code, "INSTANCE-1");
+        assert_eq!(item.status.as_deref(), Some("1"));
+        assert_eq!(item.support_api_operate, Some(true));
+    }
+
+    #[test]
+    fn tasks_page_ignores_null_optional_fields() {
+        let page: TasksPage = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "task_id": "1",
+                "instance_code": "INSTANCE-1",
+                "definition_code": null,
+                "title": null
+            }],
+            "has_more": false
+        }))
+        .unwrap_or_else(|error| panic!("空字段应能解析: {error}"));
+
+        assert_eq!(page.tasks.len(), 1);
+        assert_eq!(page.tasks[0].definition_code, None);
+        assert_eq!(page.tasks[0].title, None);
+    }
 }

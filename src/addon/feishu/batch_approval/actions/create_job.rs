@@ -140,7 +140,9 @@ pub(super) async fn handle(
             ));
         }
         if let Some(status) = task.status.as_deref() {
-            if status != "PENDING" {
+            // 真机任务列表的 status 可能是数字（topic=1 已经限定为待办），
+            // 只有明确的非 PENDING 文案才拒绝；数字交给 topic 分组兜底。
+            if status.parse::<i64>().is_err() && status != "PENDING" {
                 return Err(BaseError::ParamInvalid(
                     "items".to_string(),
                     "部分任务已不是待审批状态，请刷新后重试".to_string(),
