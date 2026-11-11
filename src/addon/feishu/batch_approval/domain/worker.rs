@@ -635,11 +635,20 @@ fn task_status<'a>(detail: &'a Value, task_id: &str) -> Option<&'a str> {
         .find(|task| {
             task.get("id")
                 .or_else(|| task.get("task_id"))
-                .and_then(Value::as_str)
+                .and_then(value_text)
+                .as_deref()
                 == Some(task_id)
         })?
         .get("status")?
         .as_str()
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 async fn load_job(

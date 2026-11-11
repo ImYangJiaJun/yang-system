@@ -85,7 +85,7 @@ fn detail_access(detail: &Value, task_id: &str, open_id: &str) -> DetailAccess {
     if let Some(tasks) = tasks {
         if !tasks
             .iter()
-            .any(|task| task_identity(task) == Some(task_id))
+            .any(|task| task_identity(task).as_deref() == Some(task_id))
         {
             return DetailAccess::TaskNotInInstance;
         }
@@ -107,10 +107,13 @@ fn detail_tasks(detail: &Value) -> Option<&Vec<Value>> {
         .or_else(|| detail.get("tasks").and_then(Value::as_array))
 }
 
-fn task_identity(task: &Value) -> Option<&str> {
-    task.get("id")
-        .or_else(|| task.get("task_id"))
-        .and_then(Value::as_str)
+fn task_identity(task: &Value) -> Option<String> {
+    let value = task.get("id").or_else(|| task.get("task_id"))?;
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn participant_open_ids(detail: &Value) -> impl Iterator<Item = &str> {
@@ -206,6 +209,18 @@ mod tests {
         assert_eq!(
             detail_access(&detail, "t2", "ou_stranger"),
             DetailAccess::NotParticipant
+        );
+    }
+
+    #[test]
+    fn numeric_task_ids_are_matched_as_text() {
+        let detail = json!({
+            "open_id": "ou_me",
+            "task_list": [{"id": 123456, "open_id": "ou_me", "status": "PENDING"}],
+        });
+        assert_eq!(
+            detail_access(&detail, "123456", "ou_me"),
+            DetailAccess::Allowed
         );
     }
 
