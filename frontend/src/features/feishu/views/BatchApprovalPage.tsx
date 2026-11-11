@@ -708,13 +708,13 @@ export default function BatchApprovalPage() {
                         />
                       </TableHead>
                       <TableHead className="min-w-44">标题</TableHead>
+                      <TableHead className="min-w-44">当前节点</TableHead>
+                      <TableHead className="min-w-28">实例状态</TableHead>
                       <TableHead className="min-w-44">审批定义</TableHead>
                       <TableHead className="min-w-44">实例编号</TableHead>
                       <TableHead className="min-w-28">发起人</TableHead>
                       <TableHead className="min-w-52">摘要</TableHead>
                       <TableHead className="min-w-44">提交时间</TableHead>
-                      <TableHead className="min-w-44">当前节点</TableHead>
-                      <TableHead className="min-w-28">实例状态</TableHead>
                       <TableHead className="min-w-24">API 操作</TableHead>
                       {formColumns.map((name) => (
                         <TableHead key={name} className="min-w-40">
@@ -744,6 +744,33 @@ export default function BatchApprovalPage() {
                             updateFilter("title", event.target.value)
                           }
                         />
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按当前节点筛选"
+                          placeholder="节点名称"
+                          className="h-8 text-xs"
+                          value={filters.node}
+                          onChange={(event) =>
+                            updateFilter("node", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <select
+                          aria-label="按实例状态筛选"
+                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                          value={filters.status}
+                          onChange={(event) =>
+                            updateFilter("status", event.target.value)
+                          }
+                        >
+                          {FEISHU_STATUS_FILTER_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
                       </TableHead>
                       <TableHead>
                         <Input
@@ -810,33 +837,6 @@ export default function BatchApprovalPage() {
                             }
                           />
                         </div>
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按当前节点筛选"
-                          placeholder="节点名称"
-                          className="h-8 text-xs"
-                          value={filters.node}
-                          onChange={(event) =>
-                            updateFilter("node", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <select
-                          aria-label="按实例状态筛选"
-                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                          value={filters.status}
-                          onChange={(event) =>
-                            updateFilter("status", event.target.value)
-                          }
-                        >
-                          {FEISHU_STATUS_FILTER_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
                       </TableHead>
                       <TableHead>
                         <select
@@ -917,6 +917,33 @@ export default function BatchApprovalPage() {
                               </span>
                             )}
                           </TableCell>
+                          <TableCell>
+                            {currentNodes.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {currentNodes.map((node) => {
+                                  const mine = node === task.myNodeName;
+                                  return (
+                                    <StatusBadge
+                                      key={node}
+                                      tone={mine ? "info" : "neutral"}
+                                    >
+                                      {node}
+                                      {mine ? "（我的节点）" : ""}
+                                    </StatusBadge>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                —
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge tone={statusTone(statusLabel)}>
+                              {statusLabel}
+                            </StatusBadge>
+                          </TableCell>
                           <TableCell
                             className="max-w-56"
                             title={task.definitionName}
@@ -945,33 +972,6 @@ export default function BatchApprovalPage() {
                           </TableCell>
                           <TableCell className="text-xs tabular-nums">
                             {timeText(task.createdAt)}
-                          </TableCell>
-                          <TableCell>
-                            {currentNodes.length > 0 ? (
-                              <div className="flex flex-wrap gap-1">
-                                {currentNodes.map((node) => {
-                                  const mine = node === task.myNodeName;
-                                  return (
-                                    <StatusBadge
-                                      key={node}
-                                      tone={mine ? "info" : "neutral"}
-                                    >
-                                      {node}
-                                      {mine ? "（我的节点）" : ""}
-                                    </StatusBadge>
-                                  );
-                                })}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">
-                                —
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <StatusBadge tone={statusTone(statusLabel)}>
-                              {statusLabel}
-                            </StatusBadge>
                           </TableCell>
                           <TableCell>
                             <StatusBadge
