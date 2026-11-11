@@ -1,12 +1,6 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import {
-  ChevronDown,
-  ChevronRight,
-  Inbox,
-  RefreshCw,
-  RotateCcw,
-} from "lucide-react";
+import { Inbox, RefreshCw, RotateCcw } from "lucide-react";
 
 import { useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
@@ -30,8 +24,6 @@ import {
   createBatchJob,
   definitionKey,
   describeBatchError,
-  feishuStatusLabel,
-  fetchBatchTaskDetail,
   fetchBatchTasks,
   fetchCurrentUsername,
   groupBatchTasks,
@@ -44,14 +36,12 @@ import {
   type BatchApprovalAction,
   type BatchJobItem,
   type BatchTask,
-  type BatchTaskDetail,
 } from "../batch-approval-api";
 import {
   BatchActionDialog,
   type BatchActionParams,
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
-import { BatchTaskDetailBody } from "../components/BatchTaskDetailDialog";
 import { StatusBadge } from "../components/StatusBadge";
 
 function timeText(value: number | null): string {
@@ -95,25 +85,27 @@ type LastJobRequest = {
 type Filters = {
   title: string;
   definition: string;
+  instance: string;
   initiator: string;
   summary: string;
   from: string;
   to: string;
+  node: string;
   status: string;
   api: "all" | "supported" | "unsupported";
-  external: "all" | "feishu" | "external";
 };
 
 const EMPTY_FILTERS: Filters = {
   title: "",
   definition: "",
+  instance: "",
   initiator: "",
   summary: "",
   from: "",
   to: "",
+  node: "",
   status: "all",
   api: "all",
-  external: "all",
 };
 
 function includesText(
@@ -123,10 +115,39 @@ function includesText(
   return (value ?? "").toLocaleLowerCase().includes(needle.toLocaleLowerCase());
 }
 
+function fieldValueText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(fieldValueText).filter(Boolean).join("、");
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const preferred =
+      record.text ?? record.name ?? record.label ?? record.value;
+    if (typeof preferred === "string" || typeof preferred === "number") {
+      return String(preferred);
+    }
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function formFieldText(task: BatchTask, name: string): string {
+  return task.formFields
+    .filter((field) => field.name === name)
+    .map((field) => fieldValueText(field.value))
+    .filter(Boolean)
+    .join("；");
+}
+
 /// 批量审批页：独立专注页（根层 RequireAuth，不套 AppLayout）。
 ///
 /// 数据流：拉本人待办 → 表格展示与逐列筛选 → 勾选可操作任务 → 在确认对话框里选动作
-/// → 创建 job → 轮询逐条结果。详情在行内展开，不再需要逐条打开弹窗。
+/// → 创建 job → 轮询逐条结果。表单字段与当前节点直接展开成表格列，不再需要逐条打开详情。
 export default function BatchApprovalPage() {
   const session = useSessionCredentials();
   const token = session.token;
@@ -147,10 +168,7 @@ export default function BatchApprovalPage() {
   const [definitionGroup, setDefinitionGroup] = useState("all");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [selected, setSelected] = useState<SelectedMap>({});
-  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
-  const [details, setDetails] = useState<Record<string, BatchTaskDetail>>({});
-  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
-  const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
+  const [fieldFilters, setFieldFilters] = useState<Record<string, string>>({});
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
   const [actionError, setActionError] = useState("");
   const [submittingAction, setSubmittingAction] = useState(false);
@@ -210,12 +228,30 @@ export default function BatchApprovalPage() {
   }, [loadTasks, token]);
 
   const groups = useMemo(() => groupBatchTasks(tasks), [tasks]);
+  const formColumns = useMemo(() => {
+    const seen = new Set<string>();
+    const columns: string[] = [];
+    for (const task of tasks) {
+      for (const field of task.formFields) {
+        if (!seen.has(field.name)) {
+          seen.add(field.name);
+          columns.push(field.name);
+        }
+      }
+    }
+    return columns;
+  }, [tasks]);
 
   const filteredTasks = useMemo(() => {
     const needleTitle = filters.title.trim();
     const needleDefinition = filters.definition.trim();
+    const needleInstance = filters.instance.trim();
     const needleInitiator = filters.initiator.trim();
     const needleSummary = filters.summary.trim();
+    const needleNode = filters.node.trim();
+    const activeFieldFilters = Object.entries(fieldFilters).filter(
+      ([, value]) => value.trim().length > 0,
+    );
     return tasks.filter((task) => {
       if (
         definitionGroup !== "all" &&
@@ -229,6 +265,9 @@ export default function BatchApprovalPage() {
         !includesText(task.definitionName, needleDefinition) &&
         !includesText(task.definitionCode, needleDefinition)
       ) {
+        return false;
+      }
+      if (needleInstance && !includesText(task.instanceCode, needleInstance)) {
         return false;
       }
       if (
@@ -255,11 +294,19 @@ export default function BatchApprovalPage() {
       }
       if (filters.api === "supported" && !task.supportApiOperate) return false;
       if (filters.api === "unsupported" && task.supportApiOperate) return false;
-      if (filters.external === "external" && !task.external) return false;
-      if (filters.external === "feishu" && task.external) return false;
+      if (
+        needleNode &&
+        !task.currentNodeNames.some((node) => includesText(node, needleNode))
+      ) {
+        return false;
+      }
+      for (const [name, value] of activeFieldFilters) {
+        if (!includesText(formFieldText(task, name), value.trim()))
+          return false;
+      }
       return true;
     });
-  }, [tasks, definitionGroup, filters]);
+  }, [tasks, definitionGroup, filters, fieldFilters]);
 
   const filteredOperable = useMemo(
     () => filteredTasks.filter((task) => taskOperability(task).operable),
@@ -280,6 +327,7 @@ export default function BatchApprovalPage() {
 
   const resetFilters = () => {
     setFilters(EMPTY_FILTERS);
+    setFieldFilters({});
     setDefinitionGroup("all");
   };
 
@@ -306,52 +354,6 @@ export default function BatchApprovalPage() {
       }
       return next;
     });
-  };
-
-  const loadDetail = useCallback(
-    (task: BatchTask) => {
-      const abort = new AbortController();
-      setDetailLoadingId(task.taskId);
-      setDetailErrors((prev) => {
-        const next = { ...prev };
-        delete next[task.taskId];
-        return next;
-      });
-      void fetchBatchTaskDetail(
-        task.taskId,
-        task.instanceCode,
-        token,
-        abort.signal,
-      )
-        .then((detail) => {
-          if (abort.signal.aborted) return;
-          setDetails((prev) => ({ ...prev, [task.taskId]: detail }));
-        })
-        .catch((cause: unknown) => {
-          if (abort.signal.aborted) return;
-          setDetailErrors((prev) => ({
-            ...prev,
-            [task.taskId]:
-              cause instanceof Error ? cause.message : "审批详情加载失败",
-          }));
-        })
-        .finally(() => {
-          if (!abort.signal.aborted) setDetailLoadingId(null);
-        });
-      return () => abort.abort();
-    },
-    [token],
-  );
-
-  const toggleDetail = (task: BatchTask) => {
-    if (expandedTaskId === task.taskId) {
-      setExpandedTaskId(null);
-      return;
-    }
-    setExpandedTaskId(task.taskId);
-    if (!details[task.taskId] && detailLoadingId !== task.taskId) {
-      loadDetail(task);
-    }
   };
 
   const openAction = (nextAction: BatchApprovalAction) => {
@@ -707,13 +709,18 @@ export default function BatchApprovalPage() {
                       </TableHead>
                       <TableHead className="min-w-44">标题</TableHead>
                       <TableHead className="min-w-44">审批定义</TableHead>
+                      <TableHead className="min-w-44">实例编号</TableHead>
                       <TableHead className="min-w-28">发起人</TableHead>
                       <TableHead className="min-w-52">摘要</TableHead>
                       <TableHead className="min-w-44">提交时间</TableHead>
+                      <TableHead className="min-w-44">当前节点</TableHead>
                       <TableHead className="min-w-28">实例状态</TableHead>
                       <TableHead className="min-w-24">API 操作</TableHead>
-                      <TableHead className="min-w-24">来源</TableHead>
-                      <TableHead className="w-24">详情</TableHead>
+                      {formColumns.map((name) => (
+                        <TableHead key={name} className="min-w-40">
+                          {name}
+                        </TableHead>
+                      ))}
                     </TableRow>
                     <TableRow className="bg-muted/30 hover:bg-muted/30">
                       <TableHead>
@@ -746,6 +753,17 @@ export default function BatchApprovalPage() {
                           value={filters.definition}
                           onChange={(event) =>
                             updateFilter("definition", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按实例编号筛选"
+                          placeholder="实例编号"
+                          className="h-8 text-xs"
+                          value={filters.instance}
+                          onChange={(event) =>
+                            updateFilter("instance", event.target.value)
                           }
                         />
                       </TableHead>
@@ -794,6 +812,17 @@ export default function BatchApprovalPage() {
                         </div>
                       </TableHead>
                       <TableHead>
+                        <Input
+                          aria-label="按当前节点筛选"
+                          placeholder="节点名称"
+                          className="h-8 text-xs"
+                          value={filters.node}
+                          onChange={(event) =>
+                            updateFilter("node", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
                         <select
                           aria-label="按实例状态筛选"
                           className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
@@ -826,151 +855,148 @@ export default function BatchApprovalPage() {
                           <option value="unsupported">不支持</option>
                         </select>
                       </TableHead>
-                      <TableHead>
-                        <select
-                          aria-label="按来源筛选"
-                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                          value={filters.external}
-                          onChange={(event) =>
-                            updateFilter(
-                              "external",
-                              event.target.value as Filters["external"],
-                            )
-                          }
-                        >
-                          <option value="all">全部</option>
-                          <option value="feishu">飞书</option>
-                          <option value="external">外部</option>
-                        </select>
-                      </TableHead>
-                      <TableHead />
+                      {formColumns.map((name) => (
+                        <TableHead key={name}>
+                          <Input
+                            aria-label={`按字段 ${name} 筛选`}
+                            placeholder={name}
+                            className="h-8 text-xs"
+                            value={fieldFilters[name] ?? ""}
+                            onChange={(event) =>
+                              setFieldFilters((prev) => ({
+                                ...prev,
+                                [name]: event.target.value,
+                              }))
+                            }
+                          />
+                        </TableHead>
+                      ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredTasks.map((task) => {
                       const operability = taskOperability(task);
                       const checked = Boolean(selected[task.taskId]);
-                      const expanded = expandedTaskId === task.taskId;
                       const statusLabel = taskStatusLabel(task);
+                      const nodes =
+                        task.currentNodeNames.length > 0
+                          ? task.currentNodeNames
+                          : task.myNodeName
+                            ? [task.myNodeName]
+                            : [];
+                      const currentNodes =
+                        task.myNodeName && nodes.includes(task.myNodeName)
+                          ? [
+                              task.myNodeName,
+                              ...nodes.filter(
+                                (node) => node !== task.myNodeName,
+                              ),
+                            ]
+                          : nodes;
                       return (
-                        <Fragment key={task.taskId}>
-                          <TableRow
-                            data-state={checked ? "selected" : undefined}
+                        <TableRow
+                          key={task.taskId}
+                          data-state={checked ? "selected" : undefined}
+                        >
+                          <TableCell>
+                            <Checkbox
+                              aria-label={`选择 ${task.title}`}
+                              checked={checked}
+                              disabled={!operability.operable}
+                              onCheckedChange={() => toggleTask(task)}
+                            />
+                          </TableCell>
+                          <TableCell
+                            className="max-w-64 font-medium"
+                            title={task.title}
                           >
-                            <TableCell>
-                              <Checkbox
-                                aria-label={`选择 ${task.title}`}
-                                checked={checked}
-                                disabled={!operability.operable}
-                                onCheckedChange={() => toggleTask(task)}
-                              />
-                            </TableCell>
-                            <TableCell
-                              className="max-w-64 font-medium"
-                              title={task.title}
+                            <span className="block truncate">{task.title}</span>
+                            {!operability.operable && (
+                              <span className="block text-xs font-normal text-muted-foreground">
+                                {operability.reason}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell
+                            className="max-w-56"
+                            title={task.definitionName}
+                          >
+                            <span className="block truncate">
+                              {task.definitionName}
+                            </span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {task.definitionCode || "—"}
+                            </span>
+                          </TableCell>
+                          <TableCell
+                            className="max-w-44 truncate text-xs"
+                            title={task.instanceCode}
+                          >
+                            {task.instanceCode}
+                          </TableCell>
+                          <TableCell>{task.initiatorName ?? "—"}</TableCell>
+                          <TableCell
+                            className="max-w-72"
+                            title={task.summaries.join("；")}
+                          >
+                            <span className="block truncate">
+                              {task.summaries.join("；") || "—"}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-xs tabular-nums">
+                            {timeText(task.createdAt)}
+                          </TableCell>
+                          <TableCell>
+                            {currentNodes.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {currentNodes.map((node) => {
+                                  const mine = node === task.myNodeName;
+                                  return (
+                                    <StatusBadge
+                                      key={node}
+                                      tone={mine ? "info" : "neutral"}
+                                    >
+                                      {node}
+                                      {mine ? "（我的节点）" : ""}
+                                    </StatusBadge>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                —
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge tone={statusTone(statusLabel)}>
+                              {statusLabel}
+                            </StatusBadge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge
+                              tone={
+                                task.supportApiOperate ? "positive" : "warning"
+                              }
                             >
-                              <span className="block truncate">
-                                {task.title}
-                              </span>
-                              {!operability.operable && (
-                                <span className="block text-xs font-normal text-muted-foreground">
-                                  {operability.reason}
-                                </span>
-                              )}
-                            </TableCell>
-                            <TableCell
-                              className="max-w-56"
-                              title={task.definitionName}
-                            >
-                              <span className="block truncate">
-                                {task.definitionName}
-                              </span>
-                              <span className="block truncate text-xs text-muted-foreground">
-                                {task.definitionCode || "—"}
-                              </span>
-                            </TableCell>
-                            <TableCell>{task.initiatorName ?? "—"}</TableCell>
-                            <TableCell
-                              className="max-w-72"
-                              title={task.summaries.join("；")}
-                            >
-                              <span className="block truncate">
-                                {task.summaries.join("；") || "—"}
-                              </span>
-                            </TableCell>
-                            <TableCell className="text-xs tabular-nums">
-                              {timeText(task.createdAt)}
-                            </TableCell>
-                            <TableCell>
-                              <StatusBadge tone={statusTone(statusLabel)}>
-                                {statusLabel}
-                              </StatusBadge>
-                            </TableCell>
-                            <TableCell>
-                              <StatusBadge
-                                tone={
-                                  task.supportApiOperate
-                                    ? "positive"
-                                    : "warning"
-                                }
-                              >
-                                {task.supportApiOperate ? "支持" : "不支持"}
-                              </StatusBadge>
-                            </TableCell>
-                            <TableCell>
-                              <StatusBadge
-                                tone={task.external ? "warning" : "neutral"}
-                              >
-                                {task.external ? "外部" : "飞书"}
-                              </StatusBadge>
-                            </TableCell>
-                            <TableCell>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                aria-expanded={expanded}
-                                onClick={() => toggleDetail(task)}
-                              >
-                                {expanded ? (
-                                  <ChevronDown className="size-4" />
-                                ) : (
-                                  <ChevronRight className="size-4" />
-                                )}
-                                {expanded ? "收起" : "展开"}
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                          {expanded && (
-                            <TableRow>
+                              {task.supportApiOperate ? "支持" : "不支持"}
+                            </StatusBadge>
+                          </TableCell>
+                          {formColumns.map((name) => {
+                            const value = formFieldText(task, name);
+                            return (
                               <TableCell
-                                colSpan={10}
-                                className="bg-muted/20 p-4"
+                                key={name}
+                                className="max-w-56 text-xs"
+                                title={value}
                               >
-                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                                  <span className="text-xs text-muted-foreground">
-                                    实例 {task.instanceCode} ·{" "}
-                                    {feishuStatusLabel(
-                                      task.instanceStatus ?? task.status,
-                                    )}
-                                  </span>
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => loadDetail(task)}
-                                  >
-                                    <RefreshCw className="size-3.5" />
-                                    刷新详情
-                                  </Button>
-                                </div>
-                                <BatchTaskDetailBody
-                                  loading={detailLoadingId === task.taskId}
-                                  errorMessage={detailErrors[task.taskId] ?? ""}
-                                  detail={details[task.taskId] ?? null}
-                                />
+                                <span className="block truncate">
+                                  {value || "—"}
+                                </span>
                               </TableCell>
-                            </TableRow>
-                          )}
-                        </Fragment>
+                            );
+                          })}
+                        </TableRow>
                       );
                     })}
                   </TableBody>

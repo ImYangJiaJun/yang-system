@@ -146,6 +146,12 @@ export type BatchTask = {
   link: string | null;
   /// 列表时间（毫秒）；后端任务模型没有稳定时间字段时可能为 null。
   createdAt: number | null;
+  /// 后端从实例详情预取的表单字段，直接作为多维表列展示。
+  formFields: BatchTaskFormField[];
+  /// 实例当前待办节点；同一实例可能有多个并行节点。
+  currentNodeNames: string[];
+  /// 当前用户在这条任务上负责的节点。
+  myNodeName: string | null;
 };
 
 export type BatchTaskGroup = {
@@ -369,6 +375,9 @@ function parseTask(raw: unknown): BatchTask | null {
         record?.update_time ??
         record?.update_at,
     ),
+    formFields: parseDetailForm(record?.form_fields),
+    currentNodeNames: stringArrayOf(record?.current_node_names),
+    myNodeName: firstText(record, "my_node_name"),
   };
 }
 
@@ -516,7 +525,7 @@ function parseTimelineEntry(raw: unknown): BatchTaskTimelineEntry {
   };
 }
 
-/// 实例详情：仅用于抽查/批量确认前展开，不做逐条预拉。
+/// 实例详情：用于单条抽查；列表页的表格数据由后端 list_tasks 预取。
 export async function fetchBatchTaskDetail(
   taskId: string,
   instanceCode: string,

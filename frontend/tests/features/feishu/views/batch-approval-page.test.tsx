@@ -26,6 +26,12 @@ const TASKS = [
     support_api_operate: true,
     status: "PENDING",
     create_time: 1_700_000_000,
+    form_fields: [
+      { name: "金额", value: { text: "100" } },
+      { name: "部门", value: "研发" },
+    ],
+    current_node_names: ["部门审批", "财务审批"],
+    my_node_name: "部门审批",
   },
   {
     task_id: "t2",
@@ -37,6 +43,9 @@ const TASKS = [
     summaries: ["2 天"],
     support_api_operate: false,
     status: "PENDING",
+    form_fields: [{ name: "天数", value: "2" }],
+    current_node_names: ["主管审批"],
+    my_node_name: "主管审批",
   },
   {
     task_id: "t3",
@@ -257,40 +266,27 @@ describe("BatchApprovalPage", () => {
     });
   });
 
-  it("行内展开详情展示表单与时间线", async () => {
-    stubBatchApi({
-      detail: {
-        instance_code: "i1",
-        title: "报销单 A",
-        definition_name: "报销审批",
-        initiator_name: "李四",
-        status: "PENDING",
-        form: [{ name: "金额", value: "100" }],
-        current_nodes: [{ name: "部门审批" }],
-        operation_records: [
-          {
-            node_name: "发起",
-            type: "PASS",
-            user_name: "李四",
-            create_time: 1_700_000_000,
-          },
-        ],
-      },
-    });
+  it("表格直接展示全部表单字段，并支持按字段与当前节点筛选", async () => {
+    stubBatchApi();
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
-    const user = userEvent.setup();
-    const title = await screen.findByText("报销单 A");
-    const row = title.closest("tr");
-    expect(row).not.toBeNull();
-    await user.click(
-      within(row as HTMLElement).getByRole("button", { name: "展开" }),
-    );
-
-    expect(await screen.findByText("金额")).toBeInTheDocument();
+    await screen.findByText("报销单 A");
+    // 表头与值都在同一张表内，不需要点开详情。
+    expect(screen.getByText("金额")).toBeInTheDocument();
+    expect(screen.getByText("部门")).toBeInTheDocument();
     expect(screen.getByText("100")).toBeInTheDocument();
-    expect(screen.getByText(/部门审批/)).toBeInTheDocument();
-    expect(screen.getByText("发起")).toBeInTheDocument();
+    expect(screen.getByText("部门审批（我的节点）")).toBeInTheDocument();
+    expect(screen.getByText("财务审批")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("按字段 金额 筛选"), "100");
+    expect(screen.getByText("报销单 A")).toBeInTheDocument();
+    expect(screen.queryByText("请假单 B")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("按字段 金额 筛选"));
+    await user.type(screen.getByLabelText("按当前节点筛选"), "主管");
+    expect(screen.queryByText("报销单 A")).not.toBeInTheDocument();
+    expect(screen.getByText("请假单 B")).toBeInTheDocument();
   });
 
   it("凭证失效时显示重新授权入口", async () => {
