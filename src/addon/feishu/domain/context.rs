@@ -62,6 +62,12 @@ pub(crate) struct FeishuContext {
     /// 审批回写运行台账表。
     #[allow(dead_code)]
     approval_export_run: Repository,
+    /// 审批评论运行台账表。
+    #[allow(dead_code)]
+    approval_comment_run: Repository,
+    /// 多维表格记录变更事件缓冲表。
+    #[allow(dead_code)]
+    bitable_event: Repository,
     /// 密码哈希引擎（门户口令用）。
     #[allow(dead_code)]
     password_engine: Arc<PasswordEngine>,
@@ -90,6 +96,8 @@ impl FeishuContext {
         approval_export_rule: Repository,
         approval_export_field_map: Repository,
         approval_export_run: Repository,
+        approval_comment_run: Repository,
+        bitable_event: Repository,
         password_engine: Arc<PasswordEngine>,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
@@ -110,6 +118,8 @@ impl FeishuContext {
             approval_export_rule,
             approval_export_field_map,
             approval_export_run,
+            approval_comment_run,
+            bitable_event,
             password_engine,
             settings,
             xlsx_parse_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -219,6 +229,18 @@ impl FeishuContext {
         &self.approval_export_run
     }
 
+    /// 审批评论运行台账表。
+    #[allow(dead_code)]
+    pub(crate) fn approval_comment_runs(&self) -> &Repository {
+        &self.approval_comment_run
+    }
+
+    /// 多维表格记录变更事件缓冲表。
+    #[allow(dead_code)]
+    pub(crate) fn bitable_events(&self) -> &Repository {
+        &self.bitable_event
+    }
+
     /// 密码哈希引擎（门户口令用）。消费者（门户 Action）在后续批次接入。
     #[allow(dead_code)]
     pub(crate) fn password_engine(&self) -> &PasswordEngine {
@@ -315,6 +337,8 @@ mod tests {
                 crate::addon::feishu::approval::domain::export_field_map_table::table_spec(),
             ),
             repository(crate::addon::feishu::approval::domain::export_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::comment_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::bitable_event_table::table_spec()),
             Arc::new(
                 PasswordEngine::new(1)
                     .unwrap_or_else(|error| panic!("PasswordEngine 应可构造: {error}")),

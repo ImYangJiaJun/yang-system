@@ -129,8 +129,9 @@ pub(super) async fn handle(
     let challenge = body.get("challenge").and_then(Value::as_str).unwrap_or("");
     let token = body.get("token").and_then(Value::as_str).unwrap_or("");
 
-    // 事件回调委托：飞书把 event_callback 推到了 challenge URL，转交事件接收处理。
-    if r#type == "event_callback" {
+    // 事件回调委托：飞书把事件推到了 challenge URL，转交事件接收处理。
+    // v2.0 事件（多维表格记录变更）同样只有一个回调 URL，必须一起委托。
+    if r#type == "event_callback" || super::receive_approval_event::is_v2_event(&body) {
         tracing::debug!("检测到 event_callback 类型，委托给事件接收处理");
         return super::receive_approval_event::handle(
             ctx,

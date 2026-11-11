@@ -23,7 +23,8 @@ use yang_base::BaseError;
 #[cfg(test)]
 use yang_db::DbError;
 
-use crate::addon::feishu::domain::approval::subscribe_approval;
+use crate::addon::feishu::domain::approval::{subscribe_approval, subscribe_bitable_file};
+use crate::addon::feishu::domain::approval_comment::parse_comment_config;
 use crate::addon::feishu::domain::approval_export::config::{
     validate_export_rule, ExportConfigError, ExportFieldMapDraft, ExportRuleDraft,
     ValidatedExportRule,
@@ -110,6 +111,9 @@ pub(super) struct CreateExportRuleInput {
     /// 是否启用。
     #[serde(default = "default_true")]
     pub(super) enabled: bool,
+    /// 审批评论配置；缺省 = 不启用评论。
+    #[serde(default)]
+    pub(super) comment_config: Option<serde_json::Value>,
     /// 字段映射（至少一条）。
     pub(super) maps: Vec<ExportMapInput>,
 }
@@ -151,6 +155,7 @@ impl CreateExportRuleInput {
             status_labels_json: json_text(self.status_labels.as_ref()),
             mark_enabled: self.mark_enabled,
             enabled: self.enabled,
+            comment_config_json: json_text(self.comment_config.as_ref()),
             maps: self
                 .maps
                 .into_iter()
@@ -329,6 +334,28 @@ pub(super) async fn handle(
         );
     }
 
+    // 评论依赖多维表格记录变更事件；订阅是运行时状态，失败只 WARN（worker 启动重订）。
+    if parse_comment_config(validated.comment_config_json.as_deref())
+        .ok()
+        .flatten()
+        .is_some_and(|config| config.enabled)
+    {
+        if let Err(failure) = subscribe_bitable_file(
+            outbound.transport(),
+            outbound.sleeper(),
+            &outbound.tokens,
+            &validated.target_base_token,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %failure.message,
+                base_token = %validated.target_base_token,
+                "回写规则已创建，但多维表格事件订阅失败（worker 启动时会重订）"
+            );
+        }
+    }
+
     tracing::debug!(
         rule_id,
         approval_code = %validated.approval_code,
@@ -426,6 +453,13 @@ pub(super) fn fill_rule_record(
     );
     record.insert("mark_enabled", serde_json::json!(validated.mark_enabled));
     record.insert("enabled", serde_json::json!(validated.enabled));
+    record.insert(
+        "comment_config_json",
+        validated
+            .comment_config_json
+            .as_deref()
+            .map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+    );
     record.insert(
         "definition_snapshot",
         serde_json::json!(&validated.form_snapshot),

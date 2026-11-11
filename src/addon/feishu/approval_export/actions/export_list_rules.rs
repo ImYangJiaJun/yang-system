@@ -15,6 +15,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::table::{Record, SortOrder};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::approval_comment::parse_comment_config;
 use crate::addon::feishu::domain::approval_export::{parse_option_map, StatusLabels};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::list_input::ListInput;
@@ -39,6 +40,7 @@ const RULE_ITEM_COLUMNS: &[&str] = &[
     "status_field",
     "status_field_name",
     "status_labels_json",
+    "comment_config_json",
     "mark_enabled",
     "enabled",
     "snapshot_at",
@@ -108,6 +110,9 @@ pub(super) struct ExportRuleItem {
     status_field_name: Option<String>,
     /// 生效状态文案（默认值与覆盖值合并后）。
     status_labels: serde_json::Value,
+    /// 审批评论配置的解析结果；无 / 解析失败时为 `null`（原串仍在 `comment_config_json`）。
+    comment_config: Option<serde_json::Value>,
+    comment_config_json: Option<String>,
     mark_enabled: bool,
     enabled: bool,
     snapshot_at: Option<i64>,
@@ -239,6 +244,12 @@ pub(super) async fn handle(
             .map(str::trim)
             .filter(|raw| !raw.is_empty())
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let comment_config_raw: Option<String> = record.optional("comment_config_json")?;
+        // 解析失败返回 null（原串仍随 `comment_config_json` 返回），不阻塞整页。
+        let comment_config = parse_comment_config(comment_config_raw.as_deref())
+            .ok()
+            .flatten()
+            .and_then(|config| serde_json::to_value(config).ok());
         // 解析失败时 `condition` 为 null，原串仍在 `condition_json` 里；
         // 前端据此提示用户重新保存，而不是把整页打成失败。
         items.push(ExportRuleItem {
@@ -260,6 +271,8 @@ pub(super) async fn handle(
             status_field: record.optional("status_field")?,
             status_field_name: record.optional("status_field_name")?,
             status_labels: status_labels_value(record.optional("status_labels_json")?),
+            comment_config,
+            comment_config_json: comment_config_raw,
             mark_enabled: record.require("mark_enabled")?,
             enabled: record.require("enabled")?,
             snapshot_at: record.optional("snapshot_at")?,

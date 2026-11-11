@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { Label } from "@/shared/ui/label";
 import {
   Select,
   SelectContent,
@@ -47,6 +48,8 @@ import {
   feishuQueryKeys,
   hasOperation,
   useApprovalExportActions,
+  useApprovalExportCommentRunList,
+  useApprovalExportLatestCommentRuns,
   useApprovalExportRuleList,
   useApprovalExportRunList,
   useApprovalExportWizardClient,
@@ -56,14 +59,20 @@ import { ListPagination } from "../components/ListPagination";
 import { StatusBadge, type ToneName } from "../components/StatusBadge";
 import { PAGE_SIZE_OPTIONS, useDebouncedValue } from "../list-query";
 import {
+  APPROVAL_COMMENT_RUN_STATE_OPTIONS,
   EXPORT_WRITE_STATUS_OPTIONS,
+  approvalCommentRunStateLabel,
   exportMarkStatusLabel,
   exportRowFilterLabel,
   exportTriggerModeLabel,
   exportWriteStatusLabel,
   formatUnixSeconds,
+  isApprovalCommentRunRetryable,
   isExportRunForceRecreatable,
   isExportRunRetryable,
+  type ApprovalCommentCheckResult,
+  type ApprovalCommentRun,
+  type ApprovalCommentTestResult,
   type ApprovalExportCheckResult,
   type ApprovalExportRule,
   type ApprovalExportRun,
@@ -96,6 +105,43 @@ function markStatusTone(status: string): ToneName {
   return "neutral";
 }
 
+function commentStateTone(state: string): ToneName {
+  if (state === "done" || state === "commented") return "positive";
+  if (state === "commenting" || state === "pending" || state === "waiting")
+    return "info";
+  if (state === "retry") return "warning";
+  if (state === "failed") return "danger";
+  return "neutral";
+}
+
+function LatestCommentRunCell({
+  run,
+}: {
+  run: ApprovalCommentRun | undefined;
+}) {
+  if (!run) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  return (
+    <>
+      <StatusBadge tone={commentStateTone(run.state)}>
+        {approvalCommentRunStateLabel(run.state)}
+      </StatusBadge>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {formatUnixSeconds(run.updatedAt)}
+      </p>
+      {run.lastError ? (
+        <p
+          className="mt-1 line-clamp-2 text-xs text-destructive"
+          title={run.lastError}
+        >
+          {run.lastError}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 export default function ApprovalExportPage() {
   const [params, setParams] = useSearchParams();
   const queryClient = useQueryClient();
@@ -108,6 +154,10 @@ export default function ApprovalExportPage() {
   const canCreate = hasOperation(catalog, EXPORT_OPERATION_IDS.createRule);
   const canDelete = hasOperation(catalog, EXPORT_OPERATION_IDS.deleteRule);
   const canListRuns = hasOperation(catalog, EXPORT_OPERATION_IDS.listRuns);
+  const canListCommentRuns = hasOperation(
+    catalog,
+    EXPORT_OPERATION_IDS.listCommentRuns,
+  );
 
   const rawRule = params.get("rule");
   const parsedRule = rawRule === null ? null : Number(rawRule);
@@ -115,8 +165,10 @@ export default function ApprovalExportPage() {
     parsedRule !== null && Number.isSafeInteger(parsedRule) && parsedRule > 0
       ? parsedRule
       : null;
-  // 独立页面的两个视图：规则 / 日志。`rule` 仍表示日志下钻到某条规则。
-  const logsMode = params.get("view") === "logs" || ruleId !== null;
+  // 独立页面的三个视图：规则 / 回写日志 / 评论台账。`rule` 仍表示日志下钻到某条规则。
+  const commentRunsMode = params.get("view") === "comment-runs";
+  const logsMode =
+    !commentRunsMode && (params.get("view") === "logs" || ruleId !== null);
   const pageValue = Number(params.get("page") ?? 1);
   const page = Number.isSafeInteger(pageValue) && pageValue > 0 ? pageValue : 1;
   const sizeValue = Number(params.get("pageSize") ?? 10);
@@ -127,6 +179,14 @@ export default function ApprovalExportPage() {
   const debouncedSearch = useDebouncedValue(search, 300);
   const writeFilter = params.get("write") ?? "";
   const instanceFilter = params.get("instance") ?? "";
+  const commentState = params.get("commentState") ?? "";
+  const commentRecordId = params.get("commentRecord") ?? "";
+  const commentRuleRaw = params.get("commentRule") ?? "";
+  const parsedCommentRule = Number(commentRuleRaw);
+  const commentRuleId =
+    Number.isSafeInteger(parsedCommentRule) && parsedCommentRule > 0
+      ? parsedCommentRule
+      : undefined;
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<
@@ -144,9 +204,35 @@ export default function ApprovalExportPage() {
     kind: "retry" | "recreate";
   } | null>(null);
 
+  // 评论台账 / 体检 / 测试评论
+  const [retryingCommentRunId, setRetryingCommentRunId] = useState<
+    number | null
+  >(null);
+  const [commentCheckRule, setCommentCheckRule] =
+    useState<ApprovalExportRule | null>(null);
+  const [commentCheckRecordId, setCommentCheckRecordId] = useState("");
+  const [commentChecking, setCommentChecking] = useState(false);
+  const [commentCheckResult, setCommentCheckResult] =
+    useState<ApprovalCommentCheckResult | null>(null);
+  const [commentCheckError, setCommentCheckError] = useState<string | null>(
+    null,
+  );
+  const [commentTestRule, setCommentTestRule] =
+    useState<ApprovalExportRule | null>(null);
+  const [commentTestStep, setCommentTestStep] = useState<
+    "form" | "confirm" | "result"
+  >("form");
+  const [commentTestInstance, setCommentTestInstance] = useState("");
+  const [commentTestText, setCommentTestText] = useState("");
+  const [commentTestAuthor, setCommentTestAuthor] = useState("");
+  const [commentTesting, setCommentTesting] = useState(false);
+  const [commentTestError, setCommentTestError] = useState<string | null>(null);
+  const [commentTestResult, setCommentTestResult] =
+    useState<ApprovalCommentTestResult | null>(null);
+
   const rulesQuery = useApprovalExportRuleList(
     { page, pageSize, search: debouncedSearch },
-    { enabled: !logsMode },
+    { enabled: !logsMode && !commentRunsMode },
   );
   const runsQuery = useApprovalExportRunList(
     {
@@ -158,6 +244,16 @@ export default function ApprovalExportPage() {
     },
     { enabled: logsMode },
   );
+  const commentRunsQuery = useApprovalExportCommentRunList(
+    {
+      page,
+      pageSize,
+      ruleId: commentRuleId,
+      state: commentState || undefined,
+      recordId: commentRecordId,
+    },
+    { enabled: commentRunsMode },
+  );
 
   const items = rulesQuery.data?.items ?? [];
   const total = rulesQuery.data?.total ?? null;
@@ -167,6 +263,17 @@ export default function ApprovalExportPage() {
   const runsTotal = runsQuery.data?.total ?? null;
   const runsLastPage =
     runsTotal === null ? null : Math.max(1, Math.ceil(runsTotal / pageSize));
+  const commentRuns = commentRunsQuery.data?.items ?? [];
+  const commentRunsTotal = commentRunsQuery.data?.total ?? null;
+  const commentRunsLastPage =
+    commentRunsTotal === null
+      ? null
+      : Math.max(1, Math.ceil(commentRunsTotal / pageSize));
+  // 规则列表的「最近评论」列：每条可见规则各取最新一条台账。
+  const latestCommentRuns = useApprovalExportLatestCommentRuns(
+    items.map((rule) => rule.id),
+    { enabled: !logsMode && !commentRunsMode },
+  );
 
   function changeParams(patch: Record<string, string | null>, replace = false) {
     setParams(
@@ -183,31 +290,27 @@ export default function ApprovalExportPage() {
   }
 
   // 页码越界时回到最后一页（删除、筛选把结果集缩小后会出现）。
-  useEffect(() => {
-    const last = logsMode ? runsLastPage : lastPage;
-    const busy = logsMode
+  const activeLastPage = commentRunsMode
+    ? commentRunsLastPage
+    : logsMode
+      ? runsLastPage
+      : lastPage;
+  const activeBusy = commentRunsMode
+    ? commentRunsQuery.isPending || commentRunsQuery.isError
+    : logsMode
       ? runsQuery.isPending || runsQuery.isError
       : rulesQuery.isPending || rulesQuery.isError;
-    if (busy || last === null || page <= last) return;
+  useEffect(() => {
+    if (activeBusy || activeLastPage === null || page <= activeLastPage) return;
     setParams(
       (current) => {
         const next = new URLSearchParams(current);
-        next.set("page", String(last));
+        next.set("page", String(activeLastPage));
         return next;
       },
       { replace: true },
     );
-  }, [
-    logsMode,
-    lastPage,
-    runsLastPage,
-    page,
-    rulesQuery.isPending,
-    rulesQuery.isError,
-    runsQuery.isPending,
-    runsQuery.isError,
-    setParams,
-  ]);
+  }, [activeBusy, activeLastPage, page, setParams]);
 
   async function refresh() {
     await queryClient.invalidateQueries({
@@ -215,6 +318,9 @@ export default function ApprovalExportPage() {
     });
     await queryClient.invalidateQueries({
       queryKey: feishuQueryKeys.approvalExportRuns(),
+    });
+    await queryClient.invalidateQueries({
+      queryKey: feishuQueryKeys.approvalExportCommentRuns(),
     });
   }
 
@@ -290,6 +396,77 @@ export default function ApprovalExportPage() {
     }
   }
 
+  async function retryCommentRun(run: ApprovalCommentRun) {
+    setRetryingCommentRunId(run.id);
+    try {
+      const result = await actions.retryCommentRun(run.id);
+      toast.success(
+        `评论已重新排队（原状态 ${approvalCommentRunStateLabel(
+          result.previousState || run.state,
+        )}）`,
+      );
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      setRetryingCommentRunId(null);
+    }
+  }
+
+  async function runCommentCheck(rule: ApprovalExportRule, recordId: string) {
+    setCommentChecking(true);
+    setCommentCheckError(null);
+    try {
+      setCommentCheckResult(
+        await actions.checkComment(rule.id, recordId.trim() || null),
+      );
+    } catch (cause) {
+      setCommentCheckResult(null);
+      setCommentCheckError(messageOf(cause));
+    } finally {
+      setCommentChecking(false);
+    }
+  }
+
+  function openCommentCheck(rule: ApprovalExportRule) {
+    setCommentCheckRule(rule);
+    setCommentCheckRecordId("");
+    setCommentCheckResult(null);
+    setCommentCheckError(null);
+    void runCommentCheck(rule, "");
+  }
+
+  function openCommentTest(rule: ApprovalExportRule) {
+    setCommentTestRule(rule);
+    setCommentTestStep("form");
+    setCommentTestInstance("");
+    setCommentTestText("");
+    setCommentTestAuthor(rule.commentConfig?.authorUserId ?? "");
+    setCommentTestResult(null);
+    setCommentTestError(null);
+  }
+
+  async function sendCommentTest() {
+    if (!commentTestRule) return;
+    setCommentTesting(true);
+    setCommentTestError(null);
+    try {
+      const result = await actions.testComment({
+        instanceCode: commentTestInstance,
+        // 二次确认在对话框的 confirm 步骤完成；到这里才显式传 true。
+        confirm: true,
+        text: commentTestText.trim() || undefined,
+        authorUserId: commentTestAuthor.trim() || undefined,
+        ruleId: commentTestRule.id,
+      });
+      setCommentTestResult(result);
+      setCommentTestStep("result");
+    } catch (cause) {
+      setCommentTestError(messageOf(cause));
+    } finally {
+      setCommentTesting(false);
+    }
+  }
+
   if (!actions.canRead) {
     return (
       <p className="p-6">当前身份没有查看审批回写规则的权限，请联系管理员。</p>
@@ -298,7 +475,210 @@ export default function ApprovalExportPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8">
-      {logsMode ? (
+      {commentRunsMode ? (
+        <>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <Button
+                variant="ghost"
+                className="mb-2 h-auto p-0"
+                onClick={() =>
+                  changeParams(
+                    {
+                      view: null,
+                      page: "1",
+                      commentState: null,
+                      commentRecord: null,
+                      commentRule: null,
+                    },
+                    true,
+                  )
+                }
+              >
+                <span aria-hidden="true">←</span> 返回规则列表
+              </Button>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                评论运行台账
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                支付评论从排队到完成的逐条状态；失败的记录可人工重试。
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Select
+              value={commentState === "" ? "__all__" : commentState}
+              onValueChange={(value) =>
+                changeParams(
+                  {
+                    commentState: value === "__all__" ? null : value,
+                    page: "1",
+                  },
+                  true,
+                )
+              }
+            >
+              <SelectTrigger aria-label="评论状态筛选" className="w-52">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">全部评论状态</SelectItem>
+                {APPROVAL_COMMENT_RUN_STATE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              className="w-full sm:w-40"
+              aria-label="按规则 ID 筛选"
+              placeholder="规则 ID"
+              inputMode="numeric"
+              value={commentRuleRaw}
+              onChange={(event) =>
+                changeParams(
+                  { commentRule: event.target.value || null, page: "1" },
+                  true,
+                )
+              }
+            />
+            <Input
+              className="w-full sm:w-64"
+              aria-label="按目标记录筛选"
+              placeholder="按目标记录 ID 筛选"
+              value={commentRecordId}
+              onChange={(event) =>
+                changeParams(
+                  { commentRecord: event.target.value || null, page: "1" },
+                  true,
+                )
+              }
+            />
+          </div>
+          {!canListCommentRuns ? (
+            <p className="p-6">
+              当前身份没有查看评论运行记录的权限，请联系管理员。
+            </p>
+          ) : commentRunsQuery.isPending ? (
+            <p role="status">正在读取评论运行记录…</p>
+          ) : commentRunsQuery.isError ? (
+            <div role="alert">
+              <p>
+                暂时无法读取评论运行记录：{messageOf(commentRunsQuery.error)}
+              </p>
+              <Button
+                variant="outline"
+                onClick={() => void commentRunsQuery.refetch()}
+              >
+                重新加载
+              </Button>
+            </div>
+          ) : commentRuns.length === 0 ? (
+            <div className="rounded-lg border p-8 text-center">
+              <p className="font-medium">还没有评论运行记录</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                启用支付评论的规则在目标记录变化后会在这里出现。
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>状态</TableHead>
+                      <TableHead>规则 / 目标记录</TableHead>
+                      <TableHead>审批实例</TableHead>
+                      <TableHead>评论 ID</TableHead>
+                      <TableHead>尝试</TableHead>
+                      <TableHead>下次重试</TableHead>
+                      <TableHead>最后错误</TableHead>
+                      <TableHead>更新时间</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {commentRuns.map((run) => (
+                      <TableRow key={run.id}>
+                        <TableCell>
+                          <StatusBadge tone={commentStateTone(run.state)}>
+                            {approvalCommentRunStateLabel(run.state)}
+                          </StatusBadge>
+                        </TableCell>
+                        <TableCell className="whitespace-normal">
+                          <p className="text-xs text-muted-foreground">
+                            规则 #{run.ruleId}
+                          </p>
+                          <p className="mt-1 font-mono text-xs">
+                            {run.recordId}
+                          </p>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {run.instanceCode ?? "—"}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {run.commentId ?? "—"}
+                        </TableCell>
+                        <TableCell className="tabular-nums">
+                          {run.attempts}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {run.nextAttemptAt === null
+                            ? "—"
+                            : formatUnixSeconds(run.nextAttemptAt)}
+                        </TableCell>
+                        <TableCell className="max-w-64 whitespace-normal">
+                          {run.lastError ? (
+                            <span
+                              className="line-clamp-2 text-xs text-destructive"
+                              title={run.lastError}
+                            >
+                              {run.lastError}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              —
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {formatUnixSeconds(run.updatedAt)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {actions.canRetryComment &&
+                          isApprovalCommentRunRetryable(run.state) ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={retryingCommentRunId === run.id}
+                              onClick={() => void retryCommentRun(run)}
+                            >
+                              {retryingCommentRunId === run.id
+                                ? "重试中…"
+                                : "重试"}
+                            </Button>
+                          ) : null}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <ListPagination
+                page={page}
+                pageSize={pageSize}
+                total={commentRunsTotal}
+                pending={commentRunsQuery.isFetching}
+                onPageChange={(value) => changeParams({ page: String(value) })}
+                onPageSizeChange={(value) =>
+                  changeParams({ pageSize: String(value), page: "1" })
+                }
+              />
+            </div>
+          )}
+        </>
+      ) : logsMode ? (
         <>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -523,6 +903,26 @@ export default function ApprovalExportPage() {
                   日志
                 </Button>
               ) : null}
+              {canListCommentRuns ? (
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    changeParams(
+                      {
+                        view: "comment-runs",
+                        rule: null,
+                        page: "1",
+                        commentState: null,
+                        commentRecord: null,
+                        commentRule: null,
+                      },
+                      true,
+                    )
+                  }
+                >
+                  评论台账
+                </Button>
+              ) : null}
               {actions.canCheck ? (
                 <Button
                   variant="outline"
@@ -593,13 +993,15 @@ export default function ApprovalExportPage() {
                       <TableHead>触发</TableHead>
                       <TableHead>目标表</TableHead>
                       <TableHead>状态列</TableHead>
+                      <TableHead>支付评论</TableHead>
+                      <TableHead>最近评论</TableHead>
                       <TableHead>状态</TableHead>
                       <TableHead>更新时间</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {items.map((rule) => (
+                    {items.map((rule, index) => (
                       <TableRow key={rule.id}>
                         <TableCell className="whitespace-normal">
                           <p className="font-medium">{rule.title}</p>
@@ -652,6 +1054,43 @@ export default function ApprovalExportPage() {
                             </span>
                           )}
                         </TableCell>
+                        <TableCell className="whitespace-normal">
+                          {rule.commentConfig === null ? (
+                            rule.commentConfigJson !== null ? (
+                              <span className="text-xs text-destructive">
+                                配置无法解析
+                              </span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                未配置
+                              </span>
+                            )
+                          ) : (
+                            <>
+                              <StatusBadge
+                                tone={
+                                  rule.commentConfig.enabled
+                                    ? "positive"
+                                    : "neutral"
+                                }
+                              >
+                                {rule.commentConfig.enabled
+                                  ? "已启用"
+                                  : "已停用"}
+                              </StatusBadge>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {rule.commentConfig.statusFieldName.trim() ||
+                                  rule.commentConfig.statusFieldId ||
+                                  "未选状态列"}
+                              </p>
+                            </>
+                          )}
+                        </TableCell>
+                        <TableCell className="whitespace-normal">
+                          <LatestCommentRunCell
+                            run={latestCommentRuns[index]?.data?.items[0]}
+                          />
+                        </TableCell>
                         <TableCell>
                           <StatusBadge
                             tone={rule.enabled ? "positive" : "neutral"}
@@ -679,6 +1118,24 @@ export default function ApprovalExportPage() {
                                 }
                               >
                                 查看运行
+                              </Button>
+                            ) : null}
+                            {actions.canCheckComment ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openCommentCheck(rule)}
+                              >
+                                评论体检
+                              </Button>
+                            ) : null}
+                            {actions.canTestComment ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openCommentTest(rule)}
+                              >
+                                测试评论
                               </Button>
                             ) : null}
                             {canCreate ? (
@@ -881,6 +1338,282 @@ export default function ApprovalExportPage() {
             >
               {checking ? "检查中…" : "重新检查"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={commentCheckRule !== null}
+        onOpenChange={(open) => {
+          if (!open && !commentChecking) setCommentCheckRule(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl" showCloseButton={!commentChecking}>
+          <DialogHeader>
+            <DialogTitle>支付评论体检</DialogTitle>
+            <DialogDescription>
+              {commentCheckRule
+                ? `${commentCheckRule.title}（#${commentCheckRule.id}）逐项检查评论字段、状态列、事件订阅与实例映射。`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-48 flex-1 space-y-1.5">
+                <Label htmlFor="export-comment-check-record">
+                  目标记录 ID（可选）
+                </Label>
+                <Input
+                  id="export-comment-check-record"
+                  value={commentCheckRecordId}
+                  onChange={(event) =>
+                    setCommentCheckRecordId(event.target.value)
+                  }
+                  placeholder="留空取该规则最近一条已回写记录"
+                  autoComplete="off"
+                />
+              </div>
+              <Button
+                variant="outline"
+                disabled={commentChecking || commentCheckRule === null}
+                onClick={() => {
+                  if (commentCheckRule) {
+                    void runCommentCheck(
+                      commentCheckRule,
+                      commentCheckRecordId,
+                    );
+                  }
+                }}
+              >
+                {commentChecking ? "检查中…" : "重新体检"}
+              </Button>
+            </div>
+            {commentCheckError !== null ? (
+              <p role="alert" className="text-sm text-destructive">
+                {messageOf(commentCheckError)}
+              </p>
+            ) : null}
+            {commentChecking && commentCheckResult === null ? (
+              <p role="status">正在体检…</p>
+            ) : null}
+            {commentCheckResult ? (
+              <>
+                <p
+                  role="status"
+                  className={
+                    commentCheckResult.passed
+                      ? "text-sm text-emerald-700"
+                      : "text-sm text-destructive"
+                  }
+                >
+                  {commentCheckResult.passed
+                    ? `全部 ${commentCheckResult.items.length} 项检查通过。`
+                    : `${commentCheckResult.failedCount} 项需要处理（共 ${commentCheckResult.items.length} 项）。`}
+                </p>
+                <div className="max-h-[55vh] space-y-2 overflow-auto">
+                  {commentCheckResult.items.map((item) => (
+                    <div key={item.id} className="rounded-md border p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge tone={item.passed ? "positive" : "danger"}>
+                          {item.passed ? "通过" : "失败"}
+                        </StatusBadge>
+                        <p className="text-sm font-medium">{item.name}</p>
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {item.id}
+                        </span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                        {item.detail}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={commentChecking}
+              onClick={() => setCommentCheckRule(null)}
+            >
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={commentTestRule !== null}
+        onOpenChange={(open) => {
+          if (!open && !commentTesting) setCommentTestRule(null);
+        }}
+      >
+        <DialogContent className="max-w-xl" showCloseButton={!commentTesting}>
+          <DialogHeader>
+            <DialogTitle>发送测试评论</DialogTitle>
+            <DialogDescription>
+              {commentTestRule
+                ? `向真实审批实例发一条评论，验证作者与评论链路。规则：${commentTestRule.title}（#${commentTestRule.id}）。`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+
+          {commentTestStep === "form" ? (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="export-comment-test-instance">
+                  审批实例 Code
+                </Label>
+                <Input
+                  id="export-comment-test-instance"
+                  value={commentTestInstance}
+                  onChange={(event) =>
+                    setCommentTestInstance(event.target.value)
+                  }
+                  placeholder="例如 202610260136…"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="export-comment-test-author">
+                  评论作者 open_id（可选）
+                </Label>
+                <Input
+                  id="export-comment-test-author"
+                  value={commentTestAuthor}
+                  onChange={(event) => setCommentTestAuthor(event.target.value)}
+                  placeholder="ou_…"
+                  autoComplete="off"
+                />
+                <p className="text-xs text-muted-foreground">
+                  留空则使用该规则评论配置里的作者。
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="export-comment-test-text">
+                  评论正文（可选）
+                </Label>
+                <textarea
+                  id="export-comment-test-text"
+                  className="min-h-16 w-full rounded-md border bg-transparent px-2 py-1 text-sm"
+                  value={commentTestText}
+                  onChange={(event) => setCommentTestText(event.target.value)}
+                  placeholder="留空使用默认测试文案"
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {commentTestStep === "confirm" ? (
+            <div className="space-y-3">
+              <div className="space-y-1 rounded-md border p-3 text-sm">
+                <p>
+                  实例：
+                  <span className="font-mono">{commentTestInstance}</span>
+                </p>
+                <p>
+                  作者：
+                  {commentTestAuthor.trim() ||
+                    commentTestRule?.commentConfig?.authorUserId ||
+                    "未配置"}
+                </p>
+                <p>正文：{commentTestText.trim() || "默认测试文案"}</p>
+              </div>
+              <p role="alert" className="text-sm text-destructive">
+                确认后会在真实审批实例上留下一条评论，无法撤回。
+              </p>
+              {commentTestError !== null ? (
+                <p role="alert" className="text-sm text-destructive">
+                  {commentTestError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {commentTestStep === "result" && commentTestResult ? (
+            <div className="space-y-3">
+              <p className="text-sm">
+                飞书返回 code{" "}
+                <span className="font-mono">{commentTestResult.code}</span>
+                {commentTestResult.httpStatus !== null
+                  ? `（HTTP ${commentTestResult.httpStatus}）`
+                  : ""}
+                ：{commentTestResult.msg || "（空 msg）"}
+              </p>
+              {commentTestResult.commentId ? (
+                <p className="text-sm">
+                  评论 ID：
+                  <span className="font-mono">
+                    {commentTestResult.commentId}
+                  </span>
+                </p>
+              ) : null}
+              <pre className="max-h-60 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
+                {JSON.stringify(commentTestResult.data, null, 2)}
+              </pre>
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            {commentTestStep === "form" ? (
+              <>
+                <Button
+                  variant="ghost"
+                  onClick={() => setCommentTestRule(null)}
+                >
+                  取消
+                </Button>
+                <Button
+                  disabled={
+                    commentTestInstance.trim() === "" ||
+                    (commentTestAuthor.trim() === "" &&
+                      !commentTestRule?.commentConfig?.authorUserId?.trim())
+                  }
+                  onClick={() => {
+                    setCommentTestError(null);
+                    setCommentTestStep("confirm");
+                  }}
+                >
+                  下一步：确认
+                </Button>
+              </>
+            ) : commentTestStep === "confirm" ? (
+              <>
+                <Button
+                  variant="ghost"
+                  disabled={commentTesting}
+                  onClick={() => setCommentTestStep("form")}
+                >
+                  返回修改
+                </Button>
+                <Button
+                  disabled={commentTesting}
+                  onClick={() => void sendCommentTest()}
+                >
+                  {commentTesting ? "发送中…" : "确认发送"}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="ghost"
+                  onClick={() => setCommentTestRule(null)}
+                >
+                  关闭
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setCommentTestStep("form");
+                    setCommentTestResult(null);
+                    setCommentTestError(null);
+                  }}
+                >
+                  再发一条
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

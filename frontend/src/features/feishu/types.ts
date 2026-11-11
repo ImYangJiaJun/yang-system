@@ -1423,6 +1423,9 @@ export type ApprovalExportRule = {
   statusField: string | null;
   statusFieldName: string | null;
   statusLabels: ApprovalExportStatusLabels;
+  /// 审批评论配置的解析结果；无 / 解析失败时为 `null`（原串仍在 `commentConfigJson`）。
+  commentConfig: ApprovalCommentConfig | null;
+  commentConfigJson: string | null;
   markEnabled: boolean;
   enabled: boolean;
   snapshotAt: number | null;
@@ -1656,6 +1659,153 @@ export function isExportRunForceRecreatable(run: {
     run.targetRecordId.trim() !== ""
   );
 }
+
+/* ----------------------------- 审批支付评论 ----------------------------- */
+
+/// 审批评论状态列的两种文案。
+export type ApprovalCommentStatusLabels = {
+  commented: string;
+  failed: string;
+};
+
+/// 审批评论配置（后端 `comment_config_json` 的解析结果）。
+///
+/// 与回写共用目标 Base / 表坐标；`field_names` / `status_field_name` 是保存时
+/// 解析并缓存的列名，运行期按 `field_id` 取值。
+export type ApprovalCommentConfig = {
+  enabled: boolean;
+  /// 参与评论渲染的列（顺序即评论中的行顺序）。
+  fieldIds: string[];
+  /// `field_id` → 保存时的列名。
+  fieldNames: Record<string, string>;
+  /// 必须非空才允许评论的列，是 `fieldIds` 的子集。
+  requiredFieldIds: string[];
+  /// 触发列；命中 `triggerValues` 才评论。
+  triggerFieldId: string | null;
+  triggerValues: string[];
+  /// 评论状态列的 `field_id`。
+  statusFieldId: string;
+  statusFieldName: string;
+  statusLabels: ApprovalCommentStatusLabels;
+  /// 评论作者 open_id。
+  authorUserId: string;
+  includeAttachments: boolean;
+  /// 评论前缀；去重标记 = prefix + record_id。
+  prefix: string;
+  /// 记录链接模板，必须含 `{base_token}` / `{table_id}` / `{record_id}`。
+  recordUrlTemplate: string;
+};
+
+/// 新建评论配置时的默认值。缺省关闭，避免未配置的规则突然开始发评论。
+export function defaultApprovalCommentConfig(): ApprovalCommentConfig {
+  return {
+    enabled: false,
+    fieldIds: [],
+    fieldNames: {},
+    requiredFieldIds: [],
+    triggerFieldId: null,
+    triggerValues: [],
+    statusFieldId: "",
+    statusFieldName: "",
+    statusLabels: { commented: "已评论", failed: "评论失败" },
+    authorUserId: "",
+    includeAttachments: true,
+    prefix: "【支付回填】",
+    recordUrlTemplate: "",
+  };
+}
+
+/// 评论运行台账状态（`feishu_approval_comment_run.state`）。
+export type ApprovalCommentRunState =
+  | "pending"
+  | "commenting"
+  | "commented"
+  | "done"
+  | "retry"
+  | "failed"
+  | "skipped"
+  | "waiting";
+
+/// 评论运行台账的一行（`export_list_comment_runs` 的 `items[]`）。
+export type ApprovalCommentRun = {
+  id: number;
+  ruleId: number;
+  instanceCode: string | null;
+  recordId: string;
+  state: string;
+  paymentFingerprint: string | null;
+  commentId: string | null;
+  attempts: number;
+  nextAttemptAt: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/// 评论台账查询。
+export type ApprovalCommentRunsQuery = {
+  page: number;
+  pageSize: number;
+  countTotal?: boolean;
+  ruleId?: number;
+  state?: string;
+  recordId?: string;
+};
+
+/// 评论状态筛选项（与后端状态机一致）。
+export const APPROVAL_COMMENT_RUN_STATE_OPTIONS: ReadonlyArray<{
+  value: ApprovalCommentRunState;
+  label: string;
+}> = [
+  { value: "pending", label: "待处理" },
+  { value: "commenting", label: "评论中" },
+  { value: "commented", label: "已评论（补状态中）" },
+  { value: "done", label: "已完成" },
+  { value: "retry", label: "待重试" },
+  { value: "failed", label: "失败" },
+  { value: "skipped", label: "已跳过" },
+  { value: "waiting", label: "等待中" },
+];
+
+/// 评论状态的中文名。认不出的值原样回显。
+export function approvalCommentRunStateLabel(value: string): string {
+  return (
+    APPROVAL_COMMENT_RUN_STATE_OPTIONS.find((option) => option.value === value)
+      ?.label ?? value
+  );
+}
+
+/// 只有 `failed` 可人工重试：`commented` 会自动补状态列，`done` 已完成，
+/// `commenting` 可能在飞行中。与后端 `export_retry_comment_run` 判据一致。
+export function isApprovalCommentRunRetryable(state: string): boolean {
+  return state === "failed";
+}
+
+/// 评论体检的一项（`export_check_comment` 的 `items[]`）。
+export type ApprovalCommentCheckItem = {
+  id: string;
+  name: string;
+  passed: boolean;
+  detail: string;
+};
+
+/// 评论体检结果（`export_check_comment`）。
+export type ApprovalCommentCheckResult = {
+  ruleId: number;
+  title: string;
+  passed: boolean;
+  failedCount: number;
+  items: ApprovalCommentCheckItem[];
+};
+
+/// 测试评论回执（`export_test_comment`）。业务失败也原样返回 code/msg。
+export type ApprovalCommentTestResult = {
+  httpStatus: number | null;
+  code: number;
+  msg: string;
+  commentId: string | null;
+  data: unknown;
+};
 
 /// 飞书用户身份（OAuth）授权状态。
 ///

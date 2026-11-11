@@ -1376,7 +1376,7 @@ pub(crate) fn labels_equivalent(left: &str, right: &str) -> bool {
 /// 202611020064）。取第一个非空段会把链接后面的正文整段丢掉，审批里只剩一个
 /// 可点击的 `Amazon.com`。分段之间原样拼接（段自带前置空格），不加分隔符。
 /// 多选列→文本控件这类「真的多个值」由配置期的 `MultiValueColumn` 拦下。
-fn text_from_cell(cell: &Value) -> String {
+pub(crate) fn text_from_cell(cell: &Value) -> String {
     match unwrap_typed_cell(cell) {
         Value::String(text) => text.clone(),
         Value::Number(number) => number.to_string(),

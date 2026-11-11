@@ -2,6 +2,7 @@ pub(crate) mod alert;
 pub(crate) mod approval;
 pub(crate) mod approval_aggregation;
 pub(crate) mod approval_attachment;
+pub(crate) mod approval_comment;
 pub(crate) mod approval_convert;
 pub(crate) mod approval_dispatch;
 pub(crate) mod approval_execution;

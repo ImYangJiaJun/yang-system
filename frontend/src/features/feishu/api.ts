@@ -14,6 +14,7 @@
 
 import {
   keepPreviousData,
+  useQueries,
   useQuery,
   useQueryClient,
   type UseQueryResult,
@@ -36,6 +37,11 @@ import type {
 
 import { withStableOrder } from "./list-query";
 import type {
+  ApprovalCommentCheckResult,
+  ApprovalCommentConfig,
+  ApprovalCommentRun,
+  ApprovalCommentRunsQuery,
+  ApprovalCommentTestResult,
   ApprovalConfigCheckResult,
   ApprovalConfigItem,
   ApprovalConfigMap,
@@ -176,6 +182,14 @@ export const EXPORT_OPERATION_IDS = {
   checkRules: "feishu.approval_export.export_check_rules",
   /// 试算（dry-run）：按已保存规则与实例计算触发、条件与将写入的行。
   preview: "feishu.approval_export.export_preview",
+  /// 评论运行台账。读权限，无条件注册。
+  listCommentRuns: "feishu.approval_export.export_list_comment_runs",
+  /// 重试一条 `failed` 的评论运行记录。写权限，无条件注册。
+  retryCommentRun: "feishu.approval_export.export_retry_comment_run",
+  /// 评论配置体检（会出站读字段 / 订阅 / 台账）。写权限，有凭证才注册。
+  checkComment: "feishu.approval_export.export_check_comment",
+  /// 向真实实例发一条测试评论。写权限，有凭证才注册。
+  testComment: "feishu.approval_export.export_test_comment",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -395,6 +409,19 @@ export const feishuQueryKeys = {
         writeStatus: query.writeStatus ?? "",
         markStatus: query.markStatus ?? "",
         rowKey: query.rowKey ?? "",
+      },
+    ] as const,
+  approvalExportCommentRuns: () =>
+    [FEISHU_QUERY_ROOT, "approval-export-comment-runs"] as const,
+  approvalExportCommentRunList: (query: ApprovalCommentRunsQuery) =>
+    [
+      ...feishuQueryKeys.approvalExportCommentRuns(),
+      {
+        page: query.page,
+        pageSize: query.pageSize,
+        ruleId: query.ruleId ?? null,
+        state: query.state ?? "",
+        recordId: query.recordId?.trim() ?? "",
       },
     ] as const,
   /// 某条数据源下的门户列表（管理面板）。
@@ -3136,6 +3163,50 @@ function parseExportStatusLabels(value: unknown): ApprovalExportStatusLabels {
   };
 }
 
+function parseStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function parseStringRecord(value: unknown): Record<string, string> {
+  const record = asRecord(value);
+  if (!record) return {};
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === "string") out[key] = item;
+  }
+  return out;
+}
+
+/// `comment_config` 的解析结果。后端已把 JSON 解析成对象；认不出时返回 `null`，
+/// 原串仍在 `comment_config_json`，页面据此提示「重新编辑保存」。
+function parseApprovalCommentConfig(
+  value: unknown,
+): ApprovalCommentConfig | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const labels = asRecord(record.status_labels);
+  return {
+    enabled: record.enabled === true,
+    fieldIds: parseStringArray(record.field_ids),
+    fieldNames: parseStringRecord(record.field_names),
+    requiredFieldIds: parseStringArray(record.required_field_ids),
+    triggerFieldId: asNullableString(record.trigger_field_id),
+    triggerValues: parseStringArray(record.trigger_values),
+    statusFieldId: asString(record.status_field_id),
+    statusFieldName: asString(record.status_field_name),
+    statusLabels: {
+      commented: asString(labels?.commented, "已评论"),
+      failed: asString(labels?.failed, "评论失败"),
+    },
+    authorUserId: asString(record.author_user_id),
+    includeAttachments: record.include_attachments !== false,
+    prefix: asString(record.prefix, "【支付回填】"),
+    recordUrlTemplate: asString(record.record_url_template),
+  };
+}
+
 function parseExportOptionMap(value: unknown): Record<string, string> {
   const record = asRecord(value);
   if (!record) return {};
@@ -3188,6 +3259,7 @@ function parseApprovalExportRule(
   // `condition` 解析失败时后端给 null、原串仍在 conditionJson：页面据此提示
   // 「条件无法解析，请重新保存」，而不是把整条规则读成「无条件」。
   const condition = parseExportCondition(raw.condition);
+  const commentConfigJson = asNullableString(raw.comment_config_json);
   return {
     id,
     title: asString(raw.title),
@@ -3209,12 +3281,73 @@ function parseApprovalExportRule(
     statusField: asNullableString(raw.status_field),
     statusFieldName: asNullableString(raw.status_field_name),
     statusLabels: parseExportStatusLabels(raw.status_labels),
+    commentConfig: parseApprovalCommentConfig(raw.comment_config),
+    commentConfigJson,
     markEnabled: raw.mark_enabled !== false,
     enabled: raw.enabled === true,
     snapshotAt: asNullableNumber(raw.snapshot_at),
     effectiveFrom: asNullableNumber(raw.effective_from),
     updatedAt: asNumber(raw.updated_at, 0),
     maps,
+  };
+}
+
+function parseApprovalCommentRun(
+  raw: Record<string, unknown>,
+): ApprovalCommentRun | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  return {
+    id,
+    ruleId: asNumber(raw.rule_id, 0),
+    instanceCode: asNullableString(raw.instance_code),
+    recordId: asString(raw.record_id),
+    state: asString(raw.state),
+    paymentFingerprint: asNullableString(raw.payment_fingerprint),
+    commentId: asNullableString(raw.comment_id),
+    attempts: asNumber(raw.attempts, 0),
+    nextAttemptAt: asNullableNumber(raw.next_attempt_at),
+    lastError: asNullableString(raw.last_error),
+    createdAt: asNumber(raw.created_at, 0),
+    updatedAt: asNumber(raw.updated_at, 0),
+  };
+}
+
+function parseApprovalCommentCheckResult(
+  data: unknown,
+): ApprovalCommentCheckResult {
+  const record = asRecord(data);
+  const rawItems = record?.items;
+  return {
+    ruleId: asNumber(record?.rule_id, 0),
+    title: asString(record?.title),
+    passed: record?.passed === true,
+    failedCount: asNumber(record?.failed_count, 0),
+    items: Array.isArray(rawItems)
+      ? rawItems
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({
+            id: asString(item.id),
+            name: asString(item.name),
+            passed: item.passed === true,
+            detail: asString(item.detail),
+          }))
+          .filter((item) => item.id !== "")
+      : [],
+  };
+}
+
+function parseApprovalCommentTestResult(
+  data: unknown,
+): ApprovalCommentTestResult {
+  const record = asRecord(data);
+  return {
+    httpStatus: asNullableNumber(record?.http_status),
+    code: asNumber(record?.code, 0),
+    msg: asString(record?.msg),
+    commentId: asNullableString(record?.comment_id),
+    data: record?.data ?? null,
   };
 }
 
@@ -3352,8 +3485,34 @@ export type ApprovalExportRuleInput = {
   statusField: string | null;
   markEnabled: boolean;
   enabled: boolean;
+  /// 审批评论配置；`null` = 省略该键（不写 `comment_config_json`）。
+  commentConfig: ApprovalCommentConfig | null;
   maps: ApprovalExportMapInput[];
 };
+
+/// 评论配置 → 线上 snake_case 形状（后端 `CommentConfig` 反序列化口径）。
+function buildApprovalCommentConfigBody(
+  config: ApprovalCommentConfig,
+): Record<string, unknown> {
+  return {
+    enabled: config.enabled,
+    field_ids: config.fieldIds,
+    field_names: config.fieldNames,
+    required_field_ids: config.requiredFieldIds,
+    trigger_field_id: config.triggerFieldId?.trim() || null,
+    trigger_values: config.triggerValues,
+    status_field_id: config.statusFieldId,
+    status_field_name: config.statusFieldName,
+    status_labels: {
+      commented: config.statusLabels.commented,
+      failed: config.statusLabels.failed,
+    },
+    author_user_id: config.authorUserId,
+    include_attachments: config.includeAttachments,
+    prefix: config.prefix,
+    record_url_template: config.recordUrlTemplate,
+  };
+}
 
 function buildApprovalExportRuleBody(
   input: ApprovalExportRuleInput,
@@ -3374,6 +3533,11 @@ function buildApprovalExportRuleBody(
     ...(statusField === "" ? {} : { status_field: statusField }),
     mark_enabled: input.markEnabled,
     enabled: input.enabled,
+    ...(input.commentConfig === null
+      ? {}
+      : {
+          comment_config: buildApprovalCommentConfigBody(input.commentConfig),
+        }),
     maps: input.maps.map((map) => {
       const optionMap = Object.fromEntries(
         Object.entries(map.optionMap).filter(
@@ -3563,6 +3727,104 @@ export async function previewApprovalExport(
   return parseApprovalExportPreview(result.data);
 }
 
+/* ----- 审批支付评论 ----- */
+
+function buildApprovalCommentRunListBody(
+  query: ApprovalCommentRunsQuery,
+): Record<string, unknown> {
+  return {
+    page: query.page,
+    page_size: query.pageSize,
+    count_total: query.countTotal ?? true,
+    rule_id: query.ruleId,
+    state: query.state?.trim() || undefined,
+    record_id: query.recordId?.trim() || undefined,
+  };
+}
+
+/// 评论运行台账（`export_list_comment_runs`）。
+export async function listApprovalExportCommentRuns(
+  query: ApprovalCommentRunsQuery,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalCommentRun>> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.listCommentRuns,
+    buildApprovalCommentRunListBody(query),
+    signal,
+  );
+  return parsePage(result.data, parseApprovalCommentRun);
+}
+
+/// 人工重试一条 `failed` 评论记录（其它状态由服务端拒绝）。
+export async function retryApprovalExportCommentRun(
+  runId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ previousState: string; state: string }> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.retryCommentRun,
+    { run_id: runId },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    previousState: asString(data?.previous_state),
+    state: asString(data?.state, "retry"),
+  };
+}
+
+/// 评论配置体检：逐项返回通过 / 失败。只读出站接口，不发评论。
+export async function checkApprovalExportComment(
+  ruleId: number,
+  recordId: string | null,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalCommentCheckResult> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.checkComment,
+    {
+      rule_id: ruleId,
+      ...(recordId?.trim() ? { record_id: recordId.trim() } : {}),
+    },
+    signal,
+  );
+  return parseApprovalCommentCheckResult(result.data);
+}
+
+export type ApprovalCommentTestInput = {
+  instanceCode: string;
+  /// 必须显式为 `true`；服务端会拒绝未确认的请求。
+  confirm: boolean;
+  text?: string;
+  authorUserId?: string;
+  ruleId?: number;
+};
+
+/// 向真实实例发一条测试评论。业务失败也原样返回飞书 code/msg。
+export async function testApprovalExportComment(
+  input: ApprovalCommentTestInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalCommentTestResult> {
+  const result = await invokeFeishuAction(
+    deps,
+    EXPORT_OPERATION_IDS.testComment,
+    {
+      instance_code: input.instanceCode.trim(),
+      confirm: input.confirm,
+      text: input.text?.trim() || undefined,
+      author_user_id: input.authorUserId?.trim() || undefined,
+      rule_id: input.ruleId,
+    },
+    signal,
+  );
+  return parseApprovalCommentTestResult(result.data);
+}
+
 /* ----- hooks ----- */
 
 /// 规则列表。目录里没有读权限时不发请求。
@@ -3603,6 +3865,67 @@ export function useApprovalExportRunList(
   });
 }
 
+/// 评论运行台账。目录里没有读权限时不发请求。
+export function useApprovalExportCommentRunList(
+  query: ApprovalCommentRunsQuery,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalCommentRun>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled:
+      hasOperation(catalogData, EXPORT_OPERATION_IDS.listCommentRuns) &&
+      options.enabled !== false,
+    queryKey: feishuQueryKeys.approvalExportCommentRunList(query),
+    queryFn: ({ signal }) =>
+      listApprovalExportCommentRuns(
+        query,
+        { catalog: catalogData, session },
+        signal,
+      ),
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+  });
+}
+
+/// 规则列表上「最近评论」那一列：每条规则各取最新一条台账（page_size=1）。
+///
+/// 无法用一次查询拿全：列表端点只支持按 `rule_id` 单条过滤，没有 `in` 过滤。
+/// 可见页最多 10 条规则，这里用 `useQueries` 并发取 10 个单行，与列表的
+/// 15s staleTime 保持一致。
+export function useApprovalExportLatestCommentRuns(
+  ruleIds: number[],
+  options: { enabled?: boolean } = {},
+): Array<UseQueryResult<ListPage<ApprovalCommentRun>>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQueries({
+    queries: ruleIds.map((ruleId) => {
+      const query: ApprovalCommentRunsQuery = {
+        page: 1,
+        pageSize: 1,
+        countTotal: false,
+        ruleId,
+      };
+      return {
+        enabled:
+          hasOperation(catalogData, EXPORT_OPERATION_IDS.listCommentRuns) &&
+          options.enabled !== false,
+        queryKey: feishuQueryKeys.approvalExportCommentRunList(query),
+        queryFn: ({ signal }: { signal: AbortSignal }) =>
+          listApprovalExportCommentRuns(
+            query,
+            { catalog: catalogData, session },
+            signal,
+          ),
+        staleTime: 15_000,
+      };
+    }),
+  });
+}
+
 /// 规则页与向导要用的「已绑定目录与会话」的写操作入口。
 /// 变更函数本身不缓存失效——页面提交后回读列表。
 export type ApprovalExportActions = {
@@ -3611,12 +3934,25 @@ export type ApprovalExportActions = {
   canCheck: boolean;
   canRetry: boolean;
   canForceRecreate: boolean;
+  canRetryComment: boolean;
+  canCheckComment: boolean;
+  canTestComment: boolean;
   checkRules: () => Promise<ApprovalExportCheckResult>;
   deleteRule: (ruleId: number) => Promise<{ deletedMaps: number }>;
   retryRun: (
     runId: number,
   ) => Promise<{ previousStatus: string; wokeRule: boolean }>;
   forceRecreateRun: (runId: number) => Promise<{ generation: number }>;
+  retryCommentRun: (
+    runId: number,
+  ) => Promise<{ previousState: string; state: string }>;
+  checkComment: (
+    ruleId: number,
+    recordId: string | null,
+  ) => Promise<ApprovalCommentCheckResult>;
+  testComment: (
+    input: ApprovalCommentTestInput,
+  ) => Promise<ApprovalCommentTestResult>;
 };
 
 export function useApprovalExportActions(): ApprovalExportActions {
@@ -3661,6 +3997,25 @@ export function useApprovalExportActions(): ApprovalExportActions {
     },
     [deps, queryClient],
   );
+  const retryCommentRun = useCallback(
+    async (runId: number) => {
+      const result = await retryApprovalExportCommentRun(runId, deps);
+      await queryClient.invalidateQueries({
+        queryKey: feishuQueryKeys.approvalExportCommentRuns(),
+      });
+      return result;
+    },
+    [deps, queryClient],
+  );
+  const checkComment = useCallback(
+    (ruleId: number, recordId: string | null) =>
+      checkApprovalExportComment(ruleId, recordId, deps),
+    [deps],
+  );
+  const testComment = useCallback(
+    (input: ApprovalCommentTestInput) => testApprovalExportComment(input, deps),
+    [deps],
+  );
 
   return {
     canRead: canReadApprovalExport(catalogData),
@@ -3671,10 +4026,22 @@ export function useApprovalExportActions(): ApprovalExportActions {
       catalogData,
       EXPORT_OPERATION_IDS.forceRecreate,
     ),
+    canRetryComment: hasOperation(
+      catalogData,
+      EXPORT_OPERATION_IDS.retryCommentRun,
+    ),
+    canCheckComment: hasOperation(
+      catalogData,
+      EXPORT_OPERATION_IDS.checkComment,
+    ),
+    canTestComment: hasOperation(catalogData, EXPORT_OPERATION_IDS.testComment),
     checkRules,
     deleteRule,
     retryRun,
     forceRecreateRun,
+    retryCommentRun,
+    checkComment,
+    testComment,
   };
 }
 

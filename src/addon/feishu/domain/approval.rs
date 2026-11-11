@@ -29,10 +29,11 @@
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
+use super::approval_comment::{CommentFile, CommentItem};
 use super::outbound::{
-    send_with_retry, FailureKind, OutboundFailure, OutboundMethod, OutboundRequest,
-    OutboundTransport, RetryPolicy, Sleeper, DEPARTMENT_REQUEST_TIMEOUT_SECS, DEPARTMENT_RETRY,
-    PULL_RETRY,
+    business_code, classify, send_with_retry, FailureKind, OutboundFailure, OutboundMethod,
+    OutboundRequest, OutboundResponse, OutboundTransport, RetryPolicy, Sleeper,
+    CODES_TOKEN_EXPIRED, DEPARTMENT_REQUEST_TIMEOUT_SECS, DEPARTMENT_RETRY, PULL_RETRY,
 };
 use super::tenant_token::{TenantTokenProvider, FEISHU_OPEN_BASE};
 
@@ -987,6 +988,451 @@ fn classify_applicants(name: &str, users: &[SearchUser]) -> ApplicantResolution 
     }
 }
 
+// ---------------------------------------------------------------------------
+// 审批实例评论
+// ---------------------------------------------------------------------------
+
+/// 评论接口单页条数；官方上限 100。
+const COMMENT_PAGE_SIZE: u32 = 100;
+
+/// 评论列表翻页上限：单条实例的评论通常只有个位数，超过说明上游异常。
+const COMMENT_MAX_PAGES: usize = 10;
+
+/// 实例评论的 URL：`/open-apis/approval/v4/instances/:instance_code/comments`。
+fn instance_comments_url(instance_code: &str) -> anyhow::Result<String> {
+    validate_path_segment("instance_code", instance_code)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/approval/v4/instances/{instance_code}/comments"
+    ))
+}
+
+/// 评论接口的 query：作者身份必须是 `open_id`。
+fn comment_author_query(user_id: &str) -> Vec<(String, String)> {
+    vec![
+        ("user_id_type".to_string(), "open_id".to_string()),
+        ("user_id".to_string(), user_id.to_string()),
+    ]
+}
+
+/// 创建评论的响应解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommentCreated {
+    pub(crate) comment_id: String,
+}
+
+/// 创建评论的原始响应（运维试发用，成功/业务失败都原样返回）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawCommentResponse {
+    pub(crate) http_status: u16,
+    pub(crate) code: i32,
+    pub(crate) msg: String,
+    pub(crate) comment_id: Option<String>,
+    pub(crate) data: Option<serde_json::Value>,
+}
+
+/// 组装创建评论的请求体。
+///
+/// `content` 是**压缩转义后的 JSON 字符串**：`{"text":"...","files":[...]}`。
+/// `files[]` 元素为 `{url,title,fileSize,type}`。
+pub(crate) fn build_comment_body(text: &str, files: &[CommentFile]) -> serde_json::Value {
+    let mut content = serde_json::json!({ "text": text });
+    if !files.is_empty() {
+        content["files"] = serde_json::Value::Array(
+            files
+                .iter()
+                .map(|file| {
+                    serde_json::json!({
+                        "url": file.url,
+                        "title": file.title,
+                        "fileSize": file.file_size,
+                        "type": file.file_type,
+                    })
+                })
+                .collect(),
+        );
+    }
+    let content = serde_json::to_string(&content).unwrap_or_else(|_| "{\"text\":\"\"}".to_string());
+    serde_json::json!({ "content": content })
+}
+
+/// 发一次评论请求并返回原始响应。
+///
+/// **不经过 [`send_with_retry`] 的重试**：评论创建不是幂等操作，重发会造出
+/// 重复评论。退避重试由评论 worker 按台账状态机负责（同一记录先查评论标记
+/// 再发），这里只做一次 token 失效后的强制刷新重试。
+async fn send_comment_once(
+    transport: &dyn OutboundTransport,
+    tokens: &TenantTokenProvider,
+    request: OutboundRequest,
+) -> Result<OutboundResponse, OutboundFailure> {
+    let mut token_refresh_used = false;
+    let mut request = request;
+    loop {
+        let token = tokens
+            .tenant_access_token()
+            .await
+            .map_err(|error| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            })?;
+        request.bearer_token = Some(token);
+        match transport.send(request.clone()).await {
+            Ok(response) => {
+                let code = business_code(&response.body).unwrap_or(0);
+                if CODES_TOKEN_EXPIRED.contains(&code) && !token_refresh_used {
+                    token_refresh_used = true;
+                    tracing::warn!("飞书 tenant_access_token 失效，清缓存并强制刷新一次");
+                    tokens
+                        .invalidate_and_refresh()
+                        .await
+                        .map_err(|error| OutboundFailure {
+                            kind: FailureKind::Fatal { code: 0 },
+                            message: format!("tenant_access_token 失效后强制刷新失败: {error}"),
+                        })?;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) => {
+                let kind = if let yang_base::BaseError::RateLimitExceeded {
+                    retry_after_seconds,
+                } = &error
+                {
+                    FailureKind::Retry {
+                        retry_after_seconds: Some(*retry_after_seconds),
+                    }
+                } else if error.is_retryable() {
+                    FailureKind::Retry {
+                        retry_after_seconds: None,
+                    }
+                } else {
+                    FailureKind::Fatal { code: error.code() }
+                };
+                return Err(OutboundFailure {
+                    kind,
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// 创建审批实例评论。
+///
+/// 业务失败（非 0 code）按出站层同一套分类折成 [`OutboundFailure`]，让 worker
+/// 能区分「实例不存在/无权限」与「网络/限流」。
+pub(crate) async fn create_instance_comment(
+    transport: &dyn OutboundTransport,
+    tokens: &TenantTokenProvider,
+    instance_code: &str,
+    author_user_id: &str,
+    text: &str,
+    files: &[CommentFile],
+) -> Result<CommentCreated, OutboundFailure> {
+    let response = post_instance_comment_raw(
+        transport,
+        tokens,
+        instance_code,
+        author_user_id,
+        text,
+        files,
+    )
+    .await?;
+    if response.code != 0 {
+        let kind = classify(
+            response.http_status,
+            &std::collections::BTreeMap::new(),
+            &format!(
+                "{{\"code\":{},\"msg\":{}}}",
+                response.code,
+                serde_json::to_string(&response.msg).unwrap_or_else(|_| "\"\"".to_string())
+            ),
+        )
+        .unwrap_or(FailureKind::Fatal {
+            code: response.code,
+        });
+        return Err(OutboundFailure {
+            kind,
+            message: format!("创建审批评论失败（{}）：{}", response.code, response.msg),
+        });
+    }
+    Ok(CommentCreated {
+        comment_id: response.comment_id.unwrap_or_default(),
+    })
+}
+
+/// 创建评论并**原样**返回飞书 code/msg（运维试发用，不把业务失败折成 Err）。
+pub(crate) async fn post_instance_comment_raw(
+    transport: &dyn OutboundTransport,
+    tokens: &TenantTokenProvider,
+    instance_code: &str,
+    author_user_id: &str,
+    text: &str,
+    files: &[CommentFile],
+) -> Result<RawCommentResponse, OutboundFailure> {
+    let url = instance_comments_url(instance_code).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+    let request = OutboundRequest {
+        method: OutboundMethod::Post,
+        url,
+        query: comment_author_query(author_user_id),
+        bearer_token: None,
+        json_body: Some(build_comment_body(text, files)),
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        // 非幂等：底层不得自动重发。
+        idempotent: false,
+    };
+    let response = send_comment_once(transport, tokens, request).await?;
+    let envelope: CommentEnvelope =
+        serde_json::from_str(&response.body).map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: format!("创建评论响应解析失败: {error}"),
+        })?;
+    let comment_id = envelope.comment_id();
+    Ok(RawCommentResponse {
+        http_status: response.status,
+        code: envelope.code,
+        msg: envelope.msg,
+        comment_id,
+        data: envelope.data,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentEnvelope {
+    #[serde(default)]
+    code: i32,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+impl CommentEnvelope {
+    /// 评论 id 在不同版本的响应里有 `comment_id` / `comment.id` 两种落点。
+    fn comment_id(&self) -> Option<String> {
+        let data = self.data.as_ref()?;
+        find_string_key(data, &["comment_id", "id"]).or_else(|| {
+            data.get("comment")
+                .and_then(|comment| find_string_key(comment, &["comment_id", "id"]))
+        })
+    }
+}
+
+fn find_string_key(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        if let Some(text) = object.get(*key).and_then(serde_json::Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 获取审批实例评论（最多 10 页），用于按标记去重。
+pub(crate) async fn list_instance_comments(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    instance_code: &str,
+    user_id: &str,
+) -> Result<Vec<CommentItem>, OutboundFailure> {
+    let url = instance_comments_url(instance_code).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+    let mut items = Vec::new();
+    let mut page_token: Option<String> = None;
+    let mut used_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..COMMENT_MAX_PAGES {
+        let mut query = comment_author_query(user_id);
+        query.push(("page_size".to_string(), COMMENT_PAGE_SIZE.to_string()));
+        if let Some(token) = page_token.as_deref() {
+            query.push(("page_token".to_string(), token.to_string()));
+        }
+        let request = OutboundRequest {
+            method: OutboundMethod::Get,
+            url: url.clone(),
+            query,
+            bearer_token: None,
+            json_body: None,
+            raw_body: None,
+            binary_limit: None,
+            timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+            idempotent: true,
+        };
+        let payload = send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await?;
+        let page: CommentListData =
+            serde_json::from_str(&payload).map_err(|error| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: format!("获取评论响应解析失败: {error}"),
+            })?;
+        for comment in page.comments {
+            items.push(comment.into_item());
+        }
+        if !page.has_more {
+            return Ok(items);
+        }
+        match page.page_token.filter(|token| !token.trim().is_empty()) {
+            Some(token) if used_tokens.insert(token.clone()) => page_token = Some(token),
+            // 缺 page_token / 重复 page_token：翻页状态不可信，返回部分列表可能
+            // 漏掉标记所在页，worker 会再发一条评论。fail-closed。
+            _ => {
+                return Err(OutboundFailure {
+                    kind: FailureKind::Fatal { code: 0 },
+                    message: "获取评论翻页异常：has_more=true 但缺少或重复 page_token".to_string(),
+                })
+            }
+        }
+    }
+    Err(OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: format!("获取评论翻页超过 {COMMENT_MAX_PAGES} 页仍未收敛"),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentListData {
+    /// 兼容三种响应键：`comments` / `comment_list` / `items`。
+    #[serde(default, alias = "comment_list", alias = "items")]
+    comments: Vec<CommentRecord>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentRecord {
+    #[serde(default, alias = "comment_id")]
+    id: String,
+    #[serde(default)]
+    content: serde_json::Value,
+}
+
+impl CommentRecord {
+    fn into_item(self) -> CommentItem {
+        CommentItem {
+            id: self.id,
+            content: match self.content {
+                serde_json::Value::String(text) => text,
+                other => serde_json::to_string(&other).unwrap_or_default(),
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 多维表格文件事件订阅
+// ---------------------------------------------------------------------------
+
+/// 订阅/查询订阅的 URL。
+fn bitable_subscription_url(file_token: &str, action: &str) -> anyhow::Result<String> {
+    validate_path_segment("file_token", file_token)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/drive/v1/files/{file_token}/{action}"
+    ))
+}
+
+fn bitable_subscription_query() -> Vec<(String, String)> {
+    vec![("file_type".to_string(), "bitable".to_string())]
+}
+
+/// 订阅多维表格文件的事件（记录变更）。
+///
+/// 幂等：已订阅按成功处理（不同租户返回的错误码不统一，按文案兜底）。
+pub(crate) async fn subscribe_bitable_file(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    file_token: &str,
+) -> Result<(), OutboundFailure> {
+    let url =
+        bitable_subscription_url(file_token, "subscribe").map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        })?;
+    let request = OutboundRequest {
+        method: OutboundMethod::Post,
+        url,
+        query: bitable_subscription_query(),
+        bearer_token: None,
+        json_body: None,
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        idempotent: true,
+    };
+    match send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await {
+        Ok(_) => Ok(()),
+        Err(failure) if is_already_subscribed(&failure) => {
+            tracing::debug!(file_token, "多维表格事件订阅已存在，按幂等成功处理");
+            Ok(())
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+/// 查询是否已订阅多维表格文件事件。
+pub(crate) async fn get_bitable_subscription(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    file_token: &str,
+) -> Result<bool, OutboundFailure> {
+    let url =
+        bitable_subscription_url(file_token, "get_subscribe").map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        })?;
+    let request = OutboundRequest {
+        method: OutboundMethod::Get,
+        url,
+        query: bitable_subscription_query(),
+        bearer_token: None,
+        json_body: None,
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        idempotent: true,
+    };
+    let payload = send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await?;
+    let data: SubscriptionData =
+        serde_json::from_str(&payload).map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: format!("查询订阅响应解析失败: {error}"),
+        })?;
+    Ok(data.is_subscribed)
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionData {
+    #[serde(default, alias = "is_subscribe")]
+    is_subscribed: bool,
+}
+
+fn is_already_subscribed(failure: &OutboundFailure) -> bool {
+    if failure.kind == (FailureKind::Fatal { code: 0 }) {
+        return false;
+    }
+    let message = failure.message.to_ascii_lowercase();
+    failure.kind
+        == (FailureKind::Fatal {
+            code: super::outbound::CODE_SUBSCRIPTION_EXISTED,
+        })
+        || message.contains("已订阅")
+        || message.contains("already subscribed")
+        || message.contains("subscription existed")
+        || message.contains("subscription exists")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,5 +2138,268 @@ mod tests {
             assert!(name.is_none(), "非法 ID {id:?} 应直接返回 None");
         }
         assert_eq!(transport.call_count(), 0, "非法 ID 不得发出站请求");
+    }
+
+    // ---- 审批评论 ----
+
+    fn comment_file() -> CommentFile {
+        CommentFile {
+            url: "https://files/1.png".to_string(),
+            title: "回单.png".to_string(),
+            file_size: 2048,
+            file_type: "image".to_string(),
+        }
+    }
+
+    #[test]
+    fn comment_body_is_a_compact_json_string_with_camel_case_file_size() {
+        let body = build_comment_body("正文", &[comment_file()]);
+        let content = body["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("content 必须是 JSON 字符串: {body}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(content).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed["text"], "正文");
+        assert_eq!(parsed["files"][0]["url"], "https://files/1.png");
+        assert_eq!(parsed["files"][0]["title"], "回单.png");
+        assert_eq!(parsed["files"][0]["fileSize"], 2048);
+        assert_eq!(parsed["files"][0]["type"], "image");
+        assert!(
+            !content.contains("\"files\":[]"),
+            "无附件时不应写空 files 数组：{content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_comment_targets_the_instance_comments_endpoint_with_author_query() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{"comment_id":"c-1"}}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let created = create_instance_comment(
+            &transport,
+            &fake_tokens(),
+            "INST-1",
+            "ou_ops",
+            "【支付回填】rec1",
+            &[comment_file()],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(created.comment_id, "c-1");
+
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出评论请求"));
+        assert_eq!(request.method, OutboundMethod::Post);
+        assert!(
+            request
+                .url
+                .ends_with("/open-apis/approval/v4/instances/INST-1/comments"),
+            "{}",
+            request.url
+        );
+        assert!(
+            request
+                .query
+                .contains(&("user_id_type".to_string(), "open_id".to_string())),
+            "{:?}",
+            request.query
+        );
+        assert!(
+            request
+                .query
+                .contains(&("user_id".to_string(), "ou_ops".to_string())),
+            "{:?}",
+            request.query
+        );
+        assert_eq!(
+            request.json_body.as_ref().and_then(|body| body["content"].as_str()),
+            Some("{\"files\":[{\"fileSize\":2048,\"title\":\"回单.png\",\"type\":\"image\",\"url\":\"https://files/1.png\"}],\"text\":\"【支付回填】rec1\"}"),
+            "content 是压缩 JSON 字符串：{:?}",
+            request.json_body
+        );
+        assert_eq!(transport.call_count(), 1, "评论非幂等，成功一次即止");
+    }
+
+    #[tokio::test]
+    async fn create_comment_maps_instance_not_found_to_its_own_failure_kind() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":1390003,"msg":"instance not found"}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let failure = create_instance_comment(
+            &transport,
+            &fake_tokens(),
+            "INST-GONE",
+            "ou_ops",
+            "test",
+            &[],
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("实例不存在必须失败"));
+        assert_eq!(failure.kind, FailureKind::InstanceNotFound);
+        assert_eq!(transport.call_count(), 1, "非幂等评论不得自动重发");
+    }
+
+    #[tokio::test]
+    async fn list_comments_reads_comment_list_and_item_aliases() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{"comment_list":[
+                {"id":"c1","content":"【支付回填】rec1\n支付ID：x"},
+                {"comment_id":"c2","content":{"text":"其他评论"}}
+            ],"has_more":false}}"#
+                .to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let comments =
+            list_instance_comments(&transport, &NoopSleeper, &fake_tokens(), "INST-1", "ou_ops")
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, "c1");
+        assert!(comments[0].content.contains("【支付回填】rec1"));
+        assert_eq!(comments[1].id, "c2");
+        assert!(comments[1].content.contains("其他评论"));
+
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出查询请求"));
+        assert_eq!(request.method, OutboundMethod::Get);
+        assert!(request
+            .query
+            .contains(&("user_id".to_string(), "ou_ops".to_string())));
+    }
+
+    #[tokio::test]
+    async fn list_comments_fails_closed_when_has_more_has_no_page_token() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{"comments":[
+                {"id":"c1","content":"【支付回填】rec1"}
+            ],"has_more":true}}"#
+                .to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let failure =
+            list_instance_comments(&transport, &NoopSleeper, &fake_tokens(), "INST-1", "ou_ops")
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("翻页异常必须失败，不能返回可能缺标记的部分列表"));
+        assert!(matches!(failure.kind, FailureKind::Fatal { code: 0 }));
+        assert!(failure.message.contains("翻页异常"), "{}", failure.message);
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_comments_fails_closed_when_page_token_repeats() {
+        let page =
+            r#"{"code":0,"msg":"ok","data":{"comments":[],"has_more":true,"page_token":"T"}}"#;
+        let transport = ScriptedTransport::new(vec![
+            Ok(OutboundResponse {
+                status: 200,
+                body: page.to_string(),
+                bytes: None,
+                headers: BTreeMap::new(),
+            }),
+            Ok(OutboundResponse {
+                status: 200,
+                body: page.to_string(),
+                bytes: None,
+                headers: BTreeMap::new(),
+            }),
+        ]);
+        let failure =
+            list_instance_comments(&transport, &NoopSleeper, &fake_tokens(), "INST-1", "ou_ops")
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("重复 page_token 必须失败，不能死循环或返回部分列表"));
+        assert!(matches!(failure.kind, FailureKind::Fatal { code: 0 }));
+        assert!(
+            failure.message.contains("重复 page_token"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(transport.call_count(), 2, "第二次取到重复 token 即停止");
+    }
+
+    #[tokio::test]
+    async fn bitable_subscription_uses_the_drive_file_endpoint() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{}}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        subscribe_bitable_file(&transport, &NoopSleeper, &fake_tokens(), "bascn123")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出订阅请求"));
+        assert_eq!(request.method, OutboundMethod::Post);
+        assert!(
+            request
+                .url
+                .ends_with("/open-apis/drive/v1/files/bascn123/subscribe"),
+            "{}",
+            request.url
+        );
+        assert!(
+            request
+                .query
+                .contains(&("file_type".to_string(), "bitable".to_string())),
+            "{:?}",
+            request.query
+        );
+    }
+
+    #[tokio::test]
+    async fn already_subscribed_is_treated_as_success() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 400,
+            body: r#"{"code":1390007,"msg":"subscription existed"}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        assert!(
+            subscribe_bitable_file(&transport, &NoopSleeper, &fake_tokens(), "bascn123")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_subscription_parses_is_subscribed() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{"is_subscribed":true}}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let subscribed =
+            get_bitable_subscription(&transport, &NoopSleeper, &fake_tokens(), "bascn123")
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+        assert!(subscribed);
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出查询请求"));
+        assert_eq!(request.method, OutboundMethod::Get);
+        assert!(
+            request
+                .url
+                .ends_with("/open-apis/drive/v1/files/bascn123/get_subscribe"),
+            "{}",
+            request.url
+        );
     }
 }

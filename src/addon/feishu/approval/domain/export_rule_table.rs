@@ -77,6 +77,9 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             status_field_name => Str::new().title("状态列名").max_length(255),
             //JSON：有效/已退回/已拒绝/已撤回/已撤销/已删除 的文案。
             status_labels_json => Text::new().title("状态文案 JSON"),
+            //JSON：审批评论配置（字段、触发值、状态列、作者、评论模板）。
+            //可空 = 该规则不启用「评论审批实例」能力。
+            comment_config_json => Text::new().title("审批评论配置 JSON"),
             mark_enabled => Switch::new()
                 .title("启用标记")
                 .require(true)

@@ -66,6 +66,10 @@ pub(crate) fn build_addon(
     .module(approval::build_export_rule_module()?)
     .module(approval::build_export_field_map_module()?)
     .module(approval::build_export_run_module()?)
+    // 审批评论运行台账 + 多维表格事件缓冲：各一张表，读写由评论 Action / worker
+    // 经 `FeishuContext` 跨表完成。
+    .module(approval::build_comment_run_module()?)
+    .module(approval::build_bitable_event_module()?)
     // 回写控制台：独立于审批派发的侧边栏入口，Action 与运行台账都不再挂在
     // `feishu.approval` 下。
     .module(approval_export::build_module(
@@ -172,6 +176,14 @@ pub(crate) fn build_context(
         ),
         Repository::new(
             approval::domain::export_run_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::comment_run_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::bitable_event_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         password_engine,

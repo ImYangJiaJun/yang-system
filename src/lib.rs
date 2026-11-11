@@ -9,6 +9,6 @@ mod infrastructure;
 pub(crate) use infrastructure::db;
 
 pub use infrastructure::{
-    audit, authorization, feishu_approval_export_worker, feishu_approval_worker,
-    feishu_event_worker, feishu_oauth_reminder, feishu_pull, schema,
+    audit, authorization, feishu_approval_comment_worker, feishu_approval_export_worker,
+    feishu_approval_worker, feishu_event_worker, feishu_oauth_reminder, feishu_pull, schema,
 };

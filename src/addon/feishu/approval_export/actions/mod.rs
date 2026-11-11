@@ -4,14 +4,18 @@
 //! 这里。只读本库的 5 个 Action 无条件注册；需要打飞书的 4 个 Action 与派发
 //! 端点同一条 `can_pull()` 门禁——缺凭证时 404，比「注册出来永远失败」语义更准。
 
+pub(super) mod export_check_comment;
 pub(super) mod export_check_rules;
 pub(super) mod export_create_rule;
 pub(super) mod export_delete_rule;
 pub(super) mod export_force_recreate;
+pub(super) mod export_list_comment_runs;
 pub(super) mod export_list_rules;
 pub(super) mod export_list_runs;
 pub(super) mod export_preview;
+pub(super) mod export_retry_comment_run;
 pub(super) mod export_retry_run;
+pub(super) mod export_test_comment;
 pub(super) mod export_update_rule;
 
 use std::sync::Arc;
@@ -34,6 +38,9 @@ pub(super) fn register_all(
     let module = export_delete_rule::register(module, Arc::clone(&context));
     let module = export_retry_run::register(module, Arc::clone(&context));
     let module = export_force_recreate::register(module, Arc::clone(&context));
+    // 评论台账的查询与人工重试同样只读写本库。
+    let module = export_list_comment_runs::register(module, Arc::clone(&context));
+    let module = export_retry_comment_run::register(module, Arc::clone(&context));
 
     let Some(settings) = settings.filter(|value| value.can_pull()) else {
         return Ok(module);
@@ -45,7 +52,10 @@ pub(super) fn register_all(
     let module = export_create_rule::register(module, Arc::clone(&context));
     let module = export_update_rule::register(module, Arc::clone(&context));
     let module = export_check_rules::register(module, Arc::clone(&context));
-    let module = export_preview::register(module, context);
+    let module = export_preview::register(module, Arc::clone(&context));
+    // 评论体检与试发都要打飞书（目标列 / 订阅状态 / 评论接口）。
+    let module = export_check_comment::register(module, Arc::clone(&context));
+    let module = export_test_comment::register(module, context);
     Ok(module)
 }
 
@@ -63,6 +73,8 @@ mod tests {
         "/api/v1/feishu/approval/export/rules/delete",
         "/api/v1/feishu/approval/export/runs/retry",
         "/api/v1/feishu/approval/export/runs/force-recreate",
+        "/api/v1/feishu/approval/export/comment/runs/query",
+        "/api/v1/feishu/approval/export/comment/runs/retry",
     ];
 
     const GATED_ROUTES: &[&str] = &[
@@ -70,6 +82,8 @@ mod tests {
         "/api/v1/feishu/approval/export/rules/update",
         "/api/v1/feishu/approval/export/rules/check",
         "/api/v1/feishu/approval/export/preview",
+        "/api/v1/feishu/approval/export/comment/check",
+        "/api/v1/feishu/approval/export/comment/test",
     ];
 
     fn registered_module(with_credentials: bool) -> ModuleSpec {
@@ -106,6 +120,8 @@ mod tests {
                 crate::addon::feishu::approval::domain::export_field_map_table::table_spec(),
             ),
             repository(crate::addon::feishu::approval::domain::export_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::comment_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::bitable_event_table::table_spec()),
             Arc::new(
                 yang_base::action::auth::PasswordEngine::new(1)
                     .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),

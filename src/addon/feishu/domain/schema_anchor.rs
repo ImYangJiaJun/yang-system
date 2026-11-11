@@ -181,6 +181,25 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "approval_export_runs()",
         ),
+        // 评论回写台账与多维表格事件缓冲。登记后评论 Action / worker 的查询
+        // 进入严格档；分开建表（而不是复用 export_run/approval_event）是因为
+        // 两者各有独立状态机与认领游标。
+        (
+            "feishu_approval_comment_run",
+            spec(
+                crate::addon::feishu::approval::domain::comment_run_table::table_spec(),
+                "审批评论运行",
+            ),
+            "approval_comment_runs()",
+        ),
+        (
+            "feishu_bitable_event",
+            spec(
+                crate::addon::feishu::approval::domain::bitable_event_table::table_spec(),
+                "多维表格事件",
+            ),
+            "bitable_events()",
+        ),
     ]
 }
 
@@ -1041,6 +1060,12 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // `approval_export_rules()` / `approval_export_field_maps()` /
         // `approval_export_runs()` 上，仍在严格档。
         "infrastructure/feishu_approval_export_worker.rs",
+        // 评论 worker 与回写 worker 同形：`Record::new()` + 逐列 `insert` 之后
+        // 才挂到 `runner.context.approval_comment_runs()` 上，语句级锚点丢失，
+        // `insert:*` 退宽松档；查询站点（where_eq/where_in/order_by）仍严格。
+        // 用到的列都在 `feishu_approval_comment_run` / `feishu_bitable_event`
+        // 声明上，缺口由两张表声明的单测与状态机单测钉住。
+        "infrastructure/feishu_approval_comment_worker.rs",
     ]
     .into_iter()
     .collect();

@@ -53,8 +53,10 @@ import {
   EXPORT_CONVERTER_OPTIONS,
   EXPORT_SYSTEM_KEY_OPTIONS,
   EXPORT_WRITABLE_FIELD_TYPES,
+  defaultApprovalCommentConfig,
   parseApprovalDefinitionInput,
   parseBitableLink,
+  type ApprovalCommentConfig,
   type ApprovalExportCondition,
   type ApprovalExportConditionItem,
   type ApprovalExportConditionOp,
@@ -389,6 +391,10 @@ export function ApprovalExportRuleDialog({
   const [statusField, setStatusField] = useState(
     initialRule?.statusField ?? "",
   );
+  // 支付评论配置。解析失败时后端给 null 但保留原串：界面从默认值起步并提示覆盖。
+  const [commentConfig, setCommentConfig] = useState<ApprovalCommentConfig>(
+    () => initialRule?.commentConfig ?? defaultApprovalCommentConfig(),
+  );
 
   // ⑤ 字段映射
   const [maps, setMaps] = useState<MapDraft[]>(() =>
@@ -472,6 +478,118 @@ export function ApprovalExportRuleDialog({
     tableId.trim() !== "" ? tableId : (parsedCoordinate?.tableId ?? "")
   ).trim();
 
+  function patchCommentConfig(patch: Partial<ApprovalCommentConfig>) {
+    setCommentConfig((current) => ({ ...current, ...patch }));
+  }
+
+  function commentFieldLabel(fieldId: string): string {
+    return (
+      commentConfig.fieldNames[fieldId]?.trim() ||
+      fields.find((field) => field.fieldId === fieldId)?.fieldName?.trim() ||
+      fieldId
+    );
+  }
+
+  /// 勾选评论展示字段：同步维护缓存列名，并把不属于集合的必填 / 触发引用剪掉。
+  function toggleCommentField(fieldId: string, checked: boolean) {
+    setCommentConfig((current) => {
+      const fieldIds = checked
+        ? Array.from(new Set([...current.fieldIds, fieldId]))
+        : current.fieldIds.filter((id) => id !== fieldId);
+      const field = fields.find((item) => item.fieldId === fieldId);
+      const fieldNames = { ...current.fieldNames };
+      if (checked && field) fieldNames[fieldId] = field.fieldName;
+      if (!checked) delete fieldNames[fieldId];
+      const triggerFieldId =
+        current.triggerFieldId !== null &&
+        fieldIds.includes(current.triggerFieldId)
+          ? current.triggerFieldId
+          : null;
+      return {
+        ...current,
+        fieldIds,
+        fieldNames,
+        requiredFieldIds: current.requiredFieldIds.filter((id) =>
+          fieldIds.includes(id),
+        ),
+        triggerFieldId,
+        triggerValues: triggerFieldId === null ? [] : current.triggerValues,
+      };
+    });
+  }
+
+  function toggleRequiredField(fieldId: string, checked: boolean) {
+    setCommentConfig((current) => ({
+      ...current,
+      requiredFieldIds: checked
+        ? [...current.requiredFieldIds, fieldId]
+        : current.requiredFieldIds.filter((id) => id !== fieldId),
+    }));
+  }
+
+  /// 字段列表未拉取时的兜底：逗号 / 空格分隔的 field_id 手填。
+  function setCommentFieldIdsFromText(text: string) {
+    const fieldIds = Array.from(
+      new Set(
+        text
+          .split(/[,，\s]+/)
+          .map((part) => part.trim())
+          .filter((part) => part !== ""),
+      ),
+    );
+    setCommentConfig((current) => {
+      const triggerFieldId =
+        current.triggerFieldId !== null &&
+        fieldIds.includes(current.triggerFieldId)
+          ? current.triggerFieldId
+          : null;
+      return {
+        ...current,
+        fieldIds,
+        fieldNames: Object.fromEntries(
+          Object.entries(current.fieldNames).filter(([id]) =>
+            fieldIds.includes(id),
+          ),
+        ),
+        requiredFieldIds: current.requiredFieldIds.filter((id) =>
+          fieldIds.includes(id),
+        ),
+        triggerFieldId,
+        triggerValues: triggerFieldId === null ? [] : current.triggerValues,
+      };
+    });
+  }
+
+  function setTriggerValuesFromText(text: string) {
+    patchCommentConfig({
+      triggerValues: text
+        .split(/\r?\n/)
+        .map((part) => part.trim())
+        .filter((part) => part !== ""),
+    });
+  }
+
+  const commentFieldsMissing = commentConfig.fieldIds.filter(
+    (fieldId) => !fields.some((field) => field.fieldId === fieldId),
+  );
+  const commentConfigReady =
+    !commentConfig.enabled ||
+    (commentConfig.fieldIds.length > 0 &&
+      commentConfig.requiredFieldIds.every((id) =>
+        commentConfig.fieldIds.includes(id),
+      ) &&
+      (commentConfig.triggerFieldId === null ||
+        (commentConfig.fieldIds.includes(commentConfig.triggerFieldId) &&
+          commentConfig.triggerValues.length > 0)) &&
+      commentConfig.statusFieldId.trim() !== "" &&
+      commentConfig.authorUserId.trim() !== "" &&
+      commentConfig.statusLabels.commented.trim() !== "" &&
+      commentConfig.statusLabels.failed.trim() !== "" &&
+      commentConfig.prefix.trim() !== "" &&
+      ["{base_token}", "{table_id}", "{record_id}"].every((placeholder) =>
+        commentConfig.recordUrlTemplate.includes(placeholder),
+      ));
+
   const stepReady: Record<Step, boolean> = {
     1:
       title.trim() !== "" &&
@@ -483,7 +601,8 @@ export function ApprovalExportRuleDialog({
     4:
       effectiveBaseToken !== "" &&
       effectiveTableId !== "" &&
-      (!markEnabled || statusField.trim() !== ""),
+      (!markEnabled || statusField.trim() !== "") &&
+      commentConfigReady,
     5: maps.length > 0 && maps.every(mapDraftReady),
     6: true,
   };
@@ -612,6 +731,16 @@ export function ApprovalExportRuleDialog({
       statusField: markEnabled ? statusField : null,
       markEnabled,
       enabled,
+      // 新规则未启用评论时不写该列；已有配置（含停用 / 解析失败）始终回写，
+      // 避免一次无关编辑把原配置悄悄清掉。
+      commentConfig:
+        commentConfig.enabled ||
+        (initialRule?.commentConfigJson ?? null) !== null
+          ? {
+              ...commentConfig,
+              triggerFieldId: commentConfig.triggerFieldId?.trim() || null,
+            }
+          : null,
       maps: maps.map((map) => ({
         sourceKind: map.sourceKind,
         sourceWidgetId:
@@ -693,7 +822,7 @@ export function ApprovalExportRuleDialog({
                 : step === 3
                   ? "条件为空表示恒真；行级条件按明细行逐行求值。"
                   : step === 4
-                    ? "选择目标 Base / 数据表与状态标记列（文本或单选列）。"
+                    ? "选择目标 Base / 数据表、状态标记列与支付评论配置。"
                     : step === 5
                       ? "每条映射把审批里的一个来源写到目标表的一列。"
                       : "先保存，再用一个真实实例 Code 试算。试算只读，可反复执行。"}
@@ -1055,6 +1184,348 @@ export function ApprovalExportRuleDialog({
                 ) : null}
               </div>
             ) : null}
+
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium">支付评论</p>
+                  <p className="text-xs text-muted-foreground">
+                    回写成功后按目标表字段生成一条审批评论，并把状态写回状态列。
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={commentConfig.enabled}
+                    onCheckedChange={(checked) =>
+                      patchCommentConfig({ enabled: checked === true })
+                    }
+                  />
+                  启用支付评论
+                </label>
+              </div>
+              {initialRule?.commentConfig === null &&
+              initialRule.commentConfigJson !== null ? (
+                <p role="alert" className="text-xs text-destructive">
+                  原评论配置 JSON 无法解析，当前按默认值展示；保存会覆盖它。
+                </p>
+              ) : null}
+              {commentConfig.enabled ? (
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label>评论展示字段（至少一个）</Label>
+                    {fields.length > 0 ? (
+                      <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                        {fields.map((field) => (
+                          <label
+                            key={field.fieldId}
+                            className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                          >
+                            <Checkbox
+                              checked={commentConfig.fieldIds.includes(
+                                field.fieldId,
+                              )}
+                              onCheckedChange={(checked) =>
+                                toggleCommentField(
+                                  field.fieldId,
+                                  checked === true,
+                                )
+                              }
+                            />
+                            <span>{field.fieldName}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {field.fieldId}
+                            </span>
+                          </label>
+                        ))}
+                        {commentFieldsMissing.map((fieldId) => (
+                          <label
+                            key={fieldId}
+                            className="flex items-center gap-2 rounded px-1 py-1 text-sm"
+                          >
+                            <Checkbox
+                              checked
+                              onCheckedChange={(checked) =>
+                                toggleCommentField(fieldId, checked === true)
+                              }
+                            />
+                            <span>{commentFieldLabel(fieldId)}</span>
+                            <span className="text-xs text-destructive">
+                              不在当前字段列表
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <Input
+                          aria-label="评论展示字段 field_id"
+                          value={commentConfig.fieldIds.join(", ")}
+                          onChange={(event) =>
+                            setCommentFieldIdsFromText(event.target.value)
+                          }
+                          placeholder="fld…，逗号分隔"
+                          autoComplete="off"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          先点上方「拉取字段」可从列表勾选；也可手填 field_id。
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {commentConfig.fieldIds.length > 0 ? (
+                    <>
+                      <div className="space-y-1.5">
+                        <Label>必填字段（任一为空则本条评论跳过）</Label>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          {commentConfig.fieldIds.map((fieldId) => (
+                            <label
+                              key={fieldId}
+                              className="flex items-center gap-2 text-sm"
+                            >
+                              <Checkbox
+                                checked={commentConfig.requiredFieldIds.includes(
+                                  fieldId,
+                                )}
+                                onCheckedChange={(checked) =>
+                                  toggleRequiredField(fieldId, checked === true)
+                                }
+                              />
+                              {commentFieldLabel(fieldId)}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label>触发字段（可选）</Label>
+                          <Select
+                            value={commentConfig.triggerFieldId ?? NONE}
+                            onValueChange={(value) =>
+                              patchCommentConfig({
+                                triggerFieldId: value === NONE ? null : value,
+                                triggerValues:
+                                  value === NONE
+                                    ? []
+                                    : commentConfig.triggerValues,
+                              })
+                            }
+                          >
+                            <SelectTrigger
+                              aria-label="评论触发字段"
+                              className="w-full"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value={NONE}>不设触发字段</SelectItem>
+                              {commentConfig.fieldIds.map((fieldId) => (
+                                <SelectItem key={fieldId} value={fieldId}>
+                                  {commentFieldLabel(fieldId)}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-trigger-values">
+                            触发值（每行一个，可多个）
+                          </Label>
+                          <textarea
+                            id="export-comment-trigger-values"
+                            className="min-h-16 w-full rounded-md border bg-transparent px-2 py-1 text-sm"
+                            value={commentConfig.triggerValues.join("\n")}
+                            disabled={commentConfig.triggerFieldId === null}
+                            onChange={(event) =>
+                              setTriggerValuesFromText(event.target.value)
+                            }
+                            placeholder={"例如：\n支付成功"}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label>审批评论状态列（单选）</Label>
+                          {fields.length > 0 ? (
+                            <Select
+                              value={
+                                commentConfig.statusFieldId === ""
+                                  ? NONE
+                                  : commentConfig.statusFieldId
+                              }
+                              onValueChange={(value) => {
+                                const fieldId = value === NONE ? "" : value;
+                                const field = fields.find(
+                                  (item) => item.fieldId === fieldId,
+                                );
+                                patchCommentConfig({
+                                  statusFieldId: fieldId,
+                                  statusFieldName: field?.fieldName ?? "",
+                                });
+                              }}
+                            >
+                              <SelectTrigger
+                                aria-label="审批评论状态列"
+                                className="w-full"
+                              >
+                                <SelectValue placeholder="选择状态列" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value={NONE}>未选择</SelectItem>
+                                {commentConfig.statusFieldId !== "" &&
+                                !fields.some(
+                                  (field) =>
+                                    field.fieldId ===
+                                      commentConfig.statusFieldId &&
+                                    field.type === 3,
+                                ) ? (
+                                  <SelectItem
+                                    value={commentConfig.statusFieldId}
+                                  >
+                                    已不在单选列中（
+                                    {commentConfig.statusFieldId}）
+                                  </SelectItem>
+                                ) : null}
+                                {fields
+                                  .filter((field) => field.type === 3)
+                                  .map((field) => (
+                                    <SelectItem
+                                      key={field.fieldId}
+                                      value={field.fieldId}
+                                    >
+                                      {field.fieldName}（{field.fieldId}）
+                                    </SelectItem>
+                                  ))}
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <Input
+                              aria-label="审批评论状态列 field_id"
+                              value={commentConfig.statusFieldId}
+                              onChange={(event) =>
+                                patchCommentConfig({
+                                  statusFieldId: event.target.value,
+                                })
+                              }
+                              placeholder="单选列 field_id"
+                              autoComplete="off"
+                            />
+                          )}
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-author">
+                            评论作者 open_id
+                          </Label>
+                          <Input
+                            id="export-comment-author"
+                            value={commentConfig.authorUserId}
+                            onChange={(event) =>
+                              patchCommentConfig({
+                                authorUserId: event.target.value,
+                              })
+                            }
+                            placeholder="ou_…"
+                            autoComplete="off"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-label-commented">
+                            已评论文案
+                          </Label>
+                          <Input
+                            id="export-comment-label-commented"
+                            value={commentConfig.statusLabels.commented}
+                            onChange={(event) =>
+                              patchCommentConfig({
+                                statusLabels: {
+                                  ...commentConfig.statusLabels,
+                                  commented: event.target.value,
+                                },
+                              })
+                            }
+                            autoComplete="off"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-label-failed">
+                            评论失败文案
+                          </Label>
+                          <Input
+                            id="export-comment-label-failed"
+                            value={commentConfig.statusLabels.failed}
+                            onChange={(event) =>
+                              patchCommentConfig({
+                                statusLabels: {
+                                  ...commentConfig.statusLabels,
+                                  failed: event.target.value,
+                                },
+                              })
+                            }
+                            autoComplete="off"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-prefix">
+                            评论前缀
+                          </Label>
+                          <Input
+                            id="export-comment-prefix"
+                            value={commentConfig.prefix}
+                            onChange={(event) =>
+                              patchCommentConfig({
+                                prefix: event.target.value,
+                              })
+                            }
+                            placeholder="【支付回填】"
+                            autoComplete="off"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="export-comment-url-template">
+                            记录链接模板
+                          </Label>
+                          <Input
+                            id="export-comment-url-template"
+                            value={commentConfig.recordUrlTemplate}
+                            onChange={(event) =>
+                              patchCommentConfig({
+                                recordUrlTemplate: event.target.value,
+                              })
+                            }
+                            placeholder="https://租户域名/base/{base_token}?table={table_id}&record={record_id}"
+                            autoComplete="off"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            必须含 {"{base_token}"} / {"{table_id}"} /{" "}
+                            {"{record_id}"} 三个占位符。
+                          </p>
+                        </div>
+                      </div>
+
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={commentConfig.includeAttachments}
+                          onCheckedChange={(checked) =>
+                            patchCommentConfig({
+                              includeAttachments: checked === true,
+                            })
+                          }
+                        />
+                        把展示字段中的附件加入评论
+                      </label>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -1400,6 +1871,16 @@ export function ApprovalExportRuleDialog({
               <p>
                 目标：{effectiveBaseToken} / {effectiveTableId}
                 {markEnabled ? ` · 状态列 ${statusField}` : " · 不维护状态列"}
+              </p>
+              <p>
+                支付评论：
+                {commentConfig.enabled
+                  ? `已启用 · 状态列 ${
+                      commentConfig.statusFieldName ||
+                      commentConfig.statusFieldId ||
+                      "未选择"
+                    } · ${commentConfig.fieldIds.length} 个展示字段`
+                  : "未启用"}
               </p>
               <p>映射：{maps.length} 条</p>
             </div>

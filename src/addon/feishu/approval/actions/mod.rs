@@ -167,6 +167,8 @@ mod tests {
                 crate::addon::feishu::approval::domain::export_field_map_table::table_spec(),
             ),
             repository(crate::addon::feishu::approval::domain::export_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::comment_run_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::bitable_event_table::table_spec()),
             Arc::new(
                 yang_base::action::auth::PasswordEngine::new(1)
                     .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),

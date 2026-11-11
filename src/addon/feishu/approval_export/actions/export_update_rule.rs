@@ -20,7 +20,8 @@ use yang_db::{field, table, CompareOp, QueryBuilder};
 use crate::addon::feishu::approval_export::actions::export_create_rule::{
     config_error, fill_rule_record, json_text, map_insert_error, truncate_chars, ExportMapInput,
 };
-use crate::addon::feishu::domain::approval::subscribe_approval;
+use crate::addon::feishu::domain::approval::{subscribe_approval, subscribe_bitable_file};
+use crate::addon::feishu::domain::approval_comment::parse_comment_config;
 use crate::addon::feishu::domain::approval_export::config::{
     validate_export_rule, ExportFieldMapDraft, ExportRuleDraft,
 };
@@ -59,6 +60,9 @@ pub(super) struct UpdateExportRuleInput {
     pub(super) mark_enabled: bool,
     #[serde(default = "default_true")]
     pub(super) enabled: bool,
+    /// 审批评论配置；缺省 = 不启用评论。
+    #[serde(default)]
+    pub(super) comment_config: Option<serde_json::Value>,
     pub(super) maps: Vec<ExportMapInput>,
 }
 
@@ -95,6 +99,7 @@ impl UpdateExportRuleInput {
             status_labels_json: json_text(self.status_labels.as_ref()),
             mark_enabled: self.mark_enabled,
             enabled: self.enabled,
+            comment_config_json: json_text(self.comment_config.as_ref()),
             maps: self
                 .maps
                 .into_iter()
@@ -130,6 +135,20 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .register()
 }
 
+/// 未传 `comment_config` 表示「不修改」：保留库内现配置。
+///
+/// 全量保存若把 `None` 直接写成 NULL，客户端漏传一个可选字段就会静默清空
+/// 已有评论配置。显式停用请传 `{"enabled": false, ...}`。
+fn keep_existing_comment_config(
+    comment_config_provided: bool,
+    existing: Option<String>,
+    draft: &mut ExportRuleDraft,
+) {
+    if !comment_config_provided {
+        draft.comment_config_json = existing;
+    }
+}
+
 pub(super) async fn handle(
     ctx: ActionContext,
     input: UpdateExportRuleInput,
@@ -138,17 +157,36 @@ pub(super) async fn handle(
     input.validate_id()?;
     // `into_draft` 按值消费输入；主键先取出来，后面的更新与响应都还用它。
     let rule_id = input.rule_id;
+    let comment_config_provided = input.comment_config.is_some();
 
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
         return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
     };
     let outbound = outbound_setup::build(&ctx, settings)?;
 
+    let existing_comment_config = if comment_config_provided {
+        None
+    } else {
+        let existing = context
+            .approval_export_rules()
+            .query()
+            .select_fields(&["comment_config_json"])?
+            .where_eq("id", serde_json::json!(rule_id))?
+            .optional()
+            .await?;
+        match existing {
+            Some(row) => row.optional::<String>("comment_config_json")?,
+            None => None,
+        }
+    };
+    let mut draft = input.into_draft();
+    keep_existing_comment_config(comment_config_provided, existing_comment_config, &mut draft);
+
     let validated = validate_export_rule(
         outbound.transport(),
         outbound.sleeper(),
         &outbound.tokens,
-        &input.into_draft(),
+        &draft,
     )
     .await
     .map_err(config_error)?;
@@ -301,6 +339,27 @@ pub(super) async fn handle(
         );
     }
 
+    if parse_comment_config(validated.comment_config_json.as_deref())
+        .ok()
+        .flatten()
+        .is_some_and(|config| config.enabled)
+    {
+        if let Err(failure) = subscribe_bitable_file(
+            outbound.transport(),
+            outbound.sleeper(),
+            &outbound.tokens,
+            &validated.target_base_token,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %failure.message,
+                base_token = %validated.target_base_token,
+                "回写规则已更新，但多维表格事件订阅失败（worker 启动时会重订）"
+            );
+        }
+    }
+
     tracing::debug!(
         rule_id,
         approval_code = %validated.approval_code,
@@ -327,6 +386,28 @@ mod tests {
         assert!(input.validate_id().is_err());
         input.rule_id = 5;
         assert!(input.validate_id().is_ok());
+    }
+
+    #[test]
+    fn omitted_comment_config_preserves_the_stored_one() {
+        let mut draft = ExportRuleDraft::default();
+        keep_existing_comment_config(false, Some("{\"enabled\":false}".to_string()), &mut draft);
+        assert_eq!(
+            draft.comment_config_json.as_deref(),
+            Some("{\"enabled\":false}"),
+            "漏传 comment_config 不能清空已有配置"
+        );
+
+        let mut draft = ExportRuleDraft {
+            comment_config_json: Some("{\"enabled\":true}".to_string()),
+            ..ExportRuleDraft::default()
+        };
+        keep_existing_comment_config(true, Some("{\"enabled\":false}".to_string()), &mut draft);
+        assert_eq!(
+            draft.comment_config_json.as_deref(),
+            Some("{\"enabled\":true}"),
+            "显式传入（含显式停用）时必须用客户端的值"
+        );
     }
 
     #[test]

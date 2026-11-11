@@ -144,6 +144,12 @@ pub(super) async fn handle(
         }
     };
 
+    // v2.0 事件：验签材料在 `header.token`，事件身份在 `header.event_id`。
+    // 必须在 v1 的顶层 `token` 校验之前分流，否则 v2 恒定 401。
+    if is_v2_event(&event_body) {
+        return handle_v2(ctx, event_body, context, verification_token.as_deref()).await;
+    }
+
     // 验签 fail-closed：缺 Token 或不匹配一律拒绝；比较走常数时间。
     let Some(expected_token) = verification_token.as_deref() else {
         return Err(BaseError::ConfigError(
@@ -291,6 +297,285 @@ pub(super) async fn handle(
     }
 }
 
+// ---------------------------------------------------------------------------
+// v2.0 事件（多维表格记录变更）
+// ---------------------------------------------------------------------------
+
+/// 只处理的 v2 事件类型；其余事件验签后 200 忽略。
+pub(super) const BITABLE_RECORD_CHANGED_EVENT: &str = "drive.file.bitable_record_changed_v1";
+
+/// 是否 v2.0 事件：顶层 `schema == "2.0"` 或存在带 `event_id` 的 `header`。
+///
+/// challenge 请求没有 `header`，不会被误判；控制台只有一个回调 URL，v2 事件
+/// 可能落到 `/event/challenge`，因此两端点共用本判据。
+pub(super) fn is_v2_event(body: &Value) -> bool {
+    body.get("schema").and_then(Value::as_str) == Some("2.0")
+        || body
+            .get("header")
+            .and_then(Value::as_object)
+            .is_some_and(|header| header.get("event_id").is_some())
+}
+
+/// 解析后的 v2 事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParsedV2Event {
+    pub(super) event_id: String,
+    pub(super) event_type: String,
+    pub(super) file_token: String,
+    pub(super) table_id: String,
+    pub(super) record_id: String,
+    pub(super) action: String,
+    pub(super) changed_field_ids: Option<String>,
+    /// 已删除 `header.token` / 顶层 `token` 的报文。
+    pub(super) redacted_payload: String,
+}
+
+/// 校验 v2 事件并提取落表字段。
+///
+/// **认证材料在序列化前删除**：`raw_payload` 会进数据库与备份，绝不能带 token。
+/// 返回 `Ok(None)` 表示事件类型不处理（调用方回 200 让飞书停止重推）。
+pub(super) fn parse_v2_event(
+    body: &mut Value,
+    expected_token: Option<&str>,
+) -> Result<Option<ParsedV2Event>, BaseError> {
+    let Some(expected_token) = expected_token else {
+        return Err(BaseError::Unauthorized(
+            "飞书事件 verification_token 未配置".to_string(),
+        ));
+    };
+    let header = body
+        .get_mut("header")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            BaseError::ValidationFailed("header".into(), "v2.0 事件缺少 header".into())
+        })?;
+    let actual_token = header
+        .get("token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !tokens_equal(actual_token, expected_token) {
+        return Err(BaseError::Unauthorized(
+            "飞书 v2.0 事件 header.token 不匹配".to_string(),
+        ));
+    }
+    // 先把 token 从报文里摘掉，后面任何序列化都不会带上它。
+    header.remove("token");
+
+    let event_id = header
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let event_type = header
+        .get("event_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if event_id.is_empty()
+        || event_id.chars().count() > 128
+        || event_type.is_empty()
+        || event_type.chars().count() > 64
+    {
+        return Err(BaseError::ValidationFailed(
+            "header".into(),
+            "v2.0 事件必须包含非空 header.event_id（≤128）与 header.event_type（≤64）".into(),
+        ));
+    }
+
+    // v1 遗留的顶层 token 一并删除（防止旧格式混入）。
+    if let Some(object) = body.as_object_mut() {
+        object.remove("token");
+    }
+
+    if event_type != BITABLE_RECORD_CHANGED_EVENT {
+        return Ok(None);
+    }
+
+    let event = body
+        .get("event")
+        .and_then(Value::as_object)
+        .ok_or_else(|| BaseError::ValidationFailed("event".into(), "v2.0 事件缺少 event".into()))?;
+    let file_token = event
+        .get("file_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let table_id = event
+        .get("table_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let record_id = event
+        .get("record_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let action = event
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if file_token.is_empty()
+        || file_token.chars().count() > 128
+        || table_id.is_empty()
+        || table_id.chars().count() > 64
+        || record_id.is_empty()
+        || record_id.chars().count() > 64
+        || action.is_empty()
+        || action.chars().count() > 32
+    {
+        return Err(BaseError::ValidationFailed(
+            "event".into(),
+            "多维表格事件必须包含 file_token（≤128）、table_id（≤64）、record_id（≤64）与 action（≤32）"
+                .into(),
+        ));
+    }
+
+    let changed_field_ids = extract_changed_field_ids(event);
+    let redacted_payload = body.to_string();
+    Ok(Some(ParsedV2Event {
+        event_id,
+        event_type,
+        file_token,
+        table_id,
+        record_id,
+        action,
+        changed_field_ids,
+        redacted_payload,
+    }))
+}
+
+/// 变更字段 id 列表：兼容 `changed_fields` / `changed_field_ids` / `field_ids`
+/// 三种上游键，元素可以是字符串或 `{field_id}` / `{id}` 对象。
+///
+/// 缺键返回 `None`（不是空数组）：worker 据此区分「上游没给」与「给了空列表」，
+/// 前者不能用「没有相关字段」去过滤。
+fn extract_changed_field_ids(event: &serde_json::Map<String, Value>) -> Option<String> {
+    for key in ["changed_field_ids", "changed_fields", "field_ids"] {
+        let Some(value) = event.get(key) else {
+            continue;
+        };
+        let items = match value {
+            Value::Array(items) => items,
+            Value::String(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return Some("[]".to_string());
+                }
+                // 某些租户把列表直接序列化成 JSON 字符串。
+                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                    return extract_changed_field_ids_from_value(&parsed);
+                }
+                return Some(serde_json::json!([text]).to_string());
+            }
+            _ => return None,
+        };
+        let mut ids = Vec::new();
+        for item in items {
+            let id = match item {
+                Value::String(text) => text.trim().to_string(),
+                Value::Object(object) => object
+                    .get("field_id")
+                    .or_else(|| object.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                _ => String::new(),
+            };
+            if !id.is_empty() {
+                ids.push(id);
+            }
+        }
+        return Some(serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()));
+    }
+    None
+}
+
+fn extract_changed_field_ids_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(_) => {
+            let mut object = serde_json::Map::new();
+            object.insert("changed_field_ids".to_string(), value.clone());
+            extract_changed_field_ids(&object)
+        }
+        _ => None,
+    }
+}
+
+/// 处理 v2.0 事件：验签 → 落缓冲表 → 200。
+async fn handle_v2(
+    _ctx: ActionContext,
+    mut body: Value,
+    context: FeishuContext,
+    verification_token: Option<&str>,
+) -> Result<ResponseBody, BaseError> {
+    let Some(parsed) = parse_v2_event(&mut body, verification_token)? else {
+        tracing::debug!("v2.0 事件类型不在评论关注范围内，已忽略");
+        return raw_json(serde_json::json!({"success": true, "ignored": true}));
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut record = yang_base::table::Record::new();
+    record.insert("event_id", serde_json::json!(&parsed.event_id));
+    record.insert("event_type", serde_json::json!(&parsed.event_type));
+    record.insert("file_token", serde_json::json!(&parsed.file_token));
+    record.insert("table_id", serde_json::json!(&parsed.table_id));
+    record.insert("record_id", serde_json::json!(&parsed.record_id));
+    record.insert("action", serde_json::json!(&parsed.action));
+    record.insert(
+        "changed_field_ids",
+        parsed
+            .changed_field_ids
+            .as_deref()
+            .map_or(Value::Null, |value| serde_json::json!(value)),
+    );
+    record.insert("raw_payload", serde_json::json!(&parsed.redacted_payload));
+    record.insert("received_at", serde_json::json!(now));
+    record.insert("processed_at", Value::Null);
+
+    let result = context.bitable_events().query().insert(record).await;
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                event_id = %parsed.event_id,
+                action = %parsed.action,
+                table_id = %parsed.table_id,
+                "多维表格记录变更事件已落地，等待评论 worker 处理"
+            );
+            raw_json(serde_json::json!({"success": true}))
+        }
+        Err(error) => {
+            let rendered = error.to_string();
+            if crate::db::is_unique_violation(&error)
+                || rendered.contains("Duplicate")
+                || rendered.contains("1062")
+            {
+                tracing::info!(
+                    event_id = %parsed.event_id,
+                    "多维表格事件重复投递（event_id 唯一索引冲突），已忽略"
+                );
+                return raw_json(serde_json::json!({"success": true, "duplicate": true}));
+            }
+            tracing::error!(
+                error = %rendered,
+                event_id = %parsed.event_id,
+                "多维表格事件落地失败，返回 5xx 等待飞书重推"
+            );
+            Err(error)
+        }
+    }
+}
+
 /// 构造 raw JSON 响应（不套框架包络）。
 fn raw_json(value: serde_json::Value) -> Result<ResponseBody, BaseError> {
     let body =
@@ -349,5 +634,146 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    // ---- v2.0 多维表格事件 ----
+
+    fn v2_body(event_type: &str) -> Value {
+        serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-1",
+                "token": "secret",
+                "event_type": event_type
+            },
+            "event": {
+                "file_token": "bascnTest",
+                "table_id": "tblTest",
+                "record_id": "recTest",
+                "action": "record_edited",
+                "changed_fields": ["fldA", {"field_id": "fldB"}]
+            }
+        })
+    }
+
+    #[test]
+    fn v2_detection_covers_schema_and_header_but_not_v1_or_challenge() {
+        assert!(is_v2_event(&v2_body(BITABLE_RECORD_CHANGED_EVENT)));
+        let mut header_only = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        header_only
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("对象"))
+            .remove("schema");
+        assert!(is_v2_event(&header_only));
+        assert!(!is_v2_event(
+            &serde_json::json!({"token":"t","type":"event_callback","event":{}})
+        ));
+        assert!(!is_v2_event(
+            &serde_json::json!({"token":"t","type":"url_verification","challenge":"c"})
+        ));
+    }
+
+    #[test]
+    fn v2_event_parses_identity_and_redacts_the_header_token() {
+        let mut body = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        let parsed = parse_v2_event(&mut body, Some("secret"))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("应解析出事件"));
+        assert_eq!(parsed.event_id, "evt-1");
+        assert_eq!(parsed.event_type, BITABLE_RECORD_CHANGED_EVENT);
+        assert_eq!(parsed.file_token, "bascnTest");
+        assert_eq!(parsed.table_id, "tblTest");
+        assert_eq!(parsed.record_id, "recTest");
+        assert_eq!(parsed.action, "record_edited");
+        assert_eq!(
+            parsed.changed_field_ids.as_deref(),
+            Some(r#"["fldA","fldB"]"#)
+        );
+        assert!(
+            !parsed.redacted_payload.contains("secret"),
+            "落库报文不得包含 header.token: {}",
+            parsed.redacted_payload
+        );
+        assert!(
+            body["header"].get("token").is_none(),
+            "解析后必须把 header.token 从报文里摘掉"
+        );
+    }
+
+    #[test]
+    fn v2_event_rejects_missing_or_mismatched_tokens() {
+        let mut missing = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        missing["header"]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("对象"))
+            .remove("token");
+        assert!(matches!(
+            parse_v2_event(&mut missing, Some("secret")),
+            Err(BaseError::Unauthorized(_))
+        ));
+
+        let mut wrong = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        assert!(matches!(
+            parse_v2_event(&mut wrong, Some("other")),
+            Err(BaseError::Unauthorized(_))
+        ));
+        // 未配置 token 时 fail-closed。
+        let mut unconfigured = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        assert!(matches!(
+            parse_v2_event(&mut unconfigured, None),
+            Err(BaseError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn v2_event_requires_event_id_and_ignores_other_types_after_verification() {
+        let mut missing_id = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+        missing_id["header"]["event_id"] = Value::Null;
+        assert!(matches!(
+            parse_v2_event(&mut missing_id, Some("secret")),
+            Err(BaseError::ValidationFailed(_, _))
+        ));
+
+        let mut other = v2_body("drive.file.deleted_v1");
+        let parsed =
+            parse_v2_event(&mut other, Some("secret")).unwrap_or_else(|error| panic!("{error}"));
+        assert!(parsed.is_none(), "未关注的事件类型应 200 忽略");
+        assert!(
+            other["header"].get("token").is_none(),
+            "忽略分支也必须先删除 token"
+        );
+    }
+
+    #[test]
+    fn duplicate_deliveries_carry_the_same_event_identity() {
+        // 幂等由 feishu_bitable_event.event_id 唯一索引承担；这里钉住解析出的
+        // 身份稳定，避免上游重推被解析成不同 id 而重复入队。
+        let first = parse_v2_event(&mut v2_body(BITABLE_RECORD_CHANGED_EVENT), Some("secret"))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("应解析"));
+        let second = parse_v2_event(&mut v2_body(BITABLE_RECORD_CHANGED_EVENT), Some("secret"))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("应解析"));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn v2_event_requires_the_bitable_coordinates() {
+        for (path, value) in [
+            ("event.file_token", Value::Null),
+            ("event.table_id", Value::String(" ".into())),
+            ("event.record_id", Value::Null),
+            ("event.action", Value::Null),
+        ] {
+            let mut body = v2_body(BITABLE_RECORD_CHANGED_EVENT);
+            body["event"][path.strip_prefix("event.").unwrap_or_default()] = value;
+            assert!(
+                matches!(
+                    parse_v2_event(&mut body, Some("secret")),
+                    Err(BaseError::ValidationFailed(_, _))
+                ),
+                "{path} 缺失必须拒绝"
+            );
+        }
     }
 }

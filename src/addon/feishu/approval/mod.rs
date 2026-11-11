@@ -154,6 +154,17 @@ pub(crate) fn build_export_run_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(export_run_module_name()?).table(domain::export_run_table::table_spec()?))
 }
 
+/// 审批评论运行台账表：只有表，读写由评论 Action / worker 经 `FeishuContext` 完成。
+pub(crate) fn build_comment_run_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(comment_run_module_name()?).table(domain::comment_run_table::table_spec()?))
+}
+
+/// 多维表格记录变更事件缓冲表：只有表，事件端点写、评论 worker 读。
+pub(crate) fn build_bitable_event_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(bitable_event_module_name()?)
+        .table(domain::bitable_event_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -196,6 +207,14 @@ fn export_field_map_module_name() -> Result<ModuleName, BaseError> {
 
 fn export_run_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_export_run").map_err(config_error)
+}
+
+fn comment_run_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_comment_run").map_err(config_error)
+}
+
+fn bitable_event_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.bitable_event").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {

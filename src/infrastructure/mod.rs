@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod authorization;
 pub(crate) mod db;
+pub mod feishu_approval_comment_worker;
 pub mod feishu_approval_export_worker;
 pub mod feishu_approval_worker;
 pub mod feishu_event_worker;

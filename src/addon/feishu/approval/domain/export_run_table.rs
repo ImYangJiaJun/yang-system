@@ -80,7 +80,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(64)
                 .unique(true),
             payload_hash => Str::new().title("行内容哈希").max_length(64),
-            target_record_id => Str::new().title("目标记录 ID").max_length(128),
+            // 评论 worker 按目标记录反查实例映射；filterable 是查询必需位。
+            target_record_id => Str::new()
+                .title("目标记录 ID")
+                .max_length(128)
+                .filterable(true),
             attempts => Int::new()
                 .title("尝试次数")
                 .require(true)

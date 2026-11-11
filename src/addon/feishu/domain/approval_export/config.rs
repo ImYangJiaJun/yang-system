@@ -84,6 +84,8 @@ pub(crate) struct ExportRuleDraft {
     pub(crate) status_labels_json: Option<String>,
     pub(crate) mark_enabled: bool,
     pub(crate) enabled: bool,
+    /// 审批评论配置 JSON；`None` = 不启用评论。
+    pub(crate) comment_config_json: Option<String>,
     pub(crate) maps: Vec<ExportFieldMapDraft>,
 }
 
@@ -134,6 +136,8 @@ pub(crate) struct ValidatedExportRule {
     pub(crate) status_labels_json: Option<String>,
     pub(crate) mark_enabled: bool,
     pub(crate) enabled: bool,
+    /// 规范化后的审批评论配置 JSON（field_names / status_field_name 已解析）。
+    pub(crate) comment_config_json: Option<String>,
     pub(crate) form_snapshot: String,
     pub(crate) node_snapshot: String,
     pub(crate) definition_hash: String,
@@ -224,6 +228,16 @@ pub(crate) async fn validate_export_rule(
     let mut resolved_maps: Vec<ValidatedExportMap> = Vec::new();
     // 定义不可用时也校验目标列：让用户一次看到两边的全部问题。
     let status_field_name = validate_targets(&local, &fields, &mut reasons, &mut resolved_maps);
+    let comment_config_json = match super::super::approval_comment::validate_comment_config(
+        draft.comment_config_json.as_deref(),
+        &fields,
+    ) {
+        Ok(config) => config,
+        Err(mut more) => {
+            reasons.append(&mut more);
+            None
+        }
+    };
     if let Some(widgets) = widgets.as_deref() {
         let catalog = WidgetCatalog::build(widgets, &local.detail_widget_id);
         validate_definition(&local, &catalog, &mut reasons);
@@ -257,6 +271,7 @@ pub(crate) async fn validate_export_rule(
         status_labels_json: local.status_labels_json,
         mark_enabled: local.mark_enabled,
         enabled: local.enabled,
+        comment_config_json,
         form_snapshot,
         node_snapshot,
         definition_hash,
@@ -953,6 +968,7 @@ pub(crate) const RULE_FIELDS: &[&str] = &[
     "status_labels_json",
     "mark_enabled",
     "enabled",
+    "comment_config_json",
     "effective_from",
 ];
 
@@ -1237,6 +1253,9 @@ pub(crate) fn stored_draft(row: &Record, map_rows: &[Record]) -> Result<ExportRu
             .optional::<bool>("enabled")
             .map_err(|error| format!("enabled: {error}"))?
             .unwrap_or(true),
+        comment_config_json: row
+            .optional::<String>("comment_config_json")
+            .map_err(|error| format!("comment_config_json: {error}"))?,
         maps,
     })
 }
@@ -1261,6 +1280,7 @@ mod tests {
             status_labels_json: None,
             mark_enabled: true,
             enabled: true,
+            comment_config_json: None,
             maps: vec![ExportFieldMapDraft {
                 source_kind: "detail".to_string(),
                 source_widget_id: "amount".to_string(),
