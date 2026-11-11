@@ -8,7 +8,6 @@ use yang_base::definition::{HttpMethod, ModuleSpec, Str};
 use yang_base::BaseError;
 
 use super::super::api;
-use super::access_token_or_error;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::sso::credentials;
 
@@ -43,17 +42,13 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     let user_id = crate::addon::feishu::sso::require_current_user(&ctx)?;
-    let token = match access_token_or_error(&ctx, &context, user_id).await {
-        Ok(token) => token,
-        Err(response) => return Ok(response),
-    };
     let Some(credential) = credentials::load_credential(&ctx, &context, user_id).await? else {
         return Ok(ApiResponse::fail(40901, "尚未绑定飞书身份"));
     };
     let Some(settings) = context.settings() else {
         return Ok(ApiResponse::fail(50301, "飞书集成未配置"));
     };
-    let detail = api::instance_detail(&ctx, settings, &token, &input.instance_code)
+    let detail = api::instance_detail(&ctx, settings, &input.instance_code)
         .await
         .map_err(|error| error.to_base())?;
     match detail_access(&detail, &input.task_id, &credential.open_id) {

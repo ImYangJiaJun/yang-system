@@ -342,6 +342,7 @@ function parseTask(raw: unknown): BatchTask | null {
   if (!taskId || !instanceCode) return null;
   const instanceExternalId = firstText(record, "instance_external_id");
   const taskExternalId = firstText(record, "task_external_id");
+  const rawStatus = firstText(record, "status");
   return {
     taskId,
     instanceCode,
@@ -358,7 +359,9 @@ function parseTask(raw: unknown): BatchTask | null {
     taskExternalId,
     topic: firstText(record, "topic"),
     instanceStatus: firstText(record, "instance_status"),
-    status: firstText(record, "status") ?? "PENDING",
+    // 飞书 /tasks 的任务状态真机返回数字 1（待办）；统一成 PENDING，避免
+    // 可操作性判断把真实待办误判成「已不在待办中」。
+    status: rawStatus === "1" ? "PENDING" : (rawStatus ?? "PENDING"),
     link: firstText(record, "link"),
     createdAt: timestampOf(
       record?.create_time ??
@@ -390,9 +393,16 @@ export async function fetchBatchTasks(
       : Array.isArray(rawItems)
         ? rawItems
         : [];
+  const seen = new Set<string>();
   const tasks = rows
     .map(parseTask)
-    .filter((task): task is BatchTask => task !== null);
+    .filter((task): task is BatchTask => task !== null)
+    .filter((task) => {
+      const key = `${task.taskId}\u0000${task.instanceCode}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   return { tasks, truncated: container?.truncated === true };
 }
 

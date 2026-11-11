@@ -159,19 +159,15 @@ async fn recover_stale_items(
         let job_id: i64 = row.require(ITEM_JOB_ID)?;
         let task_id: String = row.require(ITEM_TASK_ID)?;
         let instance_code: String = row.require(ITEM_INSTANCE_CODE)?;
-        let Some(job) = load_job_any(ctx, context, job_id).await? else {
+        if load_job_any(ctx, context, job_id).await?.is_none() {
             continue;
-        };
-        let user_id: i64 = job.require(JOB_USER_ID)?;
+        }
         let mut message = "执行进程中断，结果未知；请刷新待办确认，系统不会自动重发".to_string();
         let mut status = "unknown";
-        let token = credentials::access_token_for_user(ctx, context, settings, user_id).await;
-        if let Ok(token) = token {
-            if let Ok(detail) = api::instance_detail(ctx, settings, &token, &instance_code).await {
-                if task_status(&detail, &task_id) != Some("PENDING") {
-                    status = "skipped";
-                    message = "任务已被处理，跳过".to_string();
-                }
+        if let Ok(detail) = api::instance_detail(ctx, settings, &instance_code).await {
+            if task_status(&detail, &task_id) != Some("PENDING") {
+                status = "skipped";
+                message = "任务已被处理，跳过".to_string();
             }
         }
         finish_item(ctx, context, item_id, status, Some(0), Some(&message)).await?;
@@ -378,17 +374,7 @@ async fn process_item(
             return Ok(ItemOutcome::Stop);
         }
     };
-    let body = match build_body(
-        ctx,
-        settings,
-        &token,
-        job,
-        &action,
-        &task_id,
-        &instance_code,
-    )
-    .await
-    {
+    let body = match build_body(ctx, settings, job, &action, &task_id, &instance_code).await {
         Ok(body) => body,
         Err(message) => {
             finish_item(ctx, context, item_id, "failed", None, Some(&message)).await?;
@@ -418,7 +404,6 @@ async fn process_item(
                     item_id,
                     &task_id,
                     &instance_code,
-                    &token,
                     attempt,
                     error,
                 )
@@ -438,7 +423,6 @@ async fn handle_item_error(
     item_id: i64,
     task_id: &str,
     instance_code: &str,
-    token: &str,
     attempt: i64,
     error: api::ApiError,
 ) -> Result<ItemOutcome, BaseError> {
@@ -461,7 +445,7 @@ async fn handle_item_error(
     let message = format!("飞书返回 {}：{}", error.code, error.message);
     if error.code == 1395001 {
         // 任务状态冲突：先看详情，已不是 PENDING 就是并发处理掉了。
-        let status = api::instance_detail(ctx, settings, token, instance_code)
+        let status = api::instance_detail(ctx, settings, instance_code)
             .await
             .ok()
             .and_then(|detail| task_status(&detail, task_id).map(str::to_string));
@@ -533,7 +517,6 @@ async fn handle_item_error(
 async fn build_body(
     ctx: &ActionContext,
     settings: &FeishuSettings,
-    token: &str,
     job: &Record,
     action: &str,
     task_id: &str,
@@ -587,7 +570,7 @@ async fn build_body(
             let node_ids = if mode == "initiator" {
                 vec!["START".to_string()]
             } else {
-                let detail = api::instance_detail(ctx, settings, token, instance_code)
+                let detail = api::instance_detail(ctx, settings, instance_code)
                     .await
                     .map_err(|error| format!("取实例详情失败：{}", error.message))?;
                 previous_node_id(&detail)

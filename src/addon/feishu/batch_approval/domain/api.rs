@@ -1,8 +1,12 @@
-//! 飞书审批用户态 API 的最小客户端。
+//! 飞书审批 API 的最小客户端。
 //!
-//! 所有调用都使用用户自己的 `user_access_token`；服务端不持有 tenant 审批身份。
+//! 列表与任务动作使用用户自己的 `user_access_token`；实例详情按官方要求改用
+//! `tenant_access_token`（用户 token 会报 99991668）。
 //! 返回值保留为 `serde_json::Value`，因为详情/表单/时间线的字段形状以真机为准，
 //! 过早强类型化只会在飞书字段调整时制造 502。
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -16,8 +20,11 @@ use crate::config::FeishuSettings;
 use crate::addon::feishu::domain::outbound::{
     send_with_retry, OutboundMethod, OutboundRequest, PULL_RETRY,
 };
+use crate::addon::feishu::domain::outbound::{HttpClientTransport, TokioSleeper};
 use crate::addon::feishu::domain::outbound_setup;
-use crate::addon::feishu::domain::tenant_token::FEISHU_OPEN_BASE;
+use crate::addon::feishu::domain::tenant_token::{
+    FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider, FEISHU_OPEN_BASE,
+};
 
 const MAX_PAGES: usize = 10;
 const PAGE_SIZE: usize = 100;
@@ -235,6 +242,11 @@ async fn call(
     Ok(envelope.data.unwrap_or(Value::Null))
 }
 
+fn dedupe_tasks(tasks: &mut Vec<TaskItem>) {
+    let mut seen = HashSet::new();
+    tasks.retain(|task| seen.insert((task.task_id.clone(), task.instance_code.clone())));
+}
+
 pub(crate) async fn list_pending_tasks(
     ctx: &ActionContext,
     settings: &FeishuSettings,
@@ -267,6 +279,7 @@ pub(crate) async fn list_pending_tasks(
         })?;
         tasks.extend(page.tasks);
         if !page.has_more.unwrap_or(false) {
+            dedupe_tasks(&mut tasks);
             return Ok(TaskList {
                 tasks,
                 truncated: false,
@@ -277,26 +290,82 @@ pub(crate) async fn list_pending_tasks(
             break;
         }
     }
+    dedupe_tasks(&mut tasks);
     Ok(TaskList {
         tasks,
         truncated: true,
     })
 }
 
+async fn tenant_access_token(
+    ctx: &ActionContext,
+    settings: &FeishuSettings,
+) -> Result<String, ApiError> {
+    let deployment = ctx
+        .tools()
+        .extension::<crate::authorization::AuthorizationVersionCache>()
+        .map_err(|error| ApiError {
+            code: 0,
+            message: format!("读取部署命名空间失败：{error}"),
+        })?
+        .deployment()
+        .to_string();
+    let cache = Arc::new(RedisTenantTokenCache::new(
+        ctx.tools()
+            .cache()
+            .map_err(|error| ApiError {
+                code: 0,
+                message: format!("读取 Redis 失败：{error}"),
+            })?
+            .clone(),
+        &deployment,
+    ));
+    let transport = Arc::new(HttpClientTransport::new(
+        ctx.tools()
+            .http()
+            .map_err(|error| ApiError {
+                code: 0,
+                message: format!("读取 HTTP 客户端失败：{error}"),
+            })?
+            .clone(),
+    ));
+    let tokens = TenantTokenProvider::new(
+        cache,
+        transport,
+        Arc::new(TokioSleeper),
+        FeishuCredentials {
+            app_id: settings.app_id.clone().unwrap_or_default(),
+            app_secret: settings.app_secret.clone().unwrap_or_default(),
+        },
+        &deployment,
+    )
+    .map_err(|error| ApiError {
+        code: 0,
+        message: format!("构建 tenant_access_token provider 失败：{error}"),
+    })?;
+    tokens
+        .tenant_access_token()
+        .await
+        .map_err(|error| ApiError {
+            code: 0,
+            message: format!("获取 tenant_access_token 失败：{error}"),
+        })
+}
+
 pub(crate) async fn instance_detail(
     ctx: &ActionContext,
     settings: &FeishuSettings,
-    access_token: &str,
     instance_code: &str,
 ) -> Result<Value, ApiError> {
     let path = format!(
         "/open-apis/approval/v4/instances/{}",
         encode_path_segment(instance_code)
     );
+    let access_token = tenant_access_token(ctx, settings).await?;
     call(
         ctx,
         settings,
-        access_token,
+        &access_token,
         OutboundMethod::Get,
         &path,
         vec![("user_id_type".to_string(), "open_id".to_string())],
