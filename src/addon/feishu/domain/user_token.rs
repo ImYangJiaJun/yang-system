@@ -60,6 +60,15 @@ const AUTHORIZE_URL: &str = "https://accounts.feishu.cn/open-apis/authen/v1/auth
 /// 换 `code` 与刷 `refresh_token` 走**同一个** URL，只有 `grant_type` 不同。
 const TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
 
+/// PKCE 换码专用的 v2 令牌端点。
+///
+/// 飞书 v3 端点对「v1 授权页签发的 PKCE code」存在已知的校验缺陷：即使
+/// `code_challenge`/`code_challenge_method=S256` 与 `code_verifier` 完全匹配，
+/// 仍会返回 20049（见 larksuite/oapi-sdk-go#230）。v2 端点接受同一组参数，
+/// 官方授权页文档也明确写了 PKCE 可暂时搭配 v2 换码。未启用 PKCE 的管理员
+/// 授权仍走 v3，不受影响。
+const PKCE_TOKEN_URL: &str = "https://open.feishu.cn/open-apis/authen/v2/oauth/token";
+
 /// 授权页请求的 scope（空格分隔）。**每一个都必须在开发者后台「权限管理」里已开通**，
 /// 否则授权页直接报 20027（拼了未开通的 scope）。
 ///
@@ -415,11 +424,12 @@ fn to_bundle(response: TokenResponse, now: i64) -> Result<TokenBundle, TokenEndp
 async fn request_tokens(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
+    url: &str,
     body: serde_json::Value,
 ) -> Result<TokenResponse, TokenEndpointError> {
     let request = OutboundRequest {
         method: OutboundMethod::Post,
-        url: TOKEN_URL.to_string(),
+        url: url.to_string(),
         query: Vec::new(),
         // v3 端点的凭证在**请求体**里（client_id/client_secret），不带 Authorization 头。
         bearer_token: None,
@@ -450,6 +460,7 @@ pub(crate) async fn exchange_code(
     let response = request_tokens(
         transport,
         sleeper,
+        TOKEN_URL,
         json!({
             "grant_type": "authorization_code",
             "client_id": credentials.app_id,
@@ -476,6 +487,7 @@ pub(crate) async fn exchange_code_pkce(
     let response = request_tokens(
         transport,
         sleeper,
+        PKCE_TOKEN_URL,
         json!({
             "grant_type": "authorization_code",
             "client_id": credentials.app_id,
@@ -500,6 +512,7 @@ pub(crate) async fn refresh_tokens(
     let response = request_tokens(
         transport,
         sleeper,
+        TOKEN_URL,
         json!({
             "grant_type": "refresh_token",
             "client_id": credentials.app_id,
