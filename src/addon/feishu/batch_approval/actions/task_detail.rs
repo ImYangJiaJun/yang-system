@@ -81,13 +81,12 @@ enum DetailAccess {
 /// 不把「字段缺失」误判成越权。`tasks` 存在时必须能找到同一个 `task_id`，否则这个
 /// task 与 `instance_code` 不是一对，不能让前端把它当成该实例的待办。
 fn detail_access(detail: &Value, task_id: &str, open_id: &str) -> DetailAccess {
-    let tasks = detail.get("tasks").and_then(Value::as_array);
+    let tasks = detail_tasks(detail);
     if let Some(tasks) = tasks {
-        if !tasks.iter().any(|task| {
-            task.get("task_id")
-                .and_then(Value::as_str)
-                .is_some_and(|value| value == task_id)
-        }) {
+        if !tasks
+            .iter()
+            .any(|task| task_identity(task) == Some(task_id))
+        {
             return DetailAccess::TaskNotInInstance;
         }
     }
@@ -98,8 +97,28 @@ fn detail_access(detail: &Value, task_id: &str, open_id: &str) -> DetailAccess {
     }
 }
 
+/// 兼容两种实例详情形态：
+/// - `GET /instances/{code}`：`task_list[]`，任务主键是 `id`；
+/// - 旧的 `/instances/detail`：`tasks[]`，任务主键是 `task_id`。
+fn detail_tasks(detail: &Value) -> Option<&Vec<Value>> {
+    detail
+        .get("task_list")
+        .and_then(Value::as_array)
+        .or_else(|| detail.get("tasks").and_then(Value::as_array))
+}
+
+fn task_identity(task: &Value) -> Option<&str> {
+    task.get("id")
+        .or_else(|| task.get("task_id"))
+        .and_then(Value::as_str)
+}
+
 fn participant_open_ids(detail: &Value) -> impl Iterator<Item = &str> {
     let mut values = Vec::new();
+    // 实例发起人（`GET /instances/{code}` 的顶层 `open_id`）。
+    if let Some(open_id) = detail.get("open_id").and_then(Value::as_str) {
+        values.push(open_id);
+    }
     if let Some(open_id) = detail
         .get("initiator")
         .and_then(|value| value.get("open_id"))
@@ -107,17 +126,27 @@ fn participant_open_ids(detail: &Value) -> impl Iterator<Item = &str> {
     {
         values.push(open_id);
     }
-    for key in ["tasks", "operation_records"] {
+    for key in [
+        "task_list",
+        "tasks",
+        "timeline",
+        "operation_records",
+        "comment_list",
+        "current_nodes",
+    ] {
         if let Some(records) = detail.get(key).and_then(Value::as_array) {
             for record in records {
-                if let Some(open_id) = record.get("open_id").and_then(Value::as_str) {
-                    values.push(open_id);
+                for field in ["open_id", "user_id"] {
+                    if let Some(open_id) = record.get(field).and_then(Value::as_str) {
+                        values.push(open_id);
+                    }
                 }
-                // 当前节点审批人在 user_id_type=open_id 下也用 `user_id` 字段返回。
                 if let Some(approvers) = record.get("approvers").and_then(Value::as_array) {
                     for approver in approvers {
-                        if let Some(open_id) = approver.get("user_id").and_then(Value::as_str) {
-                            values.push(open_id);
+                        for field in ["open_id", "user_id"] {
+                            if let Some(open_id) = approver.get(field).and_then(Value::as_str) {
+                                values.push(open_id);
+                            }
                         }
                     }
                 }
@@ -157,6 +186,26 @@ mod tests {
         assert_eq!(
             detail_access(&detail, "t2", "ou_me"),
             DetailAccess::TaskNotInInstance
+        );
+    }
+
+    #[test]
+    fn official_instance_detail_uses_task_list_and_id() {
+        let detail = json!({
+            "open_id": "ou_me",
+            "task_list": [
+                {"id": "t1", "open_id": "ou_me", "status": "PENDING"},
+                {"id": "t2", "open_id": "ou_other", "status": "PENDING"}
+            ],
+        });
+        assert_eq!(detail_access(&detail, "t1", "ou_me"), DetailAccess::Allowed);
+        assert_eq!(
+            detail_access(&detail, "t3", "ou_me"),
+            DetailAccess::TaskNotInInstance
+        );
+        assert_eq!(
+            detail_access(&detail, "t2", "ou_stranger"),
+            DetailAccess::NotParticipant
         );
     }
 

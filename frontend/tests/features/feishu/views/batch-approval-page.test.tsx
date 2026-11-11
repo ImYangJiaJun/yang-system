@@ -257,7 +257,7 @@ describe("BatchApprovalPage", () => {
     });
   });
 
-  it("查看详情用 Dialog 展示表单与时间线", async () => {
+  it("行内展开详情展示表单与时间线", async () => {
     stubBatchApi({
       detail: {
         instance_code: "i1",
@@ -284,14 +284,13 @@ describe("BatchApprovalPage", () => {
     const row = title.closest("tr");
     expect(row).not.toBeNull();
     await user.click(
-      within(row as HTMLElement).getByRole("button", { name: "查看" }),
+      within(row as HTMLElement).getByRole("button", { name: "展开" }),
     );
 
-    const dialog = await screen.findByRole("dialog");
-    expect(await within(dialog).findByText("金额")).toBeInTheDocument();
-    expect(within(dialog).getByText("100")).toBeInTheDocument();
-    expect(within(dialog).getByText(/部门审批/)).toBeInTheDocument();
-    expect(within(dialog).getByText("发起")).toBeInTheDocument();
+    expect(await screen.findByText("金额")).toBeInTheDocument();
+    expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getByText(/部门审批/)).toBeInTheDocument();
+    expect(screen.getByText("发起")).toBeInTheDocument();
   });
 
   it("凭证失效时显示重新授权入口", async () => {
@@ -379,5 +378,46 @@ describe("BatchApprovalPage", () => {
       });
     });
     expect(await screen.findByText("全部成功")).toBeInTheDocument();
+  });
+
+  it("实例状态与任务状态按文档映射成中文，并支持逐列筛选", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              instance_status: "1",
+              title: "流转中的报销单",
+            },
+            {
+              ...TASKS[1],
+              topic: "1",
+              title: "待办请假单",
+            },
+          ],
+          truncated: false,
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const statusBadges = () =>
+      Array.from(document.querySelectorAll('[data-slot="status-badge"]'));
+    await waitFor(() => {
+      expect(
+        statusBadges().some((badge) => badge.textContent === "审批中"),
+      ).toBe(true);
+      expect(statusBadges().some((badge) => badge.textContent === "待办")).toBe(
+        true,
+      );
+    });
+    expect(screen.queryByText("状态 1")).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("按标题筛选"), "请假");
+    expect(screen.queryByText("流转中的报销单")).not.toBeInTheDocument();
+    expect(screen.getByText("待办请假单")).toBeInTheDocument();
   });
 });

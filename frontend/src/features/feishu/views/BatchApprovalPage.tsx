@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { Inbox, RefreshCw } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Inbox,
+  RefreshCw,
+  RotateCcw,
+} from "lucide-react";
 
 import { useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
+import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import {
   Table,
@@ -19,9 +26,12 @@ import { useToast } from "@/shared/lib/toast";
 
 import {
   BATCH_ACTION_LABELS,
+  FEISHU_STATUS_FILTER_OPTIONS,
   createBatchJob,
   definitionKey,
   describeBatchError,
+  feishuStatusLabel,
+  fetchBatchTaskDetail,
   fetchBatchTasks,
   fetchCurrentUsername,
   groupBatchTasks,
@@ -30,33 +40,48 @@ import {
   newIdempotencyKey,
   requestFeishuAuthorizationUrl,
   taskOperability,
+  taskStatusLabel,
   type BatchApprovalAction,
   type BatchJobItem,
   type BatchTask,
+  type BatchTaskDetail,
 } from "../batch-approval-api";
 import {
   BatchActionDialog,
   type BatchActionParams,
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
-import { BatchTaskDetailDialog } from "../components/BatchTaskDetailDialog";
+import { BatchTaskDetailBody } from "../components/BatchTaskDetailDialog";
 import { StatusBadge } from "../components/StatusBadge";
-
-const TASK_STATUS_LABELS: Record<string, string> = {
-  PENDING: "待审批",
-  APPROVED: "已通过",
-  REJECTED: "已拒绝",
-  CANCELED: "已撤销",
-  CANCELLED: "已撤销",
-  DELETED: "已删除",
-};
-
-function taskStatusLabel(status: string): string {
-  return TASK_STATUS_LABELS[status] ?? status;
-}
 
 function timeText(value: number | null): string {
   return value === null ? "—" : formatProductDateTime(value);
+}
+
+function dateKey(value: number | null): string {
+  if (value === null) return "";
+  const date = new Date(value);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function statusTone(label: string): "info" | "positive" | "danger" | "neutral" {
+  if (label === "待办" || label === "处理中" || label === "审批中") {
+    return "info";
+  }
+  if (
+    label === "已办" ||
+    label === "已通过" ||
+    label === "已完成" ||
+    label === "已读"
+  ) {
+    return "positive";
+  }
+  if (label === "已拒绝" || label === "撤回" || label === "已撤销") {
+    return "danger";
+  }
+  return "neutral";
 }
 
 type SelectedMap = Record<string, BatchTask>;
@@ -67,10 +92,41 @@ type LastJobRequest = {
   items: BatchJobItem[];
 };
 
+type Filters = {
+  title: string;
+  definition: string;
+  initiator: string;
+  summary: string;
+  from: string;
+  to: string;
+  status: string;
+  api: "all" | "supported" | "unsupported";
+  external: "all" | "feishu" | "external";
+};
+
+const EMPTY_FILTERS: Filters = {
+  title: "",
+  definition: "",
+  initiator: "",
+  summary: "",
+  from: "",
+  to: "",
+  status: "all",
+  api: "all",
+  external: "all",
+};
+
+function includesText(
+  value: string | null | undefined,
+  needle: string,
+): boolean {
+  return (value ?? "").toLocaleLowerCase().includes(needle.toLocaleLowerCase());
+}
+
 /// 批量审批页：独立专注页（根层 RequireAuth，不套 AppLayout）。
 ///
-/// 数据流：拉本人待办 → 按定义分组 → 勾选可操作任务 → 在确认对话框里选动作与参数
-/// → 创建 job → 轮询逐条结果。所有写操作只创建 job，页面本身不直接调飞书。
+/// 数据流：拉本人待办 → 表格展示与逐列筛选 → 勾选可操作任务 → 在确认对话框里选动作
+/// → 创建 job → 轮询逐条结果。详情在行内展开，不再需要逐条打开弹窗。
 export default function BatchApprovalPage() {
   const session = useSessionCredentials();
   const token = session.token;
@@ -88,9 +144,13 @@ export default function BatchApprovalPage() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
 
-  const [definition, setDefinition] = useState("all");
+  const [definitionGroup, setDefinitionGroup] = useState("all");
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [selected, setSelected] = useState<SelectedMap>({});
-  const [detailTask, setDetailTask] = useState<BatchTask | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, BatchTaskDetail>>({});
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
+  const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
   const [actionError, setActionError] = useState("");
   const [submittingAction, setSubmittingAction] = useState(false);
@@ -150,13 +210,56 @@ export default function BatchApprovalPage() {
   }, [loadTasks, token]);
 
   const groups = useMemo(() => groupBatchTasks(tasks), [tasks]);
-  const filteredTasks = useMemo(
-    () =>
-      definition === "all"
-        ? tasks
-        : tasks.filter((task) => definitionKey(task) === definition),
-    [tasks, definition],
-  );
+
+  const filteredTasks = useMemo(() => {
+    const needleTitle = filters.title.trim();
+    const needleDefinition = filters.definition.trim();
+    const needleInitiator = filters.initiator.trim();
+    const needleSummary = filters.summary.trim();
+    return tasks.filter((task) => {
+      if (
+        definitionGroup !== "all" &&
+        definitionKey(task) !== definitionGroup
+      ) {
+        return false;
+      }
+      if (needleTitle && !includesText(task.title, needleTitle)) return false;
+      if (
+        needleDefinition &&
+        !includesText(task.definitionName, needleDefinition) &&
+        !includesText(task.definitionCode, needleDefinition)
+      ) {
+        return false;
+      }
+      if (
+        needleInitiator &&
+        !includesText(task.initiatorName, needleInitiator)
+      ) {
+        return false;
+      }
+      if (
+        needleSummary &&
+        !task.summaries.some((summary) => includesText(summary, needleSummary))
+      ) {
+        return false;
+      }
+      const date = dateKey(task.createdAt);
+      if (filters.from && date && date < filters.from) return false;
+      if (filters.to && date && date > filters.to) return false;
+      if (
+        filters.status !== "all" &&
+        taskStatusLabel(task) !== filters.status
+      ) {
+        return false;
+      }
+      if (filters.api === "supported" && !task.supportApiOperate) return false;
+      if (filters.api === "unsupported" && task.supportApiOperate) return false;
+      if (filters.external === "external" && !task.external) return false;
+      if (filters.external === "feishu" && task.external) return false;
+      return true;
+    });
+  }, [tasks, definitionGroup, filters]);
+
   const filteredOperable = useMemo(
     () => filteredTasks.filter((task) => taskOperability(task).operable),
     [filteredTasks],
@@ -169,6 +272,15 @@ export default function BatchApprovalPage() {
     filteredOperable.length > 0 &&
     selectedVisibleCount === filteredOperable.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
+
+  const updateFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
+    setFilters((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resetFilters = () => {
+    setFilters(EMPTY_FILTERS);
+    setDefinitionGroup("all");
+  };
 
   const toggleTask = (task: BatchTask) => {
     if (!taskOperability(task).operable) return;
@@ -193,6 +305,52 @@ export default function BatchApprovalPage() {
       }
       return next;
     });
+  };
+
+  const loadDetail = useCallback(
+    (task: BatchTask) => {
+      const abort = new AbortController();
+      setDetailLoadingId(task.taskId);
+      setDetailErrors((prev) => {
+        const next = { ...prev };
+        delete next[task.taskId];
+        return next;
+      });
+      void fetchBatchTaskDetail(
+        task.taskId,
+        task.instanceCode,
+        token,
+        abort.signal,
+      )
+        .then((detail) => {
+          if (abort.signal.aborted) return;
+          setDetails((prev) => ({ ...prev, [task.taskId]: detail }));
+        })
+        .catch((cause: unknown) => {
+          if (abort.signal.aborted) return;
+          setDetailErrors((prev) => ({
+            ...prev,
+            [task.taskId]:
+              cause instanceof Error ? cause.message : "审批详情加载失败",
+          }));
+        })
+        .finally(() => {
+          if (!abort.signal.aborted) setDetailLoadingId(null);
+        });
+      return () => abort.abort();
+    },
+    [token],
+  );
+
+  const toggleDetail = (task: BatchTask) => {
+    if (expandedTaskId === task.taskId) {
+      setExpandedTaskId(null);
+      return;
+    }
+    setExpandedTaskId(task.taskId);
+    if (!details[task.taskId] && detailLoadingId !== task.taskId) {
+      loadDetail(task);
+    }
   };
 
   const openAction = (nextAction: BatchApprovalAction) => {
@@ -335,7 +493,7 @@ export default function BatchApprovalPage() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-4 p-6">
+      <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-4 p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold">批量审批</h1>
@@ -404,20 +562,20 @@ export default function BatchApprovalPage() {
         <div className="flex flex-1 flex-col gap-4 md:flex-row">
           <aside
             aria-label="审批定义"
-            className="w-full shrink-0 space-y-1 md:w-64"
+            className="w-full shrink-0 space-y-1 md:w-60"
           >
             <p className="px-2 text-xs font-medium text-muted-foreground">
               按审批定义
             </p>
             <button
               type="button"
-              aria-pressed={definition === "all"}
+              aria-pressed={definitionGroup === "all"}
               className={
-                definition === "all"
+                definitionGroup === "all"
                   ? "flex w-full items-center justify-between rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
                   : "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
               }
-              onClick={() => setDefinition("all")}
+              onClick={() => setDefinitionGroup("all")}
             >
               <span>全部待办</span>
               <span className="tabular-nums">{tasks.length}</span>
@@ -426,13 +584,13 @@ export default function BatchApprovalPage() {
               <button
                 key={group.key}
                 type="button"
-                aria-pressed={definition === group.key}
+                aria-pressed={definitionGroup === group.key}
                 className={
-                  definition === group.key
+                  definitionGroup === group.key
                     ? "flex w-full items-center justify-between gap-2 rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
                     : "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
                 }
-                onClick={() => setDefinition(group.key)}
+                onClick={() => setDefinitionGroup(group.key)}
               >
                 <span className="min-w-0">
                   <span className="block truncate">{group.name}</span>
@@ -450,7 +608,8 @@ export default function BatchApprovalPage() {
           <section className="min-w-0 flex-1 space-y-3">
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
               <span className="text-sm text-muted-foreground">
-                已选 {selectedTasks.length} 条
+                已选 {selectedTasks.length} 条 · 当前筛选 {filteredTasks.length}{" "}
+                条
               </span>
               <Button
                 variant="ghost"
@@ -521,131 +680,306 @@ export default function BatchApprovalPage() {
               )
             ) : filteredTasks.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border py-16 text-center">
-                <p className="font-medium">该审批定义下没有待办</p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setDefinition("all")}
-                >
-                  查看全部待办
+                <p className="font-medium">没有符合筛选条件的待办</p>
+                <Button variant="outline" size="sm" onClick={resetFilters}>
+                  重置筛选
                 </Button>
               </div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10">
-                      <Checkbox
-                        aria-label="全选当前可操作任务"
-                        checked={
-                          allVisibleSelected
-                            ? true
-                            : someVisibleSelected
-                              ? "indeterminate"
-                              : false
-                        }
-                        disabled={filteredOperable.length === 0}
-                        onCheckedChange={toggleAllVisible}
-                      />
-                    </TableHead>
-                    <TableHead>标题</TableHead>
-                    <TableHead>发起人</TableHead>
-                    <TableHead>当前节点 / 摘要</TableHead>
-                    <TableHead>时间</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>API 操作</TableHead>
-                    <TableHead className="w-20">详情</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredTasks.map((task) => {
-                    const operability = taskOperability(task);
-                    const checked = Boolean(selected[task.taskId]);
-                    const statusUpper = task.status.toUpperCase();
-                    return (
-                      <TableRow
-                        key={task.taskId}
-                        data-state={checked ? "selected" : undefined}
-                      >
-                        <TableCell>
-                          <Checkbox
-                            aria-label={`选择 ${task.title}`}
-                            checked={checked}
-                            disabled={!operability.operable}
-                            onCheckedChange={() => toggleTask(task)}
-                          />
-                        </TableCell>
-                        <TableCell
-                          className="max-w-64 truncate font-medium"
-                          title={task.title}
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">
+                        <Checkbox
+                          aria-label="全选当前可操作任务"
+                          checked={
+                            allVisibleSelected
+                              ? true
+                              : someVisibleSelected
+                                ? "indeterminate"
+                                : false
+                          }
+                          disabled={filteredOperable.length === 0}
+                          onCheckedChange={toggleAllVisible}
+                        />
+                      </TableHead>
+                      <TableHead className="min-w-44">标题</TableHead>
+                      <TableHead className="min-w-44">审批定义</TableHead>
+                      <TableHead className="min-w-28">发起人</TableHead>
+                      <TableHead className="min-w-52">摘要</TableHead>
+                      <TableHead className="min-w-44">提交时间</TableHead>
+                      <TableHead className="min-w-28">实例状态</TableHead>
+                      <TableHead className="min-w-24">API 操作</TableHead>
+                      <TableHead className="min-w-24">来源</TableHead>
+                      <TableHead className="w-24">详情</TableHead>
+                    </TableRow>
+                    <TableRow className="bg-muted/30 hover:bg-muted/30">
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-1 text-xs"
+                          onClick={resetFilters}
+                          title="重置全部筛选"
                         >
-                          {task.title}
-                        </TableCell>
-                        <TableCell>{task.initiatorName ?? "—"}</TableCell>
-                        <TableCell className="max-w-64">
-                          <span
-                            className="block truncate"
-                            title={task.summaries.join("；")}
-                          >
-                            {task.summaries.join("；") || "—"}
-                          </span>
-                          {!operability.operable && (
-                            <span className="block text-xs text-muted-foreground">
-                              {operability.reason}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs tabular-nums">
-                          {timeText(task.createdAt)}
-                        </TableCell>
-                        <TableCell>
-                          <span className="inline-flex flex-wrap gap-1">
-                            <StatusBadge
-                              tone={
-                                statusUpper === "PENDING" ? "info" : "neutral"
-                              }
-                            >
-                              {taskStatusLabel(statusUpper)}
-                            </StatusBadge>
-                            {task.external && (
-                              <StatusBadge tone="warning">外部审批</StatusBadge>
-                            )}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge
-                            tone={
-                              task.supportApiOperate ? "positive" : "warning"
+                          <RotateCcw className="size-3.5" />
+                        </Button>
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按标题筛选"
+                          placeholder="标题"
+                          className="h-8 text-xs"
+                          value={filters.title}
+                          onChange={(event) =>
+                            updateFilter("title", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按审批定义筛选"
+                          placeholder="定义名称/Code"
+                          className="h-8 text-xs"
+                          value={filters.definition}
+                          onChange={(event) =>
+                            updateFilter("definition", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按发起人筛选"
+                          placeholder="发起人"
+                          className="h-8 text-xs"
+                          value={filters.initiator}
+                          onChange={(event) =>
+                            updateFilter("initiator", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <Input
+                          aria-label="按摘要筛选"
+                          placeholder="摘要关键字"
+                          className="h-8 text-xs"
+                          value={filters.summary}
+                          onChange={(event) =>
+                            updateFilter("summary", event.target.value)
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <div className="flex gap-1">
+                          <Input
+                            aria-label="开始日期"
+                            type="date"
+                            className="h-8 w-32 text-xs"
+                            value={filters.from}
+                            onChange={(event) =>
+                              updateFilter("from", event.target.value)
                             }
+                          />
+                          <Input
+                            aria-label="结束日期"
+                            type="date"
+                            className="h-8 w-32 text-xs"
+                            value={filters.to}
+                            onChange={(event) =>
+                              updateFilter("to", event.target.value)
+                            }
+                          />
+                        </div>
+                      </TableHead>
+                      <TableHead>
+                        <select
+                          aria-label="按实例状态筛选"
+                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                          value={filters.status}
+                          onChange={(event) =>
+                            updateFilter("status", event.target.value)
+                          }
+                        >
+                          {FEISHU_STATUS_FILTER_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </TableHead>
+                      <TableHead>
+                        <select
+                          aria-label="按 API 操作能力筛选"
+                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                          value={filters.api}
+                          onChange={(event) =>
+                            updateFilter(
+                              "api",
+                              event.target.value as Filters["api"],
+                            )
+                          }
+                        >
+                          <option value="all">全部</option>
+                          <option value="supported">支持</option>
+                          <option value="unsupported">不支持</option>
+                        </select>
+                      </TableHead>
+                      <TableHead>
+                        <select
+                          aria-label="按来源筛选"
+                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                          value={filters.external}
+                          onChange={(event) =>
+                            updateFilter(
+                              "external",
+                              event.target.value as Filters["external"],
+                            )
+                          }
+                        >
+                          <option value="all">全部</option>
+                          <option value="feishu">飞书</option>
+                          <option value="external">外部</option>
+                        </select>
+                      </TableHead>
+                      <TableHead />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredTasks.map((task) => {
+                      const operability = taskOperability(task);
+                      const checked = Boolean(selected[task.taskId]);
+                      const expanded = expandedTaskId === task.taskId;
+                      const statusLabel = taskStatusLabel(task);
+                      return (
+                        <Fragment key={task.taskId}>
+                          <TableRow
+                            data-state={checked ? "selected" : undefined}
                           >
-                            {task.supportApiOperate ? "支持" : "不支持"}
-                          </StatusBadge>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDetailTask(task)}
-                          >
-                            查看
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+                            <TableCell>
+                              <Checkbox
+                                aria-label={`选择 ${task.title}`}
+                                checked={checked}
+                                disabled={!operability.operable}
+                                onCheckedChange={() => toggleTask(task)}
+                              />
+                            </TableCell>
+                            <TableCell
+                              className="max-w-64 font-medium"
+                              title={task.title}
+                            >
+                              <span className="block truncate">
+                                {task.title}
+                              </span>
+                              {!operability.operable && (
+                                <span className="block text-xs font-normal text-muted-foreground">
+                                  {operability.reason}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell
+                              className="max-w-56"
+                              title={task.definitionName}
+                            >
+                              <span className="block truncate">
+                                {task.definitionName}
+                              </span>
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {task.definitionCode || "—"}
+                              </span>
+                            </TableCell>
+                            <TableCell>{task.initiatorName ?? "—"}</TableCell>
+                            <TableCell
+                              className="max-w-72"
+                              title={task.summaries.join("；")}
+                            >
+                              <span className="block truncate">
+                                {task.summaries.join("；") || "—"}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-xs tabular-nums">
+                              {timeText(task.createdAt)}
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge tone={statusTone(statusLabel)}>
+                                {statusLabel}
+                              </StatusBadge>
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge
+                                tone={
+                                  task.supportApiOperate
+                                    ? "positive"
+                                    : "warning"
+                                }
+                              >
+                                {task.supportApiOperate ? "支持" : "不支持"}
+                              </StatusBadge>
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge
+                                tone={task.external ? "warning" : "neutral"}
+                              >
+                                {task.external ? "外部" : "飞书"}
+                              </StatusBadge>
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                aria-expanded={expanded}
+                                onClick={() => toggleDetail(task)}
+                              >
+                                {expanded ? (
+                                  <ChevronDown className="size-4" />
+                                ) : (
+                                  <ChevronRight className="size-4" />
+                                )}
+                                {expanded ? "收起" : "展开"}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                          {expanded && (
+                            <TableRow>
+                              <TableCell
+                                colSpan={10}
+                                className="bg-muted/20 p-4"
+                              >
+                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs text-muted-foreground">
+                                    实例 {task.instanceCode} ·{" "}
+                                    {feishuStatusLabel(
+                                      task.instanceStatus ?? task.status,
+                                    )}
+                                  </span>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => loadDetail(task)}
+                                  >
+                                    <RefreshCw className="size-3.5" />
+                                    刷新详情
+                                  </Button>
+                                </div>
+                                <BatchTaskDetailBody
+                                  loading={detailLoadingId === task.taskId}
+                                  errorMessage={detailErrors[task.taskId] ?? ""}
+                                  detail={details[task.taskId] ?? null}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
             )}
           </section>
         </div>
       </main>
 
-      <BatchTaskDetailDialog
-        open={detailTask !== null}
-        task={detailTask}
-        accessToken={token}
-        onClose={() => setDetailTask(null)}
-      />
       <BatchActionDialog
         open={action !== null}
         action={action}

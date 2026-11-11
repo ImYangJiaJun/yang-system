@@ -601,7 +601,10 @@ async fn build_body(
 }
 
 fn previous_node_id(detail: &Value) -> Option<Vec<String>> {
-    let records = detail.get("operation_records")?.as_array()?;
+    let records = detail
+        .get("timeline")
+        .and_then(Value::as_array)
+        .or_else(|| detail.get("operation_records").and_then(Value::as_array))?;
     for record in records.iter().rev() {
         let kind = record
             .get("type")
@@ -625,10 +628,16 @@ fn previous_node_id(detail: &Value) -> Option<Vec<String>> {
 
 fn task_status<'a>(detail: &'a Value, task_id: &str) -> Option<&'a str> {
     detail
-        .get("tasks")?
-        .as_array()?
+        .get("task_list")
+        .and_then(Value::as_array)
+        .or_else(|| detail.get("tasks").and_then(Value::as_array))?
         .iter()
-        .find(|task| task.get("task_id").and_then(Value::as_str) == Some(task_id))?
+        .find(|task| {
+            task.get("id")
+                .or_else(|| task.get("task_id"))
+                .and_then(Value::as_str)
+                == Some(task_id)
+        })?
         .get("status")?
         .as_str()
 }

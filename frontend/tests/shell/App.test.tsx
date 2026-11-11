@@ -82,8 +82,8 @@ describe("App", () => {
       within(screen.getByRole("navigation")).queryAllByRole("link"),
     ).toHaveLength(0);
     expect(
-      screen.getByRole("button", { name: "批量审批" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("link", { name: "批量审批" }),
+    ).not.toBeInTheDocument();
   });
   it("导航与首页卡片仅消费 Catalog 落点", async () => {
     vi.stubGlobal(
@@ -135,6 +135,57 @@ describe("App", () => {
       "/access/workspace",
     );
   });
+  it("批量审批作为审批派发的同级侧边栏入口出现", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            code: 0,
+            message: "成功",
+            data: {
+              schema_version: "2.4",
+              revision: "b".repeat(64),
+              actions: [],
+              table_views: [],
+              modules: [
+                {
+                  module_id: "feishu.approval",
+                  identity: {
+                    id: "admin",
+                    title: "系统管理",
+                    icon: "access",
+                    order: 20,
+                  },
+                  title: "审批派发",
+                  description: "",
+                  icon: "send",
+                  order: 20,
+                  app_route: "/admin/feishu-approval",
+                  actions: [],
+                  action_presentations: [],
+                  views: [],
+                },
+              ],
+            },
+          },
+          200,
+        ),
+      ),
+    );
+    renderTestApp({ path: "/", identity: "admin" });
+    const nav = within(screen.getByRole("navigation"));
+    expect(await nav.findByRole("link", { name: "审批派发" })).toHaveAttribute(
+      "href",
+      "/admin/feishu-approval",
+    );
+    expect(nav.getByRole("link", { name: "批量审批" })).toHaveAttribute(
+      "href",
+      "/batch-approval",
+    );
+    expect(nav.getAllByRole("link")).toHaveLength(2);
+  });
+
   it("匿名启动经会话恢复门控落到登录页", async () => {
     // 无 Refresh Cookie：恢复失败 → anonymous → 登录页。
     vi.stubGlobal(

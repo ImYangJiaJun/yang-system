@@ -23,6 +23,20 @@ const MAX_PAGES: usize = 10;
 const PAGE_SIZE: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
+/// 实例 Code 作为路径段：只保留 RFC3986 unreserved 字符，其余按字节百分号编码。
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 fn value_as_string(value: Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value),
@@ -79,6 +93,11 @@ pub(crate) struct TaskItem {
     pub(crate) title: Option<String>,
     #[serde(default, deserialize_with = "optional_string_from_value")]
     pub(crate) initiator_name: Option<String>,
+    #[serde(default, deserialize_with = "optional_string_from_value")]
+    pub(crate) instance_status: Option<String>,
+    /// `/tasks` 的任务分组：1=待办，2=已办，17/18=通知。
+    #[serde(default, deserialize_with = "optional_string_from_value")]
+    pub(crate) topic: Option<String>,
     #[serde(default)]
     pub(crate) summaries: Option<Value>,
     #[serde(default, deserialize_with = "optional_bool_from_value")]
@@ -270,16 +289,17 @@ pub(crate) async fn instance_detail(
     access_token: &str,
     instance_code: &str,
 ) -> Result<Value, ApiError> {
+    let path = format!(
+        "/open-apis/approval/v4/instances/{}",
+        encode_path_segment(instance_code)
+    );
     call(
         ctx,
         settings,
         access_token,
         OutboundMethod::Get,
-        "/open-apis/approval/v4/instances/detail",
-        vec![
-            ("instance_code".to_string(), instance_code.to_string()),
-            ("user_id_type".to_string(), "open_id".to_string()),
-        ],
+        &path,
+        vec![("user_id_type".to_string(), "open_id".to_string())],
         None,
     )
     .await

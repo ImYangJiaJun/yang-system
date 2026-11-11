@@ -36,6 +36,94 @@ export const BATCH_ACTION_LABELS: Record<BatchApprovalAction, string> = {
   add_sign: "加签",
 };
 
+/// `/tasks` 的任务状态（topic/status）：数字语义来自审批查询文档
+/// （approval-search/query.md）：1 待办、2 已办、17 未读、18 已读、33 处理中、34 撤回。
+const FEISHU_TASK_STATUS_LABELS: Record<string, string> = {
+  "1": "待办",
+  "2": "已办",
+  "17": "未读",
+  "18": "已读",
+  "33": "处理中",
+  "34": "撤回",
+  PENDING: "待办",
+  RUNNING: "处理中",
+  TODO: "待办",
+  DONE: "已办",
+};
+
+/// 审批实例状态（process_status）：0 无流程状态、1 流转中、2 已通过、
+/// 3 已拒绝、4 已撤销、5 已终止（approval-search/query.md）。
+const FEISHU_PROCESS_STATUS_LABELS: Record<string, string> = {
+  "0": "无流程状态",
+  "1": "审批中",
+  "2": "已通过",
+  "3": "已拒绝",
+  "4": "已撤销",
+  "5": "已终止",
+  PENDING: "审批中",
+  RUNNING: "审批中",
+  APPROVED: "已通过",
+  REJECTED: "已拒绝",
+  CANCELED: "已撤销",
+  CANCELLED: "已撤销",
+  DELETED: "已删除",
+  TERMINATED: "已终止",
+  TRANSFERRED: "已转交",
+  COMPLETED: "已完成",
+  DONE: "已完成",
+  HIDDEN: "状态隐藏",
+};
+
+function mappedStatus(
+  value: string | null | undefined,
+  labels: Record<string, string>,
+): string {
+  const raw = value?.trim();
+  if (!raw) return "—";
+  const key = raw.toUpperCase();
+  return labels[key] ?? FEISHU_PROCESS_STATUS_LABELS[key] ?? `状态 ${raw}`;
+}
+
+export function feishuTaskStatusLabel(
+  value: string | null | undefined,
+): string {
+  return mappedStatus(value, FEISHU_TASK_STATUS_LABELS);
+}
+
+export function feishuProcessStatusLabel(
+  value: string | null | undefined,
+): string {
+  return mappedStatus(value, FEISHU_PROCESS_STATUS_LABELS);
+}
+
+/// 兼容详情接口里的字符串状态；数字优先按实例状态解释。
+export function feishuStatusLabel(value: string | null | undefined): string {
+  return mappedStatus(value, {});
+}
+
+/// 列表列「实例状态」：优先实例状态；没有时退回任务分组/任务状态。
+export function taskStatusLabel(task: BatchTask): string {
+  return task.instanceStatus
+    ? feishuProcessStatusLabel(task.instanceStatus)
+    : feishuTaskStatusLabel(task.topic ?? task.status);
+}
+
+export const FEISHU_STATUS_FILTER_OPTIONS = [
+  { value: "all", label: "全部状态" },
+  { value: "待办", label: "待办" },
+  { value: "已办", label: "已办" },
+  { value: "未读", label: "未读" },
+  { value: "已读", label: "已读" },
+  { value: "处理中", label: "处理中" },
+  { value: "撤回", label: "撤回" },
+  { value: "审批中", label: "审批中" },
+  { value: "已通过", label: "已通过" },
+  { value: "已拒绝", label: "已拒绝" },
+  { value: "已撤销", label: "已撤销" },
+  { value: "已终止", label: "已终止" },
+  { value: "已完成", label: "已完成" },
+] as const;
+
 export type BatchTask = {
   taskId: string;
   instanceCode: string;
@@ -49,6 +137,11 @@ export type BatchTask = {
   external: boolean;
   instanceExternalId: string | null;
   taskExternalId: string | null;
+  /// 任务分组（飞书 `/tasks` 的 `topic`：1=待办，2=已办，17/18=通知）。
+  topic: string | null;
+  /// 审批实例状态（飞书通常返回 Running/Approved/Rejected 等）。
+  instanceStatus: string | null;
+  /// 任务状态（飞书可能返回 Todo/Done 或 PENDING 等）。
   status: string;
   link: string | null;
   /// 列表时间（毫秒）；后端任务模型没有稳定时间字段时可能为 null。
@@ -263,6 +356,8 @@ function parseTask(raw: unknown): BatchTask | null {
     external: Boolean(instanceExternalId || taskExternalId),
     instanceExternalId,
     taskExternalId,
+    topic: firstText(record, "topic"),
+    instanceStatus: firstText(record, "instance_status"),
     status: firstText(record, "status") ?? "PENDING",
     link: firstText(record, "link"),
     createdAt: timestampOf(
@@ -372,15 +467,40 @@ function parseDetailForm(value: unknown): BatchTaskFormField[] {
   });
 }
 
+const TIMELINE_TYPE_LABELS: Record<string, string> = {
+  START: "发起审批",
+  PASS: "同意",
+  APPROVE: "同意",
+  REJECT: "拒绝",
+  REFUSE: "拒绝",
+  TRANSFER: "转交",
+  TRANSFERRED: "已转交",
+  ADD_SIGN: "加签",
+  ROLLBACK: "退回",
+  CANCEL: "撤销",
+  CANCELED: "撤销",
+  DELETE: "删除",
+  CC: "抄送",
+};
+
 function parseTimelineEntry(raw: unknown): BatchTaskTimelineEntry {
   const record = recordOf(raw);
+  const type = firstText(record, "type", "node_type");
+  const typeLabel = type
+    ? (TIMELINE_TYPE_LABELS[type.toUpperCase()] ?? type)
+    : null;
   return {
     title:
-      firstText(record, "node_name", "task_name", "name", "type") ?? "审批节点",
-    status: firstText(record, "status", "state", "type"),
+      firstText(record, "node_name", "task_name", "name") ??
+      typeLabel ??
+      "审批节点",
+    status: firstText(record, "status", "state") ?? typeLabel,
     userName: firstText(record, "user_name", "user_id", "open_id"),
     time: timestampOf(
-      record?.create_time ?? record?.end_time ?? record?.timestamp,
+      record?.create_time ??
+        record?.end_time ??
+        record?.start_time ??
+        record?.timestamp,
     ),
     comment: firstText(record, "comment", "remark", "message"),
   };
@@ -400,7 +520,10 @@ export async function fetchBatchTaskDetail(
     signal,
   );
   const record = recordOf(data);
-  const rawTimeline = record?.operation_records ?? record?.timeline;
+  // 实例详情接口（GET /instances/{code}）返回 task_list；旧的 detail 接口返回
+  // timeline/operation_records。两者都可用于时间线，优先用官方的 task_list。
+  const rawTimeline =
+    record?.timeline ?? record?.operation_records ?? record?.task_list;
   const timeline = Array.isArray(rawTimeline)
     ? rawTimeline.map(parseTimelineEntry)
     : [];
@@ -413,12 +536,27 @@ export async function fetchBatchTaskDetail(
         })
         .filter((name): name is string => name !== null)
     : [];
+  // 实例详情没有 current_nodes 时，task_list 中 PENDING 的任务就是当前待办节点。
+  const pendingNodeNames = Array.isArray(record?.task_list)
+    ? record.task_list
+        .map((node) => {
+          const nodeRecord = recordOf(node);
+          const status = firstText(nodeRecord, "status")?.toUpperCase();
+          return status === "PENDING"
+            ? firstText(nodeRecord, "node_name", "name")
+            : null;
+        })
+        .filter((name): name is string => name !== null)
+    : [];
+  const uniqueCurrentNodes = [
+    ...new Set([...currentNodeNames, ...pendingNodeNames]),
+  ];
   return {
     taskId,
     instanceCode,
     title:
-      firstText(record, "title", "instance_title") ??
-      firstText(record, "definition_name", "approval_name") ??
+      firstText(record, "title", "instance_title", "approval_name") ??
+      firstText(record, "definition_name") ??
       "审批详情",
     definitionName:
       firstText(record, "definition_name", "approval_name") ?? "未命名审批",
@@ -431,7 +569,7 @@ export async function fetchBatchTaskDetail(
     status: firstText(record, "status", "instance_status"),
     form: parseDetailForm(record?.form),
     timeline,
-    currentNodeNames,
+    currentNodeNames: uniqueCurrentNodes,
   };
 }
 
