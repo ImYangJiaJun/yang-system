@@ -187,6 +187,27 @@ mod tests {
             ),
             Repository::new(
                 definition(
+                    crate::addon::feishu::domain::user_credential_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::domain::batch_job_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::domain::batch_job_item_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
                     crate::addon::feishu::portal::table::table_spec()
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),

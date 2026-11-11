@@ -25,12 +25,19 @@ pub struct Application {
     pub runtime: BuiltApp,
     /// 过期直授的后台收敛句柄；由 bootstrap 在 Tools 关闭前驱动。
     pub(crate) grant_expiry: access::GrantExpiryHandle,
+    /// 账号域外部登录端口；后台批量审批 worker 用它复核用户是否仍 active。
+    external_login: Arc<dyn account::ExternalLoginPort>,
 }
 
 impl Application {
     /// 供后台 Worker 使用的收敛句柄（内部只克隆 `Arc`）。
     pub(crate) fn grant_expiry_handle(&self) -> access::GrantExpiryHandle {
         self.grant_expiry.clone()
+    }
+
+    /// 账号域外部登录端口（内部只克隆 `Arc`）。
+    pub(crate) fn external_login(&self) -> Arc<dyn account::ExternalLoginPort> {
+        Arc::clone(&self.external_login)
     }
 }
 
@@ -94,36 +101,50 @@ fn build_application(
     // 引导声明器与账号生命周期守卫都由 access 域实现：它是唯一持有组事实受信 writer 的域。
     let system_owner_claimer = access.system_owner_claimer();
     let system_authorization = access.system_authorization_port();
-    // 飞书 Addon 需要 MySQL（两张表的 Repository 绑定连接池）。缺 MySQL 时不装配——
+    // 账号上下文先于飞书构建：飞书 SSO 需要把同一个 `Account` 作为
+    // `ExternalLoginPort` 注入，才能完成跨域的用户查找/建号/绑定/会话签发。
+    let account_context = account::build_context(
+        Arc::clone(&security),
+        Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
+        system_owner_claimer,
+        system_authorization,
+    )
+    .context("构建 account 上下文失败")?;
+    let external_login: Arc<dyn account::ExternalLoginPort> = account_context.clone();
+    // 飞书 Addon 需要 MySQL（表的 Repository 绑定连接池）。缺 MySQL 时不装配——
     // 与上面 `RedisNotInitialized => None` 同一个惯例：运行态缺失不是错误，
     // 只有真实故障才向上冒泡。
     let feishu = match tools.mysql() {
-        Ok(database) => Some(
-            feishu::build_addon(
-                Arc::new(database.pool().clone()),
-                tools
-                    .config::<Arc<crate::config::FeishuSettings>>()
-                    .ok()
-                    .cloned(),
-                Arc::clone(&security),
-                authorization_validator.clone(),
+        Ok(database) => {
+            let pool = Arc::new(database.pool().clone());
+            let settings = tools
+                .config::<Arc<crate::config::FeishuSettings>>()
+                .ok()
+                .cloned();
+            // 账号删除要清理飞书凭证/job；hook 必须在 account Addon 被消费前注册。
+            let deletion_context =
+                feishu::build_context(Arc::clone(&pool), Arc::clone(&security), settings.clone())
+                    .context("构建飞书删除钩子上下文失败")?;
+            account_context.register_deletion_hook(deletion_context);
+            Some(
+                feishu::build_addon(
+                    pool,
+                    settings,
+                    Arc::clone(&security),
+                    Arc::clone(&external_login),
+                    authorization_validator.clone(),
+                )
+                .context("构建 feishu Addon 失败")?,
             )
-            .context("构建 feishu Addon 失败")?,
-        ),
+        }
         Err(yang_base::BaseError::DatabaseNotInitialized) => None,
         Err(error) => return Err(error).context("检查飞书 Addon 运行态失败"),
     };
     let mut builder = AppBuilder::new()
         .addon(
-            account::build_addon(
-                Arc::clone(&security),
-                Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
-                system_owner_claimer,
-                system_authorization,
-                authorization_validator,
-            )
-            .context("构建 account Addon 失败")?
-            .middleware(action_logging),
+            account::build_addon_with_context(account_context, authorization_validator)
+                .context("构建 account Addon 失败")?
+                .middleware(action_logging),
         )
         .addon(
             access
@@ -145,6 +166,7 @@ fn build_application(
     Ok(Application {
         runtime,
         grant_expiry,
+        external_login,
     })
 }
 
@@ -320,6 +342,7 @@ mod tests {
                 approval_base_timezone: "Asia/Shanghai".to_string(),
                 event_verification_token: None,
                 event_encrypt_key: None,
+                ..crate::config::FeishuSettings::default()
             })),
             test_security(),
         )

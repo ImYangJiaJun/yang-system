@@ -432,3 +432,13 @@ pull_interval_seconds = 900
 # 连续失败多少轮之后开始告警；达阈值后每轮都发，直到有一轮成功把计数清零。
 # 有效范围 2..=1000；默认：3
 alert_failure_threshold = 3
+# 飞书 SSO 登录（可选；与上面的管理员 OAuth 是两条独立回调）。
+# login_redirect_uri = "https://<host>/api/v1/auth/feishu/callback"
+# login_enabled = false
+# login_allow_create = true
+# login_allowed_tenant_keys = []
+# login_allowed_redirects = ["/", "/batch-approval", "/account"]
+# 批量审批。
+# batch_max_tasks = 50
+# batch_worker_enabled = true
+# batch_worker_interval_seconds = 2

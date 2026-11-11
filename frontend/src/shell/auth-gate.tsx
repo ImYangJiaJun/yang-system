@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Navigate, useSearchParams } from "react-router";
+import { Navigate, useLocation, useSearchParams } from "react-router";
 
 import { safeRedirectTarget } from "@/features/auth/redirect";
 import {
@@ -36,11 +36,19 @@ function SessionRestoreFailedScreen() {
 }
 
 /// 受保护区域门控：pending → 骨架；anonymous → /login；authenticated → children。
+/// 未登录时把当前 pathname + search 带进 `?redirect=`：飞书分享链接（如
+/// `/batch-approval`）登录后能回到原目标，而不是一律落到首页。
 export function RequireAuth({ children }: { children: ReactNode }) {
   const snapshot = useRestoredSession();
+  const location = useLocation();
   if (snapshot.restoreState === "pending") return <SessionPendingScreen />;
   if (snapshot.restoreState === "failed") return <SessionRestoreFailedScreen />;
-  if (!snapshot.loggedIn) return <Navigate to="/login" replace />;
+  if (!snapshot.loggedIn) {
+    const current = `${location.pathname}${location.search}`;
+    return (
+      <Navigate to={`/login?redirect=${encodeURIComponent(current)}`} replace />
+    );
+  }
   return children;
 }
 

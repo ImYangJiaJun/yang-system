@@ -103,7 +103,7 @@ pub async fn sync_with_database(
     result
 }
 
-fn infrastructure_definitions() -> Result<[TableDefinition; 9], BaseError> {
+fn infrastructure_definitions() -> Result<[TableDefinition; 10], BaseError> {
     Ok([
         authorization_outbox()?,
         audit_event()?,
@@ -118,6 +118,7 @@ fn infrastructure_definitions() -> Result<[TableDefinition; 9], BaseError> {
         user_session()?,
         login_event()?,
         user_avatar()?,
+        crate::addon::account::domain::identity::user_identity_table_spec()?.table_definition()?,
     ])
 }
 
@@ -370,6 +371,7 @@ mod tests {
                 "user_session",
                 "login_event",
                 "user_avatar",
+                "user_identity",
             ]
         );
     }

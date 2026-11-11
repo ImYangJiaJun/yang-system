@@ -6,6 +6,7 @@ pub(crate) mod db;
 pub mod feishu_approval_comment_worker;
 pub mod feishu_approval_export_worker;
 pub mod feishu_approval_worker;
+pub mod feishu_batch_worker;
 pub mod feishu_event_worker;
 pub mod feishu_oauth_reminder;
 pub mod feishu_pull;

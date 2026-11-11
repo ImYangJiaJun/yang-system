@@ -1,0 +1,383 @@
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { clearStoredSession } from "@/engine/session/auth-session";
+import { renderTestApp } from "@test/helpers/render-app";
+
+/// 批量审批页：分组、可操作性、动作确认、job 轮询、详情与重新授权引导。
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+const TASKS = [
+  {
+    task_id: "t1",
+    instance_code: "i1",
+    definition_code: "D1",
+    definition_name: "报销审批",
+    title: "报销单 A",
+    initiator_name: "李四",
+    summaries: ["差旅费 ¥100"],
+    support_api_operate: true,
+    status: "PENDING",
+    create_time: 1_700_000_000,
+  },
+  {
+    task_id: "t2",
+    instance_code: "i2",
+    definition_code: "D2",
+    definition_name: "请假审批",
+    title: "请假单 B",
+    initiator_name: "王五",
+    summaries: ["2 天"],
+    support_api_operate: false,
+    status: "PENDING",
+  },
+  {
+    task_id: "t3",
+    instance_code: "i3",
+    definition_code: "D2",
+    definition_name: "请假审批",
+    title: "外部单 C",
+    initiator_name: "赵六",
+    summaries: ["外部流程"],
+    instance_external_id: "ext-1",
+    status: "PENDING",
+  },
+];
+
+type Call = { method: string; path: string; body: unknown };
+
+type StubOptions = {
+  tasksResponse?: Response;
+  detail?: unknown;
+  jobResponses?: Record<string, unknown>;
+  onCreateJob?: (body: unknown) => { job_id: string };
+  onSearch?: (query: string) => unknown;
+};
+
+function stubBatchApi(options: StubOptions = {}): Call[] {
+  const calls: Call[] = [];
+  let created = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const raw = typeof input === "string" ? input : input.toString();
+      const url = new URL(raw, "http://localhost");
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, path: url.pathname, body });
+
+      if (url.pathname === "/api/v1/users/me") {
+        return jsonResponse({
+          code: 0,
+          data: { username: "alice" },
+        });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/tasks") {
+        return (
+          options.tasksResponse ??
+          jsonResponse({
+            code: 0,
+            data: { tasks: TASKS, truncated: false },
+          })
+        );
+      }
+      if (url.pathname.startsWith("/api/v1/feishu/batch-approval/tasks/")) {
+        return jsonResponse({
+          code: 0,
+          data: options.detail ?? {},
+        });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/users/search") {
+        return jsonResponse({
+          code: 0,
+          data: {
+            users: options.onSearch
+              ? options.onSearch(url.searchParams.get("q") ?? "")
+              : [],
+          },
+        });
+      }
+      if (
+        url.pathname === "/api/v1/feishu/batch-approval/jobs" &&
+        method === "POST"
+      ) {
+        created += 1;
+        const result = options.onCreateJob
+          ? options.onCreateJob(body)
+          : { job_id: `job-${created}` };
+        return jsonResponse({ code: 0, data: result });
+      }
+      const jobMatch = url.pathname.match(
+        /^\/api\/v1\/feishu\/batch-approval\/jobs\/([^/]+)$/,
+      );
+      if (jobMatch && method === "GET") {
+        const payload = options.jobResponses?.[jobMatch[1]];
+        if (!payload) {
+          throw new Error(`测试未覆盖的 job：${jobMatch[1]}`);
+        }
+        return jsonResponse({ code: 0, data: payload });
+      }
+      throw new Error(`测试未覆盖的请求：${method} ${url.pathname}`);
+    }),
+  );
+  return calls;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  sessionStorage.clear();
+  localStorage.clear();
+  clearStoredSession();
+});
+
+describe("BatchApprovalPage", () => {
+  it("按定义分组展示，不可操作任务禁用并说明原因", async () => {
+    stubBatchApi();
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    expect(
+      await screen.findByRole("heading", { name: "批量审批" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("报销单 A")).toBeInTheDocument();
+    // 左侧分组带数量。
+    expect(screen.getByRole("button", { name: /报销审批/ })).toHaveTextContent(
+      "1",
+    );
+    expect(screen.getByRole("button", { name: /请假审批/ })).toHaveTextContent(
+      "2",
+    );
+
+    // support_api_operate=false 与外部审批都不可勾选，并给出原因。
+    expect(screen.getByLabelText("选择 请假单 B")).toBeDisabled();
+    expect(screen.getByLabelText("选择 外部单 C")).toBeDisabled();
+    expect(screen.getByText("该审批不支持 API 操作")).toBeInTheDocument();
+    expect(screen.getByText("外部审批，需在飞书侧处理")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 报销单 A")).not.toBeDisabled();
+  });
+
+  it("勾选任务 → 同意确认 → 创建 job 并轮询逐条结果", async () => {
+    const calls = stubBatchApi({
+      jobResponses: {
+        "job-1": {
+          job_id: "job-1",
+          status: "succeeded",
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          unknown: 0,
+          items: [
+            {
+              task_id: "t1",
+              instance_code: "i1",
+              title: "报销单 A",
+              status: "succeeded",
+            },
+          ],
+        },
+      },
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await screen.findByText("报销单 A");
+    await user.click(screen.getByLabelText("选择 报销单 A"));
+    await user.click(screen.getByRole("button", { name: "同意" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/即将对/)).toHaveTextContent("1");
+    await user.click(within(dialog).getByRole("button", { name: "确认同意" }));
+
+    const createCall = calls.find(
+      (call) =>
+        call.method === "POST" &&
+        call.path === "/api/v1/feishu/batch-approval/jobs",
+    );
+    expect(createCall?.body).toMatchObject({
+      action: "pass",
+      items: [{ task_id: "t1", instance_code: "i1" }],
+    });
+    expect(
+      (createCall?.body as { idempotency_key?: string } | undefined)
+        ?.idempotency_key,
+    ).toEqual(expect.any(String));
+
+    expect(await screen.findByText("全部成功")).toBeInTheDocument();
+    expect(screen.getByText("成功")).toBeInTheDocument();
+  });
+
+  it("拒绝必须填写理由；填写后 job 携带 comment", async () => {
+    const calls = stubBatchApi({
+      jobResponses: {
+        "job-1": {
+          job_id: "job-1",
+          status: "succeeded",
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          unknown: 0,
+          items: [],
+        },
+      },
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await screen.findByText("报销单 A");
+    await user.click(screen.getByLabelText("选择 报销单 A"));
+    await user.click(screen.getByRole("button", { name: "拒绝" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const confirm = within(dialog).getByRole("button", { name: "确认拒绝" });
+    expect(confirm).toBeDisabled();
+
+    await user.type(
+      within(dialog).getByLabelText("审批意见（必填）"),
+      "金额不符",
+    );
+    expect(confirm).not.toBeDisabled();
+    await user.click(confirm);
+
+    const createCall = calls.find(
+      (call) =>
+        call.method === "POST" &&
+        call.path === "/api/v1/feishu/batch-approval/jobs",
+    );
+    expect(createCall?.body).toMatchObject({
+      action: "refuse",
+      comment: "金额不符",
+      items: [{ task_id: "t1", instance_code: "i1" }],
+    });
+  });
+
+  it("查看详情用 Dialog 展示表单与时间线", async () => {
+    stubBatchApi({
+      detail: {
+        instance_code: "i1",
+        title: "报销单 A",
+        definition_name: "报销审批",
+        initiator_name: "李四",
+        status: "PENDING",
+        form: [{ name: "金额", value: "100" }],
+        current_nodes: [{ name: "部门审批" }],
+        operation_records: [
+          {
+            node_name: "发起",
+            type: "PASS",
+            user_name: "李四",
+            create_time: 1_700_000_000,
+          },
+        ],
+      },
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    const title = await screen.findByText("报销单 A");
+    const row = title.closest("tr");
+    expect(row).not.toBeNull();
+    await user.click(
+      within(row as HTMLElement).getByRole("button", { name: "查看" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("金额")).toBeInTheDocument();
+    expect(within(dialog).getByText("100")).toBeInTheDocument();
+    expect(within(dialog).getByText(/部门审批/)).toBeInTheDocument();
+    expect(within(dialog).getByText("发起")).toBeInTheDocument();
+  });
+
+  it("凭证失效时显示重新授权入口", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse(
+        { code: 99991679, message: "user access token 缺少审批 scope" },
+        400,
+      ),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    expect(
+      await screen.findByText(/飞书授权已过期或尚未绑定/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新授权飞书" }),
+    ).toBeInTheDocument();
+  });
+
+  it("失败项可重试：提交一个带新幂等键的新 job", async () => {
+    const calls = stubBatchApi({
+      jobResponses: {
+        "job-1": {
+          job_id: "job-1",
+          status: "failed",
+          total: 1,
+          succeeded: 0,
+          failed: 1,
+          unknown: 0,
+          items: [
+            {
+              task_id: "t1",
+              instance_code: "i1",
+              title: "报销单 A",
+              status: "failed",
+              message: "任务状态已变化",
+            },
+          ],
+        },
+        "job-2": {
+          job_id: "job-2",
+          status: "succeeded",
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          unknown: 0,
+          items: [
+            {
+              task_id: "t1",
+              instance_code: "i1",
+              title: "报销单 A",
+              status: "succeeded",
+            },
+          ],
+        },
+      },
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await screen.findByText("报销单 A");
+    await user.click(screen.getByLabelText("选择 报销单 A"));
+    await user.click(screen.getByRole("button", { name: "同意" }));
+    await user.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "确认同意",
+      }),
+    );
+
+    const retryButton = await screen.findByRole("button", {
+      name: /重试失败项/,
+    });
+    await user.click(retryButton);
+
+    await waitFor(() => {
+      const createCalls = calls.filter(
+        (call) =>
+          call.method === "POST" &&
+          call.path === "/api/v1/feishu/batch-approval/jobs",
+      );
+      expect(createCalls).toHaveLength(2);
+      expect(createCalls[1]?.body).toMatchObject({
+        action: "pass",
+        items: [{ task_id: "t1", instance_code: "i1" }],
+      });
+    });
+    expect(await screen.findByText("全部成功")).toBeInTheDocument();
+  });
+});

@@ -135,6 +135,23 @@ impl GroupRepository {
         }
     }
 
+    /// 只读探查：引导哨兵是否已经存在。
+    ///
+    /// 仅用于「系统是否完成首个管理员初始化」的前置检查；**不得**用它替代
+    /// `insert_owner_sentinel_in_tx` 的并发仲裁。
+    pub(crate) async fn owner_sentinel_exists(
+        &self,
+        ctx: &ActionContext,
+    ) -> Result<bool, BaseError> {
+        let rows = self
+            .trusted_owner(ctx)?
+            .select_fields(&[OWNER_SENTINEL_KEY])?
+            .page(1, 1)?
+            .all()
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
     /// 竞争引导哨兵；重复插入由唯一约束与 CHECK 拒绝。
     ///
     /// 这是哨兵表的唯一写入口：并发仲裁完全交给数据库约束，

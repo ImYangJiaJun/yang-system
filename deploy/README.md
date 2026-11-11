@@ -389,7 +389,7 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
 
 | 症状 | 多半是 |
 |---|---|
-| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `oauth_redirect_uri` / `pull_interval_seconds` / `alert_recipients` / `alert_failure_threshold` / `log_inbound_requests` / `approval_create_rate_per_minute` / `approval_scan_interval_seconds` / `approval_base_timezone` / `event_verification_token` / `event_encrypt_key`（`deny_unknown_fields`，多一个就起不来） |
+| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `oauth_redirect_uri` / `pull_interval_seconds` / `alert_recipients` / `alert_failure_threshold` / `log_inbound_requests` / `approval_create_rate_per_minute` / `approval_scan_interval_seconds` / `approval_base_timezone` / `event_verification_token` / `event_encrypt_key` / `login_redirect_uri` / `login_enabled` / `login_allow_create` / `login_allowed_tenant_keys` / `login_allowed_redirects` / `batch_max_tasks` / `batch_worker_enabled` / `batch_worker_interval_seconds`（`deny_unknown_fields`，多一个就起不来） |
 | 容器起来几秒就退出，日志含「必须使用 https」 | `[email.password_reset].link_base_url` 用了 http，而 `environment = "production"` 下只接受 https |
 | 容器起来几秒就退出，日志含「占位」或密钥长度 | 有未填的 `replace-with-*`，或密钥不足 32 字节 |
 | 日志里有 `Unknown database` | 库不存在。跑 `./deploy-blue-green.sh infra-up`（内含建库步骤），或手动：`docker exec -e MYSQL_PWD="$(cat .mysql-root-password)" yang-mysql mysql -uroot -e "CREATE DATABASE IF NOT EXISTS yang_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"` |

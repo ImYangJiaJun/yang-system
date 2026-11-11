@@ -6,9 +6,14 @@
 
 use super::avatar::AvatarRepository;
 use super::claims;
-use super::login_event::LoginEventRepository;
+use super::deletion::AccountDeletionHook;
+use super::email_delivery::NewDeviceEmailSenderHandle;
+use super::external_login::IssuedSession;
+use super::identity::IdentityRepository;
+use super::login_event::{LoginEventRepository, NewLoginEvent};
+use super::policy::normalize_username;
 use super::repository::UserRepository;
-use super::session::SessionRepository;
+use super::session::{NewSession, SessionRepository};
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{
     activate_locked_user_and_increment_versions, anonymize_locked_user_and_increment_versions,
@@ -24,15 +29,18 @@ use crate::addon::account::domain::password_reset::{
 use crate::addon::account::domain::system_owner::{
     OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer,
 };
-use crate::addon::account::user::table::{UserView, STATUS};
+use crate::addon::account::user::table::{UserView, EMAIL, STATUS};
 use crate::audit;
 use crate::config::{SecuritySettings, TotpSettings};
 use crate::db::Transaction;
 use serde_json::json;
 use std::sync::Arc;
-use yang_base::action::auth::{AuthRateLimiter, BrowserSession, PasswordEngine, TokenPairClaims};
-use yang_base::action::ActionContext;
-use yang_base::token::TokenClaims;
+use yang_base::action::auth::{
+    normalize_email, AuthOperation, AuthRateLimiter, BrowserSession, PasswordEngine,
+    TokenPairClaims,
+};
+use yang_base::action::{ActionContext, ApiResponse, ResponseAttachment};
+use yang_base::token::{TokenClaims, TokenType};
 use yang_base::BaseError;
 
 /// 浏览器刷新会话 Cookie 名称（Host-only、HttpOnly、SameSite=Strict）。
@@ -43,6 +51,7 @@ const REFRESH_COOKIE_PATH: &str = "/api/v1/users";
 /// 账号模块上下文：聚合共享资源，并以方法承载跨用例机制。
 pub(crate) struct Account {
     users: Arc<UserRepository>,
+    identities: Arc<IdentityRepository>,
     sessions: Arc<SessionRepository>,
     login_events: Arc<LoginEventRepository>,
     avatars: Arc<AvatarRepository>,
@@ -56,6 +65,8 @@ pub(crate) struct Account {
     totp_settings: Option<TotpSettings>,
     /// 受信代理网段：装配 `TrustedClientIpMiddleware` 时用于解析真实客户端 IP。
     trusted_proxy_cidrs: Vec<String>,
+    /// 账号删除事务内需要清理的跨 Addon 子表。
+    deletion_hooks: std::sync::RwLock<Vec<Arc<dyn AccountDeletionHook>>>,
 }
 
 impl Account {
@@ -63,6 +74,7 @@ impl Account {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         users: UserRepository,
+        identities: IdentityRepository,
         sessions: SessionRepository,
         login_events: LoginEventRepository,
         avatars: AvatarRepository,
@@ -73,6 +85,7 @@ impl Account {
     ) -> Result<Self, BaseError> {
         Ok(Self {
             users: Arc::new(users),
+            identities: Arc::new(identities),
             sessions: Arc::new(sessions),
             login_events: Arc::new(login_events),
             avatars: Arc::new(avatars),
@@ -85,13 +98,33 @@ impl Account {
             password_reset_ttl_seconds: security.password_reset_ttl_seconds,
             totp_settings: security.totp.clone(),
             trusted_proxy_cidrs: security.trusted_proxy_cidrs.clone(),
+            deletion_hooks: std::sync::RwLock::new(Vec::new()),
         })
     }
 
     // ---- 资源访问器 ----
 
+    /// 注册账号删除事务内的 Addon 清理钩子（组合根装配期调用一次）。
+    pub(crate) fn register_deletion_hook(&self, hook: Arc<dyn AccountDeletionHook>) {
+        if let Ok(mut hooks) = self.deletion_hooks.write() {
+            hooks.push(hook);
+        }
+    }
+
+    /// 当前已注册的删除钩子快照。
+    pub(crate) fn deletion_hooks(&self) -> Vec<Arc<dyn AccountDeletionHook>> {
+        self.deletion_hooks
+            .read()
+            .map(|hooks| hooks.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn users(&self) -> &UserRepository {
         &self.users
+    }
+
+    pub(crate) fn identities(&self) -> &IdentityRepository {
+        &self.identities
     }
 
     pub(crate) fn sessions(&self) -> &SessionRepository {
@@ -278,6 +311,268 @@ impl Account {
             }
         }
         Err(BaseError::InvalidPassword)
+    }
+
+    /// 校验当前登录用户的密码（Step-up 用）。
+    ///
+    /// 与登录路径分离：不要求用户名/邮箱，不复用登录限流键，避免把 Step-up
+    /// 失败计入登录锁定；按用户维度使用改密预算，同样经 Argon2 校验。
+    pub(crate) async fn verify_current_password(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        password: &str,
+    ) -> Result<(), BaseError> {
+        let limit_key = user_id.to_string();
+        self.rate_limiter
+            .check(ctx, AuthOperation::ChangePassword, &limit_key)
+            .await?;
+        let user = self.users.find_credentials_by_id(ctx, user_id).await?;
+        let password_matches = self
+            .passwords
+            .verify_or_dummy(
+                password,
+                user.as_ref().map(|user| user.password_hash.as_str()),
+            )
+            .await?;
+        let Some(user) = user else {
+            return Err(BaseError::InvalidPassword);
+        };
+        Self::ensure_active(user.status)?;
+        if !password_matches {
+            self.rate_limiter
+                .record_failure(ctx, AuthOperation::ChangePassword, &limit_key)
+                .await?;
+            return Err(BaseError::InvalidPassword);
+        }
+        Ok(())
+    }
+
+    /// 校验用户名/邮箱 + 密码（+MFA），返回已认证用户 ID。
+    ///
+    /// 密码登录与飞书 SSO 的「绑定已有账号」共用这一条路径，避免两套
+    /// Argon2/限流/MFA 语义漂移。`purpose` 只用于审计口径。
+    pub(crate) async fn verify_password_credentials(
+        &self,
+        ctx: &ActionContext,
+        identifier: &str,
+        password: &str,
+        mfa_code: Option<&str>,
+        allow_backup_email: bool,
+        purpose: &'static str,
+    ) -> Result<i64, BaseError> {
+        let identifier = identifier.trim().to_ascii_lowercase();
+        let normalized = if identifier.contains('@') {
+            normalize_email(&identifier)?
+        } else {
+            normalize_username(&identifier)?
+        };
+        let user = if identifier.contains('@') {
+            self.users
+                .find_credentials_by_email(ctx, &normalized)
+                .await?
+        } else {
+            self.users
+                .find_credentials_by_username(ctx, &normalized)
+                .await?
+        };
+        let limit_key = login_rate_limit_key(user.as_ref().map(|user| user.id), &normalized);
+        self.rate_limiter
+            .check(ctx, AuthOperation::Login, &limit_key)
+            .await?;
+        let password_matches = self
+            .passwords
+            .verify_or_dummy(
+                password,
+                user.as_ref().map(|user| user.password_hash.as_str()),
+            )
+            .await?;
+        if !password_matches {
+            return Err(BaseError::InvalidPassword);
+        }
+        let user = user.ok_or(BaseError::InvalidPassword)?;
+        Self::ensure_active(user.status)?;
+        let totp_state = self.users.find_totp_state_by_id(ctx, user.id).await?;
+        if let Some(state) = totp_state {
+            if state.totp_activated_at.is_some() {
+                let secret = self.users.decrypt_totp_secret(ctx, &state).await?;
+                match mfa_code {
+                    Some(code) => {
+                        let accepted = self
+                            .verify_second_factor(
+                                ctx,
+                                user.id,
+                                &state,
+                                &secret,
+                                code,
+                                allow_backup_email,
+                                purpose,
+                            )
+                            .await
+                            .is_ok();
+                        if !accepted {
+                            self.rate_limiter
+                                .record_failure(ctx, AuthOperation::Login, &limit_key)
+                                .await?;
+                            return Err(BaseError::ParamInvalid(
+                                "mfa_code".to_string(),
+                                "双重验证码错误或已过期".to_string(),
+                            ));
+                        }
+                    }
+                    None => return Err(BaseError::SecondFactorRequired),
+                }
+            }
+        }
+        Ok(user.id)
+    }
+
+    /// 为已确认用户签发系统会话（claims + token pair + user_session + login_event）。
+    pub(crate) async fn issue_login_session(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<IssuedSession, BaseError> {
+        let claims = self.claims_for(ctx, user_id).await?;
+        let (access_token, refresh_token) = ctx
+            .tools()
+            .token()?
+            .generate_token_pair_with_refresh_claims(
+                &user_id.to_string(),
+                claims.access,
+                claims.refresh,
+            )?;
+        self.record_login_session(ctx, &access_token, &refresh_token, ip, user_agent)
+            .await?;
+        Ok(IssuedSession {
+            access_token,
+            refresh_token,
+        })
+    }
+
+    /// 从新签发的 access/refresh token 提取 session_id 与两个 jti 并写入 `user_session`。
+    pub(crate) async fn record_login_session(
+        &self,
+        ctx: &ActionContext,
+        access_token: &str,
+        refresh_token: &str,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<(), BaseError> {
+        let claims = ctx.tools().token()?.verify_token(access_token)?;
+        if claims.token_type != TokenType::Access {
+            return Ok(());
+        }
+        let Some(session_id) = claims
+            .custom
+            .get("session_id")
+            .and_then(|value| value.as_str())
+        else {
+            return Ok(());
+        };
+        let session_id = session_id.to_string();
+        let user_id = claims
+            .sub
+            .parse::<i64>()
+            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+        let refresh_jti = ctx
+            .tools()
+            .token()?
+            .verify_token(refresh_token)
+            .ok()
+            .map(|refresh_claims| refresh_claims.jti);
+        let now = current_unix_timestamp()?;
+        self.sessions
+            .upsert(
+                ctx,
+                NewSession {
+                    session_id,
+                    user_id,
+                    jti: claims.jti,
+                    refresh_jti,
+                    ip: ip.to_string(),
+                    user_agent: truncate_user_agent(user_agent),
+                    now,
+                },
+            )
+            .await?;
+        let _ = self
+            .login_events
+            .append(
+                ctx,
+                NewLoginEvent {
+                    user_id: Some(user_id),
+                    occurred_at: now,
+                    ip: ip.to_string(),
+                    user_agent: truncate_user_agent(user_agent),
+                    result: "succeeded",
+                    failure_reason: None,
+                },
+            )
+            .await;
+        let active_count = self
+            .sessions
+            .active_count_for_user(ctx, user_id)
+            .await
+            .unwrap_or(0);
+        if active_count <= 1 {
+            if let Err(error) = self.notify_new_device(ctx, user_id, ip, user_agent).await {
+                tracing::warn!(error = %error, "新设备登录提醒投递失败");
+            }
+        }
+        Ok(())
+    }
+
+    async fn notify_new_device(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<(), BaseError> {
+        let sender = ctx.tools().extension::<NewDeviceEmailSenderHandle>()?;
+        let Some(record) = self.users.find_by_id(ctx, user_id).await? else {
+            return Ok(());
+        };
+        let Some(email) = record.optional::<String>(EMAIL)? else {
+            return Ok(());
+        };
+        sender
+            .send_new_device_login(&email, ip, user_agent, current_unix_timestamp()?)
+            .await
+            .map_err(|error| BaseError::Unknown(format!("新设备提醒投递失败: {error}")))
+    }
+
+    /// 浏览器 Refresh Cookie 的 `Set-Cookie` 头（与 `BrowserSession` 同属性）。
+    pub(crate) fn refresh_cookie_header(token: &str, secure: bool) -> String {
+        format!(
+            "{}={token}; Path={}; HttpOnly; SameSite=Strict{}",
+            REFRESH_COOKIE_NAME,
+            REFRESH_COOKIE_PATH,
+            if secure { "; Secure" } else { "" }
+        )
+    }
+
+    /// 302 + 会话 Cookie（跨站 OAuth 回调；Access Token 由前端加载后刷新取得）。
+    pub(crate) fn session_redirect_response(
+        location: &str,
+        refresh_token: &str,
+        secure: bool,
+    ) -> Result<ApiResponse, BaseError> {
+        let response = ApiResponse::attachment(
+            ResponseAttachment::Redirect {
+                url: location.to_string(),
+            },
+            "登录成功",
+        )
+        .with_header(
+            "set-cookie",
+            Self::refresh_cookie_header(refresh_token, secure),
+        )?
+        .with_header("cache-control", "no-store")?;
+        response.with_header("pragma", "no-cache")
     }
 
     /// 提交或回滚一个业务事务，回滚失败只记录日志不覆盖原错误。
@@ -637,6 +932,26 @@ impl Account {
     }
 }
 
+/// 构造登录限流键：账号存在时带 `id:` 前缀，与归一化标识命名空间隔离。
+fn login_rate_limit_key(user_id: Option<i64>, normalized: &str) -> String {
+    user_id
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| normalized.to_string())
+}
+
+/// 会话/登录事件表的 `user_agent` 列宽为 512；超长 UA 会让写入失败。
+fn truncate_user_agent(value: &str) -> String {
+    value.chars().take(512).collect()
+}
+
+fn current_unix_timestamp() -> Result<i64, BaseError> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
+        .as_secs();
+    i64::try_from(seconds).map_err(|_| BaseError::ConfigError("系统时间超出 i64 范围".to_string()))
+}
+
 /// 登录/刷新共享的授权快照。
 struct AuthorizationSnapshot {
     username: String,
@@ -692,6 +1007,17 @@ mod tests {
     }
 
     /// spec §8.2 的守卫拒绝必须是**可归因的客户端错误**，绝不能映射成 5xx。
+    #[test]
+    fn 限流键_账号存在时带id前缀与标识命名空间隔离() {
+        assert_eq!(login_rate_limit_key(Some(42), "42"), "id:42");
+        assert_eq!(login_rate_limit_key(None, "42"), "42");
+        assert_ne!(
+            login_rate_limit_key(Some(42), "42"),
+            login_rate_limit_key(None, "42"),
+            "数字串标识不得与账号 ID 键互撞（定向锁定回归）"
+        );
+    }
+
     #[test]
     fn last_system_admin_guard_is_a_readable_client_error() {
         let error = Account::last_system_admin_guard("停用");

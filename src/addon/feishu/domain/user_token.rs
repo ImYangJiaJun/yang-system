@@ -463,6 +463,32 @@ pub(crate) async fn exchange_code(
     to_bundle(response, now)
 }
 
+/// 用授权码 + PKCE verifier 换第一对凭证（SSO 登录/绑定专用）。
+pub(crate) async fn exchange_code_pkce(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    credentials: &FeishuCredentials,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    now: i64,
+) -> Result<TokenBundle, TokenEndpointError> {
+    let response = request_tokens(
+        transport,
+        sleeper,
+        json!({
+            "grant_type": "authorization_code",
+            "client_id": credentials.app_id,
+            "client_secret": credentials.app_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }),
+    )
+    .await?;
+    to_bundle(response, now)
+}
+
 /// 用刷新凭证换新的一对（旧的 `refresh_token` 立即作废）。
 pub(crate) async fn refresh_tokens(
     transport: &dyn OutboundTransport,
@@ -485,17 +511,38 @@ pub(crate) async fn refresh_tokens(
     to_bundle(response, now)
 }
 
-/// 取授权人的 open_id 与姓名（拿刚换到的 `user_access_token` 调）。
-pub(crate) async fn fetch_user_info(
+/// 授权人的完整身份资料（SSO 登录需要邮箱/租户/头像，派发只需要 open_id/姓名）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UserInfo {
+    pub(crate) open_id: String,
+    pub(crate) union_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) email: Option<String>,
+    pub(crate) avatar_url: Option<String>,
+    pub(crate) tenant_key: Option<String>,
+}
+
+/// 取授权人的完整身份资料（拿刚换到的 `user_access_token` 调）。
+pub(crate) async fn fetch_user_info_full(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
     access_token: &str,
-) -> Result<(String, Option<String>), TokenEndpointError> {
+) -> Result<UserInfo, TokenEndpointError> {
     #[derive(Deserialize)]
-    struct UserInfo {
+    struct RawUserInfo {
         open_id: String,
         #[serde(default)]
+        union_id: Option<String>,
+        #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
+        email: Option<String>,
+        #[serde(default)]
+        enterprise_email: Option<String>,
+        #[serde(default)]
+        avatar_url: Option<String>,
+        #[serde(default)]
+        tenant_key: Option<String>,
     }
     #[derive(Deserialize)]
     struct Envelope {
@@ -503,7 +550,7 @@ pub(crate) async fn fetch_user_info(
         #[serde(default)]
         msg: Option<String>,
         #[serde(default)]
-        data: Option<UserInfo>,
+        data: Option<RawUserInfo>,
     }
 
     let request = OutboundRequest {
@@ -531,7 +578,44 @@ pub(crate) async fn fetch_user_info(
     let info = envelope
         .data
         .ok_or_else(|| TokenEndpointError::new(0, "用户信息响应里没有 data"))?;
+    Ok(UserInfo {
+        open_id: info.open_id,
+        union_id: info.union_id,
+        name: info.name,
+        email: info.email.or(info.enterprise_email),
+        avatar_url: info.avatar_url,
+        tenant_key: info.tenant_key,
+    })
+}
+
+/// 取授权人的 open_id 与姓名（管理员授权路径使用）。
+pub(crate) async fn fetch_user_info(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    access_token: &str,
+) -> Result<(String, Option<String>), TokenEndpointError> {
+    let info = fetch_user_info_full(transport, sleeper, access_token).await?;
     Ok((info.open_id, info.name))
+}
+
+/// SSO 登录/绑定请求的 scope（与管理员授权分开）。
+pub(crate) const SSO_SCOPES: &str = "approval:task:read approval:task:write approval:instance:read contact:user:search contact:contact.base:readonly offline_access";
+
+/// 拼带 PKCE 的 SSO 授权 URL。
+pub(crate) fn build_sso_authorize_url(
+    app_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+) -> String {
+    format!(
+        "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&prompt=consent",
+        percent_encode(app_id),
+        percent_encode(redirect_uri),
+        percent_encode(SSO_SCOPES),
+        percent_encode(state),
+        percent_encode(code_challenge),
+    )
 }
 
 // ---------------------------------------------------------------------------

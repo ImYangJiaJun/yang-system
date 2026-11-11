@@ -48,6 +48,12 @@ pub(crate) trait SystemAuthorizationPort: Send + Sync {
         target_user_id: i64,
     ) -> Result<bool, BaseError>;
 
+    /// 系统是否已经发生过首个管理员引导（`system_owner` 哨兵存在）。
+    ///
+    /// 公开注册的引导与自动建号互斥：哨兵尚不存在时，自动建号必须拒绝，
+    /// 让部署方先通过公开注册完成首个管理员初始化。
+    async fn has_system_owner(&self, ctx: &ActionContext) -> Result<bool, BaseError>;
+
     /// spec §8.1 附加规则在账号生命周期路径上的落地：**只有全权组成员能修改全权组成员**。
     ///
     /// 与 `add_group_member` / `remove_group_member` 的守卫是同一条机制——同一个

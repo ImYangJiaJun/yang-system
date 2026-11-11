@@ -11,7 +11,7 @@
 //! 第一因子已是邮箱持有，第二因子严格禁用 `[email.mfa]` 备用邮箱通道
 //! （同类不构成双因子，方案 D-2），只接受 TOTP / 恢复码。
 
-use super::login::{record_login_failure, record_login_session};
+use super::login::record_login_failure;
 use crate::addon::account::Account;
 use crate::config::LoginEmailVerificationConfig;
 use async_trait::async_trait;
@@ -225,15 +225,15 @@ pub(super) async fn handle(
         }
     };
     // 与密码登录同语义：会话行落库失败必须让登录失败，不能发出无法撤销的令牌对。
-    record_login_session(
-        &record_ctx,
-        &account,
-        &tokens.access_token,
-        &tokens.refresh_token,
-        &session_ip,
-        &session_user_agent,
-    )
-    .await?;
+    account
+        .record_login_session(
+            &record_ctx,
+            &tokens.access_token,
+            &tokens.refresh_token,
+            &session_ip,
+            &session_user_agent,
+        )
+        .await?;
     Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
 }
 

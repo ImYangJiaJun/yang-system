@@ -728,3 +728,88 @@ describe("LoginPage 登录后回跳（?redirect=）", () => {
     expect(await loginAndGetPath("/login")).toBe("/");
   });
 });
+
+describe("LoginPage · 飞书登录入口", () => {
+  function renderFeishuLogin(path = "/login") {
+    const controller = createSessionController();
+    const { router } = renderTestApp({
+      path,
+      authenticated: false,
+      controller,
+    });
+    return { controller, router };
+  }
+
+  function stubStatus(status: Response) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/v1/users/refresh")) {
+        return jsonResponse(
+          { code: 40102, message: "刷新会话 Cookie 缺失" },
+          401,
+        );
+      }
+      if (url.includes("/api/v1/auth/feishu/status")) {
+        return status;
+      }
+      throw new Error(`测试未覆盖的请求：${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("status.enabled=true 时渲染顶层授权链接并保留 redirect", async () => {
+    stubStatus(jsonResponse({ code: 0, data: { enabled: true } }));
+    renderFeishuLogin(
+      `/login?redirect=${encodeURIComponent("/batch-approval")}`,
+    );
+
+    const link = await screen.findByRole("link", { name: "飞书登录" });
+    expect(link).toHaveAttribute(
+      "href",
+      `/api/v1/auth/feishu/authorize?redirect=${encodeURIComponent("/batch-approval")}`,
+    );
+  });
+
+  it("status.enabled=false 时隐藏入口", async () => {
+    const fetchMock = stubStatus(
+      jsonResponse({ code: 0, data: { enabled: false } }),
+    );
+    renderFeishuLogin("/login");
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes("/api/v1/auth/feishu/status"),
+        ),
+      ).toBe(true),
+    );
+    expect(
+      screen.queryByRole("link", { name: "飞书登录" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("status 请求失败时按不可用处理，不影响密码登录", async () => {
+    stubStatus(jsonResponse({ code: 50000, message: "boom" }, 500));
+    renderFeishuLogin("/login");
+
+    expect(
+      await screen.findByRole("heading", { name: "用户登录" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("link", { name: "飞书登录" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "登录" })).toBeEnabled();
+  });
+
+  it("回调错误码显示可行动横幅", async () => {
+    stubStatus(jsonResponse({ code: 0, data: { enabled: false } }));
+    renderFeishuLogin("/login?feishu_error=access_denied");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "已取消飞书授权",
+    );
+  });
+});

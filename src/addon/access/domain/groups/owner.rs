@@ -76,6 +76,10 @@ impl SystemOwnerClaimer for AccessSystemOwnerClaimer {
 /// 再拆一个结构体会重复同一份装配代码，却不增加任何隔离。
 #[async_trait]
 impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
+    async fn has_system_owner(&self, ctx: &ActionContext) -> Result<bool, BaseError> {
+        self.access.groups().owner_sentinel_exists(ctx).await
+    }
+
     async fn remains_an_admin_after(
         &self,
         ctx: &ActionContext,

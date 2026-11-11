@@ -88,6 +88,16 @@ pub(super) async fn handle(
             .login_events()
             .delete_all_for_user_in_tx(&ctx, &mut transaction, user_id)
             .await?;
+        // 外部身份绑定同样属于个人数据；账号删除后旧绑定不能继续反查用户。
+        // 先让持有子表的 Addon 清理凭证/job 等外键数据，再删通用身份事实。
+        for hook in account.deletion_hooks() {
+            hook.delete_user_data(&ctx, &mut transaction, user_id)
+                .await?;
+        }
+        account
+            .identities()
+            .delete_by_user_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         // spec §8.3：账号删除必须清理授权事实，避免孤儿授权行。
         account
             .system_authorization()
