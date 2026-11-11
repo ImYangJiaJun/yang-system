@@ -72,7 +72,8 @@ pub(crate) struct CommentConfig {
     /// 状态文案。
     #[serde(default)]
     pub(crate) status_labels: CommentStatusLabels,
-    /// 评论作者（运维账号）open_id。
+    /// 旧字段：评论作者 open_id。运行期已改为使用页面顶部绑定的飞书运维身份，
+    /// 保留仅为兼容旧配置；保存时仍会 trim。
     #[serde(default)]
     pub(crate) author_user_id: String,
     /// 是否把附件列的文件加进评论 files。
@@ -220,9 +221,6 @@ fn validate_local(config: &CommentConfig) -> Result<(), Vec<String>> {
     }
     if config.status_field_id.trim().is_empty() {
         reasons.push("审批评论状态列 field_id 不能为空".to_string());
-    }
-    if config.author_user_id.trim().is_empty() {
-        reasons.push("评论作者 open_id 不能为空".to_string());
     }
     if config.status_labels.commented.trim().is_empty() {
         reasons.push("评论状态文案「已评论」不能为空".to_string());
@@ -473,10 +471,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_and_missing_author_are_rejected() {
+    fn unknown_keys_are_rejected_but_author_is_optional() {
         let mut value: serde_json::Value = serde_json::from_str(&valid_raw())
             .unwrap_or_else(|error| panic!("valid raw config must parse: {error}"));
+        // 作者不再是必填：空值仍能解析（运行期改用页面顶部绑定的身份）。
         value["author_user_id"] = serde_json::json!(" ");
+        assert!(parse_comment_config(Some(&value.to_string())).is_ok());
+
         value["typo_key"] = serde_json::json!(true);
         let reasons = parse_comment_config(Some(&value.to_string()))
             .err()

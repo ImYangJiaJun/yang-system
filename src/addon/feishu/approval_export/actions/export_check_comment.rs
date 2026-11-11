@@ -1,8 +1,8 @@
 //! 审批评论配置体检。
 //!
 //! 逐项检查：规则存在且启用、评论配置可解析、字段存在、required 是 field_ids
-//! 子集、状态列是单选且包含两种文案、作者非空、多维表格事件已订阅、能按
-//! target_record_id 找到实例映射、附件字段类型可识别。
+//! 子集、状态列是单选且包含两种文案、已绑定飞书运维身份、多维表格事件已订阅、
+//! 能按 target_record_id 找到实例映射、附件字段类型可识别。
 //!
 //! 只读出站接口（列表字段 / get_subscribe / 回写台账），不发评论、不改数据。
 
@@ -22,6 +22,7 @@ use crate::addon::feishu::domain::approval_export::RULE_ROW_KEY;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates, FieldItem};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
+use crate::addon::feishu::domain::user_token;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +184,28 @@ pub(super) async fn handle(
         detail: format!("已读取 {} 个字段", fields.len()),
     });
 
+    // 评论作者统一取页面顶部绑定的飞书运维身份。
+    let binding = user_token::load_single(context.user_tokens()).await?;
+    let bound_open_id = binding
+        .as_ref()
+        .map(|row| row.open_id.trim())
+        .filter(|open_id| !open_id.is_empty());
+    let bound_name = binding
+        .as_ref()
+        .and_then(|row| row.user_name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("未记录姓名");
+    items.push(CommentCheckItem {
+        id: "author".to_string(),
+        name: "已绑定飞书运维身份".to_string(),
+        passed: bound_open_id.is_some(),
+        detail: match bound_open_id {
+            Some(open_id) => format!("已绑定：{bound_name} · {open_id}"),
+            None => "未绑定：请在审批回写页顶部完成飞书授权".to_string(),
+        },
+    });
+
     if let Some(config) = config.as_ref() {
         items.push(CommentCheckItem {
             id: "comment_enabled".to_string(),
@@ -196,16 +219,6 @@ pub(super) async fn handle(
         });
         check_fields(config, &fields, &mut items);
         check_status_field(config, &fields, &mut items);
-        items.push(CommentCheckItem {
-            id: "author".to_string(),
-            name: "评论作者已配置".to_string(),
-            passed: !config.author_user_id.trim().is_empty(),
-            detail: if config.author_user_id.trim().is_empty() {
-                "author_user_id 为空：评论无法定位作者".to_string()
-            } else {
-                format!("作者 open_id: {}", config.author_user_id)
-            },
-        });
         check_attachment_fields(config, &fields, &mut items);
     }
 
@@ -244,45 +257,44 @@ pub(super) async fn handle(
     )
     .await?;
 
-    // 附加信息：若能拿到作者，顺便验证评论查询接口可用（去重依赖它）。
-    if let Some(config) = config.as_ref() {
-        if !config.author_user_id.trim().is_empty() {
-            match find_latest_instance(&context, input.rule_id).await? {
-                Some((_record_id, instance_code)) => {
-                    match list_instance_comments(
-                        outbound.transport(),
-                        outbound.sleeper(),
-                        &outbound.tokens,
-                        &instance_code,
-                        &config.author_user_id,
-                    )
-                    .await
-                    {
-                        Ok(comments) => items.push(CommentCheckItem {
-                            id: "list_comments".to_string(),
-                            name: "评论列表可读".to_string(),
-                            passed: true,
-                            detail: format!(
-                                "实例 {} 的评论列表可读（{} 条）",
-                                instance_code,
-                                comments.len()
-                            ),
-                        }),
-                        Err(failure) => items.push(CommentCheckItem {
-                            id: "list_comments".to_string(),
-                            name: "评论列表可读".to_string(),
-                            passed: false,
-                            detail: format!("读取评论列表失败: {}", failure.message),
-                        }),
-                    }
+    // 附加信息：已绑定身份时顺便验证评论查询接口可用（去重依赖它）；
+    // 未绑定时跳过该项，author 项已经报失败。
+    if let Some(open_id) = bound_open_id {
+        match find_latest_instance(&context, input.rule_id).await? {
+            Some((_record_id, instance_code)) => {
+                match list_instance_comments(
+                    outbound.transport(),
+                    outbound.sleeper(),
+                    &outbound.tokens,
+                    &instance_code,
+                    open_id,
+                )
+                .await
+                {
+                    Ok(comments) => items.push(CommentCheckItem {
+                        id: "list_comments".to_string(),
+                        name: "评论列表可读".to_string(),
+                        passed: true,
+                        detail: format!(
+                            "实例 {} 的评论列表可读（{} 条）",
+                            instance_code,
+                            comments.len()
+                        ),
+                    }),
+                    Err(failure) => items.push(CommentCheckItem {
+                        id: "list_comments".to_string(),
+                        name: "评论列表可读".to_string(),
+                        passed: false,
+                        detail: format!("读取评论列表失败: {}", failure.message),
+                    }),
                 }
-                None => items.push(CommentCheckItem {
-                    id: "list_comments".to_string(),
-                    name: "评论列表可读".to_string(),
-                    passed: false,
-                    detail: "没有已回写记录，无法抽查评论列表".to_string(),
-                }),
             }
+            None => items.push(CommentCheckItem {
+                id: "list_comments".to_string(),
+                name: "评论列表可读".to_string(),
+                passed: false,
+                detail: "没有已回写记录，无法抽查评论列表".to_string(),
+            }),
         }
     }
 

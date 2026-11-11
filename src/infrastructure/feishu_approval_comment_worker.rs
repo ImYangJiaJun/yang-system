@@ -51,6 +51,7 @@ use crate::addon::feishu::domain::repository::all_pages;
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
+use crate::addon::feishu::domain::user_token;
 use crate::config::FeishuSettings;
 
 /// 每轮认领多少条未处理事件。
@@ -367,6 +368,8 @@ struct CommentRule {
     base_token: String,
     table_id: String,
     config: CommentConfig,
+    /// 页面顶部绑定的飞书运维身份；未授权时为 `None`。
+    author_open_id: Option<String>,
 }
 
 async fn load_enabled_rules(runner: &RoundRunner) -> anyhow::Result<Vec<CommentRule>> {
@@ -398,9 +401,33 @@ async fn load_enabled_rules(runner: &RoundRunner) -> anyhow::Result<Vec<CommentR
             base_token: row.require("target_base_token")?,
             table_id: row.require("target_table_id")?,
             config,
+            author_open_id: None,
         });
     }
+    // 评论作者统一取页面顶部绑定的飞书运维身份。读不到也照常返回规则：
+    // 启动期事件订阅不依赖作者；process_due 会跳过未绑定的规则，等授权后自然处理。
+    let binding = match user_token::load_single(runner.context.user_tokens()).await {
+        Ok(row) => row
+            .map(|row| row.open_id.trim().to_string())
+            .filter(|open_id| !open_id.is_empty()),
+        Err(error) => {
+            tracing::warn!(error = %error, "读取飞书运维身份失败，本轮评论按未绑定处理");
+            None
+        }
+    };
+    if binding.is_none() {
+        tracing::debug!("尚未绑定飞书运维身份，评论将等待授权后处理");
+    }
+    apply_author(&mut rules, binding.as_deref());
     Ok(rules)
+}
+
+/// 把绑定身份的 open_id 填到每条规则；未绑定则保持 `None`。
+fn apply_author(rules: &mut [CommentRule], open_id: Option<&str>) {
+    let open_id = open_id.map(str::trim).filter(|value| !value.is_empty());
+    for rule in rules {
+        rule.author_open_id = open_id.map(str::to_string);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -781,7 +808,12 @@ async fn process_due(runner: &RoundRunner, rules: &[CommentRule]) -> ProcessRepo
         let Some(rule) = rules_by_id.get(&row.rule_id) else {
             continue;
         };
-        match process_one(runner, rule, row, &mut status_names).await {
+        // 未绑定运维身份时整轮跳过：不认领、不改台账，授权后下一轮自然处理。
+        let Some(author_open_id) = rule.author_open_id.as_deref() else {
+            tracing::debug!(rule_id = rule.id, "尚未绑定飞书运维身份，跳过评论台账行");
+            continue;
+        };
+        match process_one(runner, rule, row, author_open_id, &mut status_names).await {
             StepOutcome::Done => report.done += 1,
             StepOutcome::Retry => report.retry += 1,
             StepOutcome::Failed => report.failed += 1,
@@ -862,6 +894,7 @@ async fn process_one(
     runner: &RoundRunner,
     rule: &CommentRule,
     row: &RunRow,
+    author_open_id: &str,
     status_names: &mut HashMap<i64, String>,
 ) -> StepOutcome {
     // 1) 已评论（但状态列没写成）的行：只补状态列，绝不再读条件/发评论。
@@ -946,7 +979,7 @@ async fn process_one(
         &TokioSleeper,
         &runner.tokens,
         &instance_code,
-        &rule.config.author_user_id,
+        author_open_id,
     )
     .await
     {
@@ -990,7 +1023,7 @@ async fn process_one(
             runner.transport(),
             &runner.tokens,
             &instance_code,
-            &rule.config.author_user_id,
+            author_open_id,
             &rendered.text,
             &rendered.files,
         )
@@ -1429,7 +1462,27 @@ mod tests {
             base_token: "bascn".to_string(),
             table_id: "tbl".to_string(),
             config: config(),
+            author_open_id: Some("ou_ops".to_string()),
         }
+    }
+
+    #[test]
+    fn rules_are_skipped_until_a_binding_is_available() {
+        let mut rules = vec![rule(1), rule(2)];
+        apply_author(&mut rules, None);
+        assert_eq!(rules.len(), 2, "未绑定时规则仍保留（启动期订阅需要）");
+        assert!(
+            rules.iter().all(|rule| rule.author_open_id.is_none()),
+            "未绑定身份时 process_due 会整轮跳过（不改台账）"
+        );
+
+        apply_author(&mut rules, Some(" ou_bound "));
+        assert!(
+            rules
+                .iter()
+                .all(|rule| rule.author_open_id.as_deref() == Some("ou_bound")),
+            "绑定后每条规则都使用 trim 后的同一 open_id"
+        );
     }
 
     #[test]

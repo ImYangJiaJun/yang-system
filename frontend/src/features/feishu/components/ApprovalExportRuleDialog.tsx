@@ -582,7 +582,6 @@ export function ApprovalExportRuleDialog({
         (commentConfig.fieldIds.includes(commentConfig.triggerFieldId) &&
           commentConfig.triggerValues.length > 0)) &&
       commentConfig.statusFieldId.trim() !== "" &&
-      commentConfig.authorUserId.trim() !== "" &&
       commentConfig.statusLabels.commented.trim() !== "" &&
       commentConfig.statusLabels.failed.trim() !== "" &&
       commentConfig.prefix.trim() !== "" &&
@@ -1192,6 +1191,9 @@ export function ApprovalExportRuleDialog({
                   <p className="text-xs text-muted-foreground">
                     回写成功后按目标表字段生成一条审批评论，并把状态写回状态列。
                   </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    评论作者使用页面顶部绑定的飞书运维身份。
+                  </p>
                 </div>
                 <label className="flex items-center gap-2 text-sm">
                   <Checkbox
@@ -1413,22 +1415,6 @@ export function ApprovalExportRuleDialog({
                               autoComplete="off"
                             />
                           )}
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label htmlFor="export-comment-author">
-                            评论作者 open_id
-                          </Label>
-                          <Input
-                            id="export-comment-author"
-                            value={commentConfig.authorUserId}
-                            onChange={(event) =>
-                              patchCommentConfig({
-                                authorUserId: event.target.value,
-                              })
-                            }
-                            placeholder="ou_…"
-                            autoComplete="off"
-                          />
                         </div>
                       </div>
 

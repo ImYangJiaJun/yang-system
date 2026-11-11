@@ -17,8 +17,9 @@ function messageOf(cause: unknown) {
  * 飞书用户身份（OAuth）授权卡片。
  *
  * 为什么要有这张卡片：审批派发的「发起人姓名」要经 `GET /open-apis/search/v1/user` 解析，
- * 而该接口**只接受 user_access_token**。没授权时带发起人的派发必然失败，且失败发生在
- * 工作流那一侧、控制台看不见——把「有没有授权」摆到台面上是这张卡片唯一的职责。
+ * 而该接口**只接受 user_access_token**；审批评论的作者也统一使用这个绑定身份。没授权时
+ * 带发起人的派发必然失败，且失败发生在工作流那一侧、控制台看不见——把「有没有授权」
+ * 摆到台面上是这张卡片唯一的职责。
  *
  * 授权在**新窗口**里完成（飞书授权页只能由浏览器打开）：本窗口重新获得焦点时刷新一次
  * 状态，省得管理员手动刷新页面。
@@ -77,7 +78,8 @@ export function FeishuOAuthCard() {
             </p>
           ) : (
             <p className="mt-1 text-sm text-muted-foreground">
-              尚未授权。未授权时，带「发起人」的审批派发无法解析姓名，不会创建实例。
+              尚未授权。审批派发的发起人解析和审批评论的作者都依赖这个身份；未授权时，
+              带「发起人」的派发不会创建实例，支付评论也不会发出。
             </p>
           )}
           {reauthDue && (
@@ -88,7 +90,7 @@ export function FeishuOAuthCard() {
           )}
           {authorized && !reauthDue && (
             <p className="mt-2 text-xs text-muted-foreground">
-              访问凭证由系统自动续期；只有换账号或到期时才需要重新授权。
+              该身份同时用于审批派发与审批评论。访问凭证由系统自动续期；只有换账号或到期时才需要重新授权。
             </p>
           )}
         </div>

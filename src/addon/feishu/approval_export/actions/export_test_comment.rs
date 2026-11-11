@@ -1,8 +1,9 @@
 //! 向指定审批实例发一条测试评论。
 //!
 //! 用于上线前验证：已完成实例能否评论、附件 URL 能否被接受、作者 open_id
-//! 是否有效。**必须显式 confirm=true**，且原样返回飞书 HTTP 状态与业务
-//! code/msg——业务失败不折成框架错误，方便对照开放平台文档排错。
+//! 是否有效。评论作者默认取页面顶部绑定的飞书运维身份，也可显式传
+//! `author_user_id` 覆盖（调试用）。**必须显式 confirm=true**，且原样返回飞书
+//! HTTP 状态与业务 code/msg——业务失败不折成框架错误，方便对照开放平台文档排错。
 
 use std::sync::Arc;
 
@@ -13,10 +14,11 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval::post_instance_comment_raw;
-use crate::addon::feishu::domain::approval_comment::{parse_comment_config, CommentFile};
+use crate::addon::feishu::domain::approval_comment::CommentFile;
 use crate::addon::feishu::domain::approval_provision::now_unix_secs;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
+use crate::addon::feishu::domain::user_token;
 
 /// 测试评论附件入参。
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -46,11 +48,12 @@ pub(super) struct TestCommentInput {
     /// 评论正文；缺省为一条带时间戳的测试文案。
     #[serde(default)]
     pub(super) text: Option<String>,
-    /// 评论作者 open_id；与 rule_id 二选一。
+    /// 评论作者 open_id（可选，调试用显式覆盖）；缺省用页面顶部绑定的身份。
     #[serde(default)]
     pub(super) author_user_id: Option<String>,
-    /// 从该规则的评论配置里取作者。
+    /// 兼容旧请求保留；作者已统一取页面顶部绑定的身份，不再使用。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(super) rule_id: Option<i64>,
     /// 可选附件（验证 files[] 是否被接受）。
     #[serde(default)]
@@ -75,19 +78,6 @@ impl TestCommentInput {
             return Err(BaseError::ParamInvalid(
                 "instance_code".to_string(),
                 "不能为空".to_string(),
-            ));
-        }
-        if self
-            .author_user_id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-            && self.rule_id.is_none()
-        {
-            return Err(BaseError::ParamInvalid(
-                "author_user_id".to_string(),
-                "必须提供 author_user_id 或 rule_id，用于确定评论作者".to_string(),
             ));
         }
         Ok(())
@@ -198,26 +188,16 @@ async fn resolve_author(
     {
         return Ok(author.to_string());
     }
-    let rule_id = input.rule_id.unwrap_or_default();
-    let raw: Option<String> = context
-        .approval_export_rules()
-        .query()
-        .select_fields(&["comment_config_json"])?
-        .where_eq("id", serde_json::json!(rule_id))?
-        .optional()
+    user_token::load_single(context.user_tokens())
         .await?
-        .ok_or_else(|| BaseError::RecordNotFound("审批回写规则不存在".to_string()))?
-        .optional("comment_config_json")?;
-    let config = parse_comment_config(raw.as_deref())
-        .map_err(|error| BaseError::ParamInvalid("rule_id".to_string(), error))?
-        .filter(|config| !config.author_user_id.trim().is_empty())
+        .map(|row| row.open_id.trim().to_string())
+        .filter(|open_id| !open_id.is_empty())
         .ok_or_else(|| {
             BaseError::ParamInvalid(
-                "rule_id".to_string(),
-                "该规则没有配置评论作者；请传 author_user_id".into(),
+                "author_user_id".to_string(),
+                "尚未绑定飞书运维身份；请先在页面顶部完成授权，或显式传 author_user_id".to_string(),
             )
-        })?;
-    Ok(config.author_user_id.trim().to_string())
+        })
 }
 
 #[cfg(test)]
@@ -242,12 +222,15 @@ mod tests {
     }
 
     #[test]
-    fn author_must_be_resolvable() {
+    fn author_and_rule_are_no_longer_required_by_validation() {
         let mut value = input(true);
-        value.author_user_id = Some("  ".into());
-        assert!(value.validate().is_err());
-        value.rule_id = Some(1);
-        assert!(value.validate().is_ok());
+        value.author_user_id = None;
+        assert!(
+            value.validate().is_ok(),
+            "作者改为从页面顶部绑定身份取，validate 不再要求 author_user_id"
+        );
+        value.rule_id = None;
+        assert!(value.validate().is_ok(), "旧 rule_id 也不再必需");
     }
 
     #[test]

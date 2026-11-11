@@ -55,6 +55,7 @@ import {
   useApprovalExportWizardClient,
 } from "../api";
 import { ApprovalExportRuleDialog } from "../components/ApprovalExportRuleDialog";
+import { FeishuOAuthCard } from "../components/FeishuOAuthCard";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge, type ToneName } from "../components/StatusBadge";
 import { PAGE_SIZE_OPTIONS, useDebouncedValue } from "../list-query";
@@ -224,7 +225,6 @@ export default function ApprovalExportPage() {
   >("form");
   const [commentTestInstance, setCommentTestInstance] = useState("");
   const [commentTestText, setCommentTestText] = useState("");
-  const [commentTestAuthor, setCommentTestAuthor] = useState("");
   const [commentTesting, setCommentTesting] = useState(false);
   const [commentTestError, setCommentTestError] = useState<string | null>(null);
   const [commentTestResult, setCommentTestResult] =
@@ -440,7 +440,6 @@ export default function ApprovalExportPage() {
     setCommentTestStep("form");
     setCommentTestInstance("");
     setCommentTestText("");
-    setCommentTestAuthor(rule.commentConfig?.authorUserId ?? "");
     setCommentTestResult(null);
     setCommentTestError(null);
   }
@@ -455,7 +454,6 @@ export default function ApprovalExportPage() {
         // 二次确认在对话框的 confirm 步骤完成；到这里才显式传 true。
         confirm: true,
         text: commentTestText.trim() || undefined,
-        authorUserId: commentTestAuthor.trim() || undefined,
         ruleId: commentTestRule.id,
       });
       setCommentTestResult(result);
@@ -945,6 +943,7 @@ export default function ApprovalExportPage() {
               ) : null}
             </div>
           </div>
+          <FeishuOAuthCard />
           <div className="flex flex-wrap items-center gap-3">
             <Input
               className="w-full sm:w-72"
@@ -1454,7 +1453,7 @@ export default function ApprovalExportPage() {
             <DialogTitle>发送测试评论</DialogTitle>
             <DialogDescription>
               {commentTestRule
-                ? `向真实审批实例发一条评论，验证作者与评论链路。规则：${commentTestRule.title}（#${commentTestRule.id}）。`
+                ? `向真实审批实例发一条评论，验证评论链路。评论作者使用页面顶部绑定的飞书运维身份。规则：${commentTestRule.title}（#${commentTestRule.id}）。`
                 : null}
             </DialogDescription>
           </DialogHeader>
@@ -1475,21 +1474,9 @@ export default function ApprovalExportPage() {
                   autoComplete="off"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="export-comment-test-author">
-                  评论作者 open_id（可选）
-                </Label>
-                <Input
-                  id="export-comment-test-author"
-                  value={commentTestAuthor}
-                  onChange={(event) => setCommentTestAuthor(event.target.value)}
-                  placeholder="ou_…"
-                  autoComplete="off"
-                />
-                <p className="text-xs text-muted-foreground">
-                  留空则使用该规则评论配置里的作者。
-                </p>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                将使用页面顶部绑定的飞书运维身份作为评论作者。
+              </p>
               <div className="space-y-1.5">
                 <Label htmlFor="export-comment-test-text">
                   评论正文（可选）
@@ -1512,12 +1499,7 @@ export default function ApprovalExportPage() {
                   实例：
                   <span className="font-mono">{commentTestInstance}</span>
                 </p>
-                <p>
-                  作者：
-                  {commentTestAuthor.trim() ||
-                    commentTestRule?.commentConfig?.authorUserId ||
-                    "未配置"}
-                </p>
+                <p>作者：页面顶部绑定的飞书运维身份</p>
                 <p>正文：{commentTestText.trim() || "默认测试文案"}</p>
               </div>
               <p role="alert" className="text-sm text-destructive">
@@ -1565,11 +1547,7 @@ export default function ApprovalExportPage() {
                   取消
                 </Button>
                 <Button
-                  disabled={
-                    commentTestInstance.trim() === "" ||
-                    (commentTestAuthor.trim() === "" &&
-                      !commentTestRule?.commentConfig?.authorUserId?.trim())
-                  }
+                  disabled={commentTestInstance.trim() === ""}
                   onClick={() => {
                     setCommentTestError(null);
                     setCommentTestStep("confirm");
