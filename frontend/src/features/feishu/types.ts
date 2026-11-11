@@ -1807,6 +1807,9 @@ export type ApprovalCommentTestResult = {
   data: unknown;
 };
 
+/// 飞书用户身份的两个独立用途：审批派发 / 审批回写（评论作者）。
+export type FeishuOAuthPurpose = "dispatch" | "comment";
+
 /// 飞书用户身份（OAuth）授权状态。
 ///
 /// `reauthDue` 与提醒 worker 用同一个判据（授权满 350 天）：页面说「该重新授权」时，

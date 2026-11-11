@@ -1,7 +1,7 @@
 //! 审批评论配置体检。
 //!
 //! 逐项检查：规则存在且启用、评论配置可解析、字段存在、required 是 field_ids
-//! 子集、状态列是单选且包含两种文案、已绑定飞书运维身份、多维表格事件已订阅、
+//! 子集、状态列是单选且包含两种文案、已绑定审批回写身份、多维表格事件已订阅、
 //! 能按 target_record_id 找到实例映射、附件字段类型可识别。
 //!
 //! 只读出站接口（列表字段 / get_subscribe / 回写台账），不发评论、不改数据。
@@ -184,8 +184,9 @@ pub(super) async fn handle(
         detail: format!("已读取 {} 个字段", fields.len()),
     });
 
-    // 评论作者统一取页面顶部绑定的飞书运维身份。
-    let binding = user_token::load_single(context.user_tokens()).await?;
+    // 评论作者统一取页面顶部绑定的审批回写身份（回写槽位，与派发身份相互独立）。
+    let binding =
+        user_token::load_slot(context.user_tokens(), user_token::IdentitySlot::Comment).await?;
     let bound_open_id = binding
         .as_ref()
         .map(|row| row.open_id.trim())
@@ -198,11 +199,11 @@ pub(super) async fn handle(
         .unwrap_or("未记录姓名");
     items.push(CommentCheckItem {
         id: "author".to_string(),
-        name: "已绑定飞书运维身份".to_string(),
+        name: "已绑定审批回写身份".to_string(),
         passed: bound_open_id.is_some(),
         detail: match bound_open_id {
             Some(open_id) => format!("已绑定：{bound_name} · {open_id}"),
-            None => "未绑定：请在审批回写页顶部完成飞书授权".to_string(),
+            None => "未绑定：请在审批回写页顶部完成审批回写身份授权".to_string(),
         },
     });
 

@@ -321,7 +321,7 @@ export default function ApprovalConfigsPage() {
               </Button>
             )}
           </div>
-          <FeishuOAuthCard />
+          <FeishuOAuthCard purpose="dispatch" />
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex gap-1" aria-label="配置状态筛选">
               {(

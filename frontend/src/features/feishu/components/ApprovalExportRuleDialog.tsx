@@ -1192,7 +1192,7 @@ export function ApprovalExportRuleDialog({
                     回写成功后按目标表字段生成一条审批评论，并把状态写回状态列。
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    评论作者使用页面顶部绑定的飞书运维身份。
+                    评论作者使用页面顶部绑定的审批回写身份。
                   </p>
                 </div>
                 <label className="flex items-center gap-2 text-sm">

@@ -87,18 +87,19 @@ pub(super) async fn handle(
         ));
     }
 
-    // state 先校验、先消费：不通过就到此为止，不打任何出站请求。
-    let state_ok = input
+    // state 先校验、先消费：不通过就到此为止，不打任何出站请求。消费出的身份槽位
+    // 来自 state 本身（签发时记下），回调不接受任何调用方可伪造的 purpose 参数。
+    let identity = input
         .state
         .as_deref()
-        .is_some_and(|state| user_token::consume_state(state, now));
-    if !state_ok {
+        .and_then(|state| user_token::consume_state(state, now));
+    let Some(identity) = identity else {
         tracing::warn!("飞书授权回调的 state 校验未通过（未签发 / 已用过 / 已过期）");
         return Ok(ApiResponse::fail(
             codes::STATE_INVALID,
-            "授权链接已失效：请回到「飞书审批配置」页重新点「去授权」",
+            "授权链接已失效：请回到发起授权的页面重新点「去授权」",
         ));
-    }
+    };
 
     let Some(code) = input
         .code
@@ -108,7 +109,7 @@ pub(super) async fn handle(
     else {
         return Ok(ApiResponse::fail(
             codes::EXCHANGE_FAILED,
-            "回调里没有授权码：请回到「飞书审批配置」页重新点「去授权」",
+            "回调里没有授权码：请回到发起授权的页面重新点「去授权」",
         ));
     };
 
@@ -151,6 +152,7 @@ pub(super) async fn handle(
 
     user_token::store_authorization(
         context.user_tokens(),
+        identity,
         &open_id,
         name.as_deref(),
         &bundle,
@@ -160,9 +162,10 @@ pub(super) async fn handle(
     tracing::debug!(
         open_id = %open_id,
         name = name.as_deref().unwrap_or_default(),
+        purpose = identity.purpose(),
         "飞书用户身份授权完成"
     );
-    audit_authorization(&ctx, &open_id, &bundle, now).await;
+    audit_authorization(&ctx, identity, &open_id, &bundle, now).await;
 
     ApiResponse::success(
         serde_json::json!({
@@ -195,6 +198,7 @@ fn describe(error: &user_token::TokenEndpointError) -> String {
 /// 审计写失败只记日志、不影响授权结果——凭证已经落库，回滚它没有意义。
 async fn audit_authorization(
     ctx: &ActionContext,
+    identity: user_token::IdentitySlot,
     open_id: &str,
     bundle: &user_token::TokenBundle,
     now: i64,
@@ -212,6 +216,7 @@ async fn audit_authorization(
         },
         match audit::summary([
             ("open_id", serde_json::json!(open_id)),
+            ("purpose", serde_json::json!(identity.purpose())),
             ("authorized_at", serde_json::json!(now)),
             ("scope", serde_json::json!(bundle.scope.clone())),
         ]) {

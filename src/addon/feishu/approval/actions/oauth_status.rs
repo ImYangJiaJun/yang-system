@@ -17,10 +17,14 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::user_token;
 
-/// 状态查询输入：无参数。
+/// 状态查询输入：可选 `purpose` 区分两个身份槽位。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct OauthStatusInput {}
+pub(super) struct OauthStatusInput {
+    /// 身份用途：`dispatch`（缺省）/ `comment`。
+    #[serde(default)]
+    pub(super) purpose: Option<String>,
+}
 
 impl ParamInput for OauthStatusInput {
     fn params() -> Params {
@@ -57,11 +61,13 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
 
 pub(super) async fn handle(
     _ctx: ActionContext,
-    _input: OauthStatusInput,
+    input: OauthStatusInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
+    let identity = user_token::IdentitySlot::from_purpose(input.purpose.as_deref())
+        .map_err(|message| BaseError::ParamInvalid("purpose".to_string(), message))?;
     let now = user_token::now_unix_secs();
-    let row = user_token::load_single(context.user_tokens()).await?;
+    let row = user_token::load_slot(context.user_tokens(), identity).await?;
     let status = match row {
         Some(row) => OauthStatus {
             authorized: true,

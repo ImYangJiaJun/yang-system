@@ -23,10 +23,14 @@ mod codes {
     pub(super) const OAUTH_NOT_CONFIGURED: i32 = 50302;
 }
 
-/// 取授权链接的输入：无参数。
+/// 取授权链接的输入：可选 `purpose` 指定要授权的身份槽位。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct AuthorizeUrlInput {}
+pub(super) struct AuthorizeUrlInput {
+    /// 身份用途：`dispatch`（缺省）/ `comment`。
+    #[serde(default)]
+    pub(super) purpose: Option<String>,
+}
 
 impl ParamInput for AuthorizeUrlInput {
     fn params() -> Params {
@@ -57,9 +61,11 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
 
 pub(super) async fn handle(
     _ctx: ActionContext,
-    _input: AuthorizeUrlInput,
+    input: AuthorizeUrlInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
+    let identity = user_token::IdentitySlot::from_purpose(input.purpose.as_deref())
+        .map_err(|message| BaseError::ParamInvalid("purpose".to_string(), message))?;
     let Some(settings) = context.settings() else {
         return Ok(ApiResponse::fail(
             codes::OAUTH_NOT_CONFIGURED,
@@ -71,7 +77,7 @@ pub(super) async fn handle(
         Err(message) => return Ok(ApiResponse::fail(codes::OAUTH_NOT_CONFIGURED, message)),
     };
 
-    let state = user_token::mint_state(user_token::now_unix_secs());
+    let state = user_token::mint_state(user_token::now_unix_secs(), identity);
     let authorize_url =
         user_token::build_authorize_url(&config.credentials.app_id, &config.redirect_uri, &state);
     ApiResponse::success(
@@ -84,9 +90,32 @@ pub(super) async fn handle(
 mod tests {
     use super::*;
 
+    /// `purpose` 可缺省（缺省 = 派发身份）；`deny_unknown_fields` 挡住手误多传的键。
+    #[test]
+    fn purpose_is_optional_and_unknown_keys_are_rejected() {
+        let defaulted = serde_json::from_value::<AuthorizeUrlInput>(serde_json::json!({}))
+            .unwrap_or_else(|error| panic!("空请求体应可解码: {error}"));
+        assert!(defaulted.purpose.is_none());
+        let comment = serde_json::from_value::<AuthorizeUrlInput>(
+            serde_json::json!({ "purpose": "comment" }),
+        )
+        .unwrap_or_else(|error| panic!("purpose 应可解码: {error}"));
+        assert_eq!(comment.purpose.as_deref(), Some("comment"));
+        assert!(
+            serde_json::from_value::<AuthorizeUrlInput>(
+                serde_json::json!({ "purpose": "comment", "identity": "x" })
+            )
+            .is_err(),
+            "deny_unknown_fields 应拒掉多余键"
+        );
+    }
+
     #[test]
     fn the_url_carries_the_configured_redirect_and_a_fresh_state() {
-        let state = user_token::mint_state(user_token::now_unix_secs());
+        let state = user_token::mint_state(
+            user_token::now_unix_secs(),
+            user_token::IdentitySlot::Dispatch,
+        );
         let url = user_token::build_authorize_url(
             "cli_x",
             "http://47.109.148.207:18654/api/v1/feishu/oauth/callback",

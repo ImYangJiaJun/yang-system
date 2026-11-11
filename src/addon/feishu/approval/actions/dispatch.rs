@@ -67,7 +67,7 @@ use crate::addon::feishu::domain::outbound::{
 use crate::addon::feishu::domain::outbound_setup;
 use crate::addon::feishu::domain::tenant_token::FeishuCredentials;
 use crate::addon::feishu::domain::token::verify_token;
-use crate::addon::feishu::domain::user_token::user_access_token;
+use crate::addon::feishu::domain::user_token::{user_access_token, IdentitySlot};
 use crate::config::FeishuSettings;
 use crate::feishu_approval_worker::ApprovalDispatchHandle;
 // `Backfill` / `ProvisionError` 只被 `write_config_failure` 与测试用到，而那个函数
@@ -883,6 +883,8 @@ async fn resolve_initiator(
         outbound.transport(),
         outbound.sleeper(),
         &credentials,
+        // 派发与回写各用一个独立飞书身份：解析发起人姓名属于派发链路。
+        IdentitySlot::Dispatch,
     )
     .await
     .map_err(|error| format!("发起人姓名解析失败：{}", error.message()))?;

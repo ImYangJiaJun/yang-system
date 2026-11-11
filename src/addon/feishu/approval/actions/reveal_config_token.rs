@@ -168,7 +168,7 @@ pub(super) async fn handle(
 
     // ⚠️ 两个凭据列都标了 `secret`（= `hidden`），**不进默认投影**：不显式点名
     // 就查不出来（报「字段未找到」）。本仓为此踩过一次（`user_token` 的
-    // `load_single`）。
+    // `load_slot`）。
     let row = context
         .approval_configs()
         .query()

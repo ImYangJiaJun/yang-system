@@ -943,7 +943,7 @@ export default function ApprovalExportPage() {
               ) : null}
             </div>
           </div>
-          <FeishuOAuthCard />
+          <FeishuOAuthCard purpose="comment" />
           <div className="flex flex-wrap items-center gap-3">
             <Input
               className="w-full sm:w-72"
@@ -1453,7 +1453,7 @@ export default function ApprovalExportPage() {
             <DialogTitle>发送测试评论</DialogTitle>
             <DialogDescription>
               {commentTestRule
-                ? `向真实审批实例发一条评论，验证评论链路。评论作者使用页面顶部绑定的飞书运维身份。规则：${commentTestRule.title}（#${commentTestRule.id}）。`
+                ? `向真实审批实例发一条评论，验证评论链路。评论作者使用页面顶部绑定的审批回写身份。规则：${commentTestRule.title}（#${commentTestRule.id}）。`
                 : null}
             </DialogDescription>
           </DialogHeader>
@@ -1475,7 +1475,7 @@ export default function ApprovalExportPage() {
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                将使用页面顶部绑定的飞书运维身份作为评论作者。
+                将使用页面顶部绑定的审批回写身份作为评论作者。
               </p>
               <div className="space-y-1.5">
                 <Label htmlFor="export-comment-test-text">
@@ -1499,7 +1499,7 @@ export default function ApprovalExportPage() {
                   实例：
                   <span className="font-mono">{commentTestInstance}</span>
                 </p>
-                <p>作者：页面顶部绑定的飞书运维身份</p>
+                <p>作者：页面顶部绑定的审批回写身份</p>
                 <p>正文：{commentTestText.trim() || "默认测试文案"}</p>
               </div>
               <p role="alert" className="text-sm text-destructive">

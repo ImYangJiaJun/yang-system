@@ -1,7 +1,7 @@
 //! 向指定审批实例发一条测试评论。
 //!
 //! 用于上线前验证：已完成实例能否评论、附件 URL 能否被接受、作者 open_id
-//! 是否有效。评论作者默认取页面顶部绑定的飞书运维身份，也可显式传
+//! 是否有效。评论作者默认取页面顶部绑定的审批回写身份，也可显式传
 //! `author_user_id` 覆盖（调试用）。**必须显式 confirm=true**，且原样返回飞书
 //! HTTP 状态与业务 code/msg——业务失败不折成框架错误，方便对照开放平台文档排错。
 
@@ -188,14 +188,15 @@ async fn resolve_author(
     {
         return Ok(author.to_string());
     }
-    user_token::load_single(context.user_tokens())
+    user_token::load_slot(context.user_tokens(), user_token::IdentitySlot::Comment)
         .await?
         .map(|row| row.open_id.trim().to_string())
         .filter(|open_id| !open_id.is_empty())
         .ok_or_else(|| {
             BaseError::ParamInvalid(
                 "author_user_id".to_string(),
-                "尚未绑定飞书运维身份；请先在页面顶部完成授权，或显式传 author_user_id".to_string(),
+                "尚未绑定审批回写身份；请先在审批回写页顶部完成授权，或显式传 author_user_id"
+                    .to_string(),
             )
         })
 }

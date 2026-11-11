@@ -14,9 +14,11 @@
 //! 1. **保活**：`refresh_token` 是一次性的、寿命短（官方文档示例 7 天）。只做
 //!    「派发时用到才刷」的话，静默期一长整条链就断了——而断链只能靠重新授权补救。
 //!    每天刷一次让凭证链永远年轻（`access_token` 只有 2 小时寿命，所以这一刷
-//!    每天都会真的打一次飞书，不是空转）。
+//!    每天都会真的打一次飞书，不是空转）。派发与回写是两个**独立**身份槽位，
+//!    各刷各的：一个身份的凭证链断了不拖累另一个。
 //! 2. **提醒**：过线才发，且**每轮都发**（与 `alert.rs` 的「不冷却」同一条哲学：
-//!    没收到邮件会被读成「已经好了」）。
+//!    没收到邮件会被读成「已经好了」）。两个身份各自过线、各自发信，邮件里用
+//!    「姓名（审批派发 / 审批回写）」标明是哪一个。
 //!
 //! # 收件人怎么取
 //!
@@ -159,40 +161,55 @@ async fn run_loop(runner: ReminderRunner, interval: Duration, mut shutdown: watc
     tracing::info!("飞书用户授权提醒 Worker 已退出");
 }
 
-/// 跑一轮：保活 + 到期提醒。
+/// 跑一轮：逐身份槽位保活 + 到期提醒。
 async fn run_once(runner: &ReminderRunner) {
     let now = user_token::now_unix_secs();
-    let row = match user_token::load_single(runner.context.user_tokens()).await {
-        Ok(Some(row)) => row,
-        // 从未授权：没有凭证可保活，也没有到期可言。
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(error = %error, "读取飞书用户身份失败，本轮跳过");
-            return;
-        }
-    };
 
-    // ---- 保活 ----
+    // ---- 保活 + 收集到期身份 ----
     //
     // 失败只记日志、不发邮件：邮件是「该重新授权了」的信号，而保活失败在 350 天
-    // 之前多半是网络抖动或后台开关问题，靠派发路径的可行动文案暴露更准。
-    if let Err(error) = user_token::user_access_token(
-        runner.context.user_tokens(),
-        runner.transport.as_ref(),
-        runner.sleeper.as_ref(),
-        &runner.credentials,
-    )
-    .await
-    {
-        tracing::warn!(message = %error.message(), "飞书用户凭证保活刷新失败");
+    // 之前多半是网络抖动或后台开关问题，靠派发/回写路径的可行动文案暴露更准。
+    let mut due = Vec::new();
+    for identity in user_token::IdentitySlot::ALL {
+        let row = match user_token::load_slot(runner.context.user_tokens(), identity).await {
+            Ok(Some(row)) => row,
+            // 该身份从未授权：没有凭证可保活，也没有到期可言。
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    purpose = identity.purpose(),
+                    "读取飞书用户身份失败，本轮跳过该身份"
+                );
+                continue;
+            }
+        };
+        if let Err(error) = user_token::user_access_token(
+            runner.context.user_tokens(),
+            runner.transport.as_ref(),
+            runner.sleeper.as_ref(),
+            &runner.credentials,
+            identity,
+        )
+        .await
+        {
+            tracing::warn!(
+                purpose = identity.purpose(),
+                message = %error.message(),
+                "飞书用户凭证保活刷新失败"
+            );
+        }
+        if user_token::reauth_reminder_due(row.authorized_at, now) {
+            due.push((identity, row));
+        }
+    }
+    if due.is_empty() {
+        return;
     }
 
     // ---- 到期提醒 ----
-    if !user_token::reauth_reminder_due(row.authorized_at, now) {
-        return;
-    }
-    let days_since_authorized = (now - row.authorized_at) / SECONDS_PER_DAY;
-
+    //
+    // 收件人与发送器只取一次；每个到期身份各发一封，邮件里标明是哪个身份。
     let recipient = match admin_recipient(&runner.users).await {
         Ok(Some(recipient)) => recipient,
         Ok(None) => return,
@@ -208,21 +225,35 @@ async fn run_once(runner: &ReminderRunner) {
             return;
         }
     };
-    let user_name = row.user_name.as_deref().unwrap_or("（未记录姓名）");
-    match sender
-        .send_oauth_expiry_reminder(&recipient, user_name, days_since_authorized)
-        .await
-    {
-        Ok(()) => {
-            tracing::warn!(
-                recipient = %recipient,
-                days_since_authorized,
-                "飞书用户授权已过提醒线，已发送重新授权提醒"
-            );
-            audit_reminder(runner, &row.open_id, days_since_authorized, now).await;
-        }
-        Err(error) => {
-            tracing::error!(error = %error, recipient = %recipient, "飞书用户授权提醒邮件投递失败");
+    for (identity, row) in due {
+        let days_since_authorized = (now - row.authorized_at) / SECONDS_PER_DAY;
+        // 复用现有邮件模板的 `user_name` 参数标明身份，不改 trait 与模板。
+        let user_name = format!(
+            "{}（{}）",
+            row.user_name.as_deref().unwrap_or("（未记录姓名）"),
+            identity.label()
+        );
+        match sender
+            .send_oauth_expiry_reminder(&recipient, &user_name, days_since_authorized)
+            .await
+        {
+            Ok(()) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    days_since_authorized,
+                    purpose = identity.purpose(),
+                    "飞书用户授权已过提醒线，已发送重新授权提醒"
+                );
+                audit_reminder(runner, identity, &row.open_id, days_since_authorized, now).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    recipient = %recipient,
+                    purpose = identity.purpose(),
+                    "飞书用户授权提醒邮件投递失败"
+                );
+            }
         }
     }
 }
@@ -268,7 +299,13 @@ async fn admin_recipient(users: &Repository) -> Result<Option<String>, BaseError
 }
 
 /// 记一条审计：提醒已发出（运维要能回答「到底有没有催过」）。
-async fn audit_reminder(runner: &ReminderRunner, open_id: &str, days: i64, now: i64) {
+async fn audit_reminder(
+    runner: &ReminderRunner,
+    identity: user_token::IdentitySlot,
+    open_id: &str,
+    days: i64,
+    now: i64,
+) {
     let constructed = (|| {
         audit::succeeded_system_event_without_ctx(
             "feishu-oauth-reminder",
@@ -276,6 +313,7 @@ async fn audit_reminder(runner: &ReminderRunner, open_id: &str, days: i64, now: 
             None,
             audit::entity("feishu_user_token", open_id)?,
             audit::summary([
+                ("purpose", serde_json::json!(identity.purpose())),
                 ("days_since_authorized", serde_json::json!(days)),
                 ("reminded_at", serde_json::json!(now)),
             ])?,

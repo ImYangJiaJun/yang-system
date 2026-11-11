@@ -5,11 +5,13 @@
 //! 用户身份只能由管理员在控制台完成一次 OAuth 授权取得，token 对与授权时间落在这里，
 //! 由 `domain::user_token` 维护（access 过期按需刷新；refresh 由提醒 worker 每日保活）。
 //!
-//! # 单例行
+//! # 一个身份一行
 //!
-//! 全表**至多一行**：`slot` 列固定写 `1`，**唯一索引**把这条不变式钉死在数据库上
-//! （不再是「表里只有一行」的约定，也不再依赖 `load_single` 取「第一行」）。
-//! 本系统只有管理员一个飞书身份，重新授权是**整体替换**而不是新增一行。
+//! 表里**每个身份槽位至多一行**：`slot = 1` 是审批派发身份，`slot = 2` 是审批
+//! 回写身份，**唯一索引**把这条不变式钉死在数据库上（不再是「表里只有一行」的
+//! 约定，也不再依赖取「第一行」）。同一槽位重新授权是**整体替换**而不是新增一行；
+//! 两个槽位互不覆盖，一个身份失效不会拖累另一个。存量 `slot = 1` 的行即派发身份，
+//! 升级无须迁移。
 //!
 //! 因此 `authorized_at` 是普通列，**不是** `created_at`：重授权必须重置「350 天开始
 //! 提醒 / 365 天硬性失效」这条时钟，而 `created_at` 语义上只在首插时写一次。
@@ -25,11 +27,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
         .title("飞书用户身份")
         .fields(yang_base::fields! {
             id => Key::new().title("ID").filterable(true).sortable(true),
-            // 单行槽位：恒为 1，唯一索引使「全表至多一行」成为数据库约束，而不再
-            // 只靠 `load_single` 的「第一行」。并发授权同时 insert 时，第二次撞的
-            // 就是这里的唯一键（`store_authorization` 捕获后转为按 id 覆盖）。
+            // 身份槽位：1 = 审批派发，2 = 审批回写。唯一索引使「每个身份至多一行」
+            // 成为数据库约束，而不再只靠「取第一行」。同一槽位并发授权同时 insert
+            // 时，第二次撞的就是这里的唯一键（`store_authorization` 捕获后转为按 id 覆盖）。
             slot => Int::new()
-                .title("单行槽位")
+                .title("身份槽位")
                 .require(true)
                 .default(1_i64)
                 .unique(true)
@@ -90,10 +92,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_pins_the_single_row_invariant() {
-        // 单行不变式的落点：`slot` 恒为 1 且唯一。唯一性只能从字段声明（`TableSpec`）
-        // 上断言——编译后的 `TableDefinition` 没有唯一性内省接口（同 option/table.rs）。
-        // 必填 + 默认 1：存量库升级补列时旧行自动落 1，唯一索引因此能立刻生效。
+    fn slot_pins_one_row_per_identity() {
+        // 「每个身份至多一行」的落点：`slot` 必填、默认 1、唯一。唯一性只能从字段
+        // 声明（`TableSpec`）上断言——编译后的 `TableDefinition` 没有唯一性内省接口
+        // （同 option/table.rs）。必填 + 默认 1：存量库升级补列时旧行自动落 1
+        // （即审批派发身份），唯一索引因此能立刻生效。
         let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
         let slot = spec
             .fields
@@ -104,9 +107,12 @@ mod tests {
         assert_eq!(
             slot.storage.default,
             Some(serde_json::json!(1)),
-            "slot 默认 1"
+            "slot 默认 1（存量行 = 审批派发身份）"
         );
-        assert!(slot.storage.unique, "slot 必须唯一——单行不变式靠它钉死");
+        assert!(
+            slot.storage.unique,
+            "slot 必须唯一——每个身份至多一行靠它钉死"
+        );
 
         let definition = definition();
         let field = definition
@@ -114,7 +120,7 @@ mod tests {
             .unwrap_or_else(|| panic!("slot 字段必须存在"));
         assert!(
             field.is_filterable(),
-            "load_single 按 slot 过滤，filterable 是 fail-closed 的运行期校验"
+            "load_slot 按 slot 过滤，filterable 是 fail-closed 的运行期校验"
         );
     }
 

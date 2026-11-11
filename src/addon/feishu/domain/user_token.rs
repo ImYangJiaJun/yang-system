@@ -1,10 +1,17 @@
-//! 飞书**用户身份**（OAuth `user_access_token`）：授权 URL、state、令牌交换/刷新与单例行存取。
+//! 飞书**用户身份**（OAuth `user_access_token`）：授权 URL、state、令牌交换/刷新与按槽位存取。
 //!
 //! # 为什么需要用户身份
 //!
 //! 姓名 → open_id 走的 `GET /open-apis/search/v1/user` **只接受** `user_access_token`
 //! ——用 `tenant_access_token` 调必报 99991663（真机实测）。用户身份只能由管理员
-//! 在控制台完成一次 OAuth 授权取得，凭证落在 `feishu_user_token`（单例行）。
+//! 在控制台完成一次 OAuth 授权取得，凭证落在 `feishu_user_token`。
+//!
+//! # 两个独立身份槽位
+//!
+//! 派发与回写是两条独立链路，各用**一个独立的飞书用户身份**（[`IdentitySlot`]）：
+//! 审批派发用 `slot = 1`，审批回写/评论用 `slot = 2`，每个槽位至多一行（`slot`
+//! 列的唯一索指引住这条不变式）。存量 `slot = 1` 的行即派发身份，无须迁移。
+//! 两条链路互不拖动：一个身份失效/被换掉，另一个照常工作。
 //!
 //! # 三条时钟
 //!
@@ -19,8 +26,9 @@
 //! # 刷新必须串行
 //!
 //! `refresh_token` 一次性：两个并发刷新会让后一个拿到 `20073`，更糟的是把刚换到的
-//! 新凭证写丢（响应丢了就再也拿不回来）。刷新事务持有单例行锁直至写回提交；
-//! 重新授权也更新同一行，所以跨进程刷新和授权不会拼出不同代次的身份与凭据。
+//! 新凭证写丢（响应丢了就再也拿不回来）。刷新事务持有该身份那一行的锁直至写回提交；
+//! 重新授权也更新同一行，所以同一槽位上的跨进程刷新和授权不会拼出不同代次的身份与凭据。
+//! 两个槽位是不同的行，刷新互不阻塞。
 //!
 //! # state 为什么不落库
 //!
@@ -71,6 +79,60 @@ pub(crate) const OAUTH_SCOPES: &str =
 
 /// state 的有效期（秒）。授权码本身 5 分钟有效，state 略长即可。
 const STATE_TTL_SECONDS: i64 = 600;
+
+/// 一次 OAuth 授权要绑定的身份槽位。
+///
+/// `feishu_user_token.slot` 的唯一索引把「每个身份至多一行」钉死在数据库上；
+/// 存量 `slot = 1` 的行视为审批派发身份（升级无需迁移）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentitySlot {
+    /// 审批派发：解析发起人姓名、创建实例。
+    Dispatch,
+    /// 审批回写：导出回写与审批评论。
+    Comment,
+}
+
+impl IdentitySlot {
+    /// 全部槽位（提醒 worker 逐槽保活与提醒）。
+    pub(crate) const ALL: [Self; 2] = [Self::Dispatch, Self::Comment];
+
+    /// 控制台入参 `purpose` → 槽位。
+    ///
+    /// 缺省/空串按派发处理：旧前端不带这个字段，而存量唯一的身份就是派发身份。
+    pub(crate) fn from_purpose(purpose: Option<&str>) -> Result<Self, String> {
+        match purpose.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("dispatch") => Ok(Self::Dispatch),
+            Some("comment") => Ok(Self::Comment),
+            Some(other) => Err(format!(
+                "未知的飞书身份用途：{other}（支持 dispatch / comment）"
+            )),
+        }
+    }
+
+    /// 入参/日志用的稳定标识。
+    pub(crate) fn purpose(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Comment => "comment",
+        }
+    }
+
+    /// 面向管理员的中文名称（提醒邮件里用来区分是哪个身份）。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Dispatch => "审批派发",
+            Self::Comment => "审批回写",
+        }
+    }
+
+    /// `feishu_user_token.slot` 的取值。
+    pub(crate) fn slot(self) -> i64 {
+        match self {
+            Self::Dispatch => 1,
+            Self::Comment => 2,
+        }
+    }
+}
 
 /// access_token 剩余寿命低于这个秒数就提前刷新，避免「检查通过、调用时已过期」。
 const ACCESS_TOKEN_REFRESH_MARGIN_SECONDS: i64 = 300;
@@ -171,39 +233,42 @@ pub(crate) fn build_authorize_url(app_id: &str, redirect_uri: &str, state: &str)
     )
 }
 
-/// 已签发、尚未消费的 state（值 = 过期时刻的 unix 秒）。
-static OAUTH_STATES: LazyLock<Mutex<HashMap<String, i64>>> =
+/// 已签发、尚未消费的 state（值 = 过期时刻的 unix 秒 + 本次授权要绑定的身份槽）。
+static OAUTH_STATES: LazyLock<Mutex<HashMap<String, (i64, IdentitySlot)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 在锁内操作 state 表。中毒（持锁线程 panic）时取回内部值继续——这张表只装
-/// 「随机串 → 过期时刻」，没有需要靠中毒保护的不变式。
-fn with_states<T>(action: impl FnOnce(&mut HashMap<String, i64>) -> T) -> T {
+/// 「随机串 → 过期时刻 + 身份槽」，没有需要靠中毒保护的不变式。
+fn with_states<T>(action: impl FnOnce(&mut HashMap<String, (i64, IdentitySlot)>) -> T) -> T {
     let mut states = OAUTH_STATES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     action(&mut states)
 }
 
-/// 签发一个新 state（128 位随机）并记下它的有效期。
-pub(crate) fn mint_state(now: i64) -> String {
+/// 签发一个新 state（128 位随机）并记下它的有效期与要绑定的身份槽。
+pub(crate) fn mint_state(now: i64, identity: IdentitySlot) -> String {
     let state = uuid::Uuid::new_v4().simple().to_string();
     with_states(|states| {
         // 顺手清掉过期的：这张表只在点「去授权」时写入，增长只可能来自
         // 「点了很多次都没走完授权」。
-        states.retain(|_, expires_at| *expires_at > now);
-        states.insert(state.clone(), now + STATE_TTL_SECONDS);
+        states.retain(|_, (expires_at, _)| *expires_at > now);
+        states.insert(state.clone(), (now + STATE_TTL_SECONDS, identity));
     });
     state
 }
 
 /// 校验并**消费**一个 state：命中即删（一次性），过期或未签发一律不认。
 ///
+/// 返回签发时记录的身份槽，回调据此把凭证落到对应槽位——state 与身份槽绑定，
+/// 回调拿不到调用方可伪造的 `purpose` 参数。
+///
 /// 这是官方明确要求的 CSRF 防护：没有它，攻击者可以把**自己的**授权码塞进回调，
 /// 让系统的用户身份绑到攻击者的飞书账号上。
-pub(crate) fn consume_state(state: &str, now: i64) -> bool {
+pub(crate) fn consume_state(state: &str, now: i64) -> Option<IdentitySlot> {
     with_states(|states| match states.remove(state) {
-        Some(expires_at) => expires_at > now,
-        None => false,
+        Some((expires_at, identity)) if expires_at > now => Some(identity),
+        _ => None,
     })
 }
 
@@ -470,10 +535,10 @@ pub(crate) async fn fetch_user_info(
 }
 
 // ---------------------------------------------------------------------------
-// 单例行存取
+// 按身份槽存取
 // ---------------------------------------------------------------------------
 
-/// 读出来的唯一一行。
+/// 读出来的身份行（每个槽位至多一行）。
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub(crate) struct UserTokenRow {
     pub(crate) id: i64,
@@ -486,16 +551,15 @@ pub(crate) struct UserTokenRow {
     pub(crate) authorized_at: i64,
 }
 
-/// 单行槽位的固定值。`slot` 列带唯一索引，`1` 就是「唯一一行」的那一格
-/// （见 `user_token_table` 的模块文档）。
-const SINGLE_SLOT: i64 = 1;
-
-/// 读唯一一行；`None` = 从未授权。
+/// 读某个身份槽位的行；`None` = 该身份从未授权。
 ///
-/// 单行不变式的**唯一事实**是 `slot` 的唯一索引：这里按 `slot = 1` 定位，而不再
-/// 依赖「表里只有一行 / 取第一行」这种约定。凭证列仍要显式 `select_fields`
-/// （`secret` 列不进默认投影）。
-pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenRow>, BaseError> {
+/// 「每个身份至多一行」的**唯一事实**是 `slot` 的唯一索引：这里按
+/// `slot = identity.slot()` 定位，而不再依赖「表里只有一行 / 取第一行」这种约定。
+/// 凭证列仍要显式 `select_fields`（`secret` 列不进默认投影）。
+pub(crate) async fn load_slot(
+    tokens: &Repository,
+    identity: IdentitySlot,
+) -> Result<Option<UserTokenRow>, BaseError> {
     // 两个凭证列是 `secret`（`hidden = true`），**不进默认投影**：不显式点名就查不出来，
     // 报「字段未找到 [表: record]: access_token」。`select_fields` 只校验字段存在与角色
     // 读权限、不看 `hidden`，所以这里是读 secret 列的唯一入口（同 `reveal_token` 读
@@ -512,7 +576,7 @@ pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenR
             "refresh_token_expires_at",
             "authorized_at",
         ])?
-        .where_eq("slot", json!(SINGLE_SLOT))?
+        .where_eq("slot", json!(identity.slot()))?
         .page(1, 1)?
         .all()
         .await?;
@@ -533,20 +597,22 @@ pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenR
 
 /// 落一次**完整授权**的结果（授权回调专用）。
 ///
-/// 已有行就整体替换（换账号授权也是替换，不是新增），没有就插入；`slot` 恒写
-/// [`SINGLE_SLOT`]，并发插入时第二条会撞它的唯一索引——那是**竞态**而不是故障，
-/// 重新读回先落库的那行并按 id 覆盖（后到者胜，与「整体替换」同义）。
+/// 该身份槽位已有行就整体替换（换账号授权也是替换，不是新增），没有就插入；
+/// `slot` 恒写 `identity.slot()`，并发插入时第二条会撞它的唯一索引——那是**竞态**
+/// 而不是故障，重新读回先落库的那行并按 id 覆盖（后到者胜，与「整体替换」同义）。
 /// 其他数据库错误原样返回，绝不吞成「竞态」。
+/// 两个槽位是不同的行，互不覆盖——派发与回写的身份可以分别重新授权。
 /// `authorized_at` 只在这里写——**刷新不重置它**，那正是飞书 365 天规则的判据。
 pub(crate) async fn store_authorization(
     tokens: &Repository,
+    identity: IdentitySlot,
     open_id: &str,
     user_name: Option<&str>,
     bundle: &TokenBundle,
     authorized_at: i64,
 ) -> Result<(), BaseError> {
     let mut row = Record::new();
-    row.insert("slot", json!(SINGLE_SLOT));
+    row.insert("slot", json!(identity.slot()));
     row.insert("open_id", json!(open_id));
     row.insert("user_name", json!(user_name));
     row.insert("access_token", json!(&bundle.access_token));
@@ -562,7 +628,7 @@ pub(crate) async fn store_authorization(
     row.insert("scope", json!(bundle.scope));
     row.insert("authorized_at", json!(authorized_at));
 
-    match load_single(tokens).await? {
+    match load_slot(tokens, identity).await? {
         Some(existing) => {
             tokens
                 .query()
@@ -576,7 +642,7 @@ pub(crate) async fn store_authorization(
                     return Err(error);
                 }
                 // 查询与插入之间另一个授权请求落了行：按唯一索引读回并覆盖。
-                let Some(existing) = load_single(tokens).await? else {
+                let Some(existing) = load_slot(tokens, identity).await? else {
                     return Err(error);
                 };
                 tokens
@@ -682,21 +748,22 @@ pub(crate) fn access_token_is_fresh(expires_at: i64, now: i64) -> bool {
     expires_at - ACCESS_TOKEN_REFRESH_MARGIN_SECONDS > now
 }
 
-/// 取一个可用的 `user_access_token`；快过期就先刷新。
+/// 取某个身份槽位可用的 `user_access_token`；快过期就先刷新。
 ///
 /// 刷新在锁内**复查**一次：并发的两个调用里只有一个真去打飞书，另一个直接拿到
-/// 刚写回的新凭证。
+/// 刚写回的新凭证。锁只覆盖该槽位那一行，两个身份互不阻塞。
 pub(crate) async fn user_access_token(
     tokens: &Repository,
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
     credentials: &FeishuCredentials,
+    identity: IdentitySlot,
 ) -> Result<String, UserTokenError> {
     let storage = |error: BaseError| UserTokenError::Failed {
         message: format!("用户身份表读写失败：{error}"),
     };
 
-    let Some(row) = load_single(tokens).await.map_err(storage)? else {
+    let Some(row) = load_slot(tokens, identity).await.map_err(storage)? else {
         return Err(UserTokenError::NotAuthorized);
     };
     if access_token_is_fresh(row.access_token_expires_at, now_unix_secs()) {
@@ -724,7 +791,11 @@ pub(crate) async fn user_access_token(
                     yang_db::field!("refresh_token_expires_at"),
                     yang_db::field!("authorized_at"),
                 ])
-                .where_and(yang_db::field!("slot"), yang_db::CompareOp::Eq, SINGLE_SLOT)
+                .where_and(
+                    yang_db::field!("slot"),
+                    yang_db::CompareOp::Eq,
+                    identity.slot(),
+                )
                 .map_err(BaseError::from)
                 .map_err(storage)?,
         ),
@@ -889,21 +960,96 @@ mod tests {
     }
 
     #[test]
+    fn purpose_maps_to_the_two_identity_slots() {
+        assert_eq!(
+            IdentitySlot::from_purpose(None).ok(),
+            Some(IdentitySlot::Dispatch),
+            "缺省按派发（兼容旧前端）"
+        );
+        assert_eq!(
+            IdentitySlot::from_purpose(Some("  ")).ok(),
+            Some(IdentitySlot::Dispatch),
+            "空串按派发"
+        );
+        assert_eq!(
+            IdentitySlot::from_purpose(Some("dispatch")).ok(),
+            Some(IdentitySlot::Dispatch)
+        );
+        assert_eq!(
+            IdentitySlot::from_purpose(Some("comment")).ok(),
+            Some(IdentitySlot::Comment)
+        );
+        let error = IdentitySlot::from_purpose(Some("other"))
+            .err()
+            .unwrap_or_else(|| panic!("未知用途必须报错"));
+        assert!(error.contains("other"), "{error}");
+        assert!(error.contains("dispatch / comment"), "{error}");
+
+        assert_eq!(IdentitySlot::Dispatch.slot(), 1);
+        assert_eq!(IdentitySlot::Comment.slot(), 2);
+        assert_eq!(IdentitySlot::Dispatch.purpose(), "dispatch");
+        assert_eq!(IdentitySlot::Comment.purpose(), "comment");
+        assert_eq!(IdentitySlot::Dispatch.label(), "审批派发");
+        assert_eq!(IdentitySlot::Comment.label(), "审批回写");
+        assert_eq!(
+            IdentitySlot::ALL.map(IdentitySlot::slot),
+            [1, 2],
+            "两个槽位必须都覆盖"
+        );
+    }
+
+    #[test]
     fn state_is_single_use_and_expires() {
         let now = 1_700_000_000;
-        let state = mint_state(now);
-        assert!(consume_state(&state, now), "刚签发的 state 必须通过");
-        assert!(!consume_state(&state, now), "同一个 state 不得二次通过");
+        let state = mint_state(now, IdentitySlot::Dispatch);
+        assert_eq!(
+            consume_state(&state, now),
+            Some(IdentitySlot::Dispatch),
+            "刚签发的 state 必须通过"
+        );
+        assert_eq!(
+            consume_state(&state, now),
+            None,
+            "同一个 state 不得二次通过"
+        );
 
-        let expired = mint_state(now);
-        assert!(
-            !consume_state(&expired, now + STATE_TTL_SECONDS),
+        let expired = mint_state(now, IdentitySlot::Comment);
+        assert_eq!(
+            consume_state(&expired, now + STATE_TTL_SECONDS),
+            None,
             "过期边界必须拒绝"
         );
 
-        let fresh = mint_state(now);
-        assert!(consume_state(&fresh, now + STATE_TTL_SECONDS - 1));
-        assert!(!consume_state("从未签发", now), "未签发的 state 一律不认");
+        let fresh = mint_state(now, IdentitySlot::Comment);
+        assert_eq!(
+            consume_state(&fresh, now + STATE_TTL_SECONDS - 1),
+            Some(IdentitySlot::Comment)
+        );
+        assert_eq!(
+            consume_state("从未签发", now),
+            None,
+            "未签发的 state 一律不认"
+        );
+    }
+
+    #[test]
+    fn state_round_trips_the_identity_slot() {
+        // 回调只信 state，不信浏览器带来的 purpose 参数：签发时记哪个槽位，
+        // 消费就还原哪个槽位。
+        let now = 1_700_000_000;
+        let dispatch = mint_state(now, IdentitySlot::Dispatch);
+        let comment = mint_state(now, IdentitySlot::Comment);
+        assert_eq!(
+            consume_state(&comment, now),
+            Some(IdentitySlot::Comment),
+            "comment 槽位不得被还原成 dispatch"
+        );
+        assert_eq!(
+            consume_state(&dispatch, now),
+            Some(IdentitySlot::Dispatch),
+            "dispatch 槽位不得被还原成 comment"
+        );
+        assert_eq!(consume_state(&dispatch, now), None, "仍是一次性");
     }
 
     #[test]
@@ -1108,36 +1254,35 @@ mod tests {
         }
     }
 
-    /// 读唯一一行；读不到就以 `why` 报错（仓库 deny `expect_used`，测试里不 panic）。
-    async fn expect_row(tokens: &Repository, why: &str) -> anyhow::Result<UserTokenRow> {
-        match load_single(tokens).await? {
+    /// 读某个身份槽位；读不到就以 `why` 报错（仓库 deny `expect_used`，测试里不 panic）。
+    async fn expect_row(
+        tokens: &Repository,
+        identity: IdentitySlot,
+        why: &str,
+    ) -> anyhow::Result<UserTokenRow> {
+        match load_slot(tokens, identity).await? {
             Some(row) => Ok(row),
             None => anyhow::bail!("{why}"),
         }
     }
 
-    /// 全表行数（单例行不变式的探针）。
-    async fn row_count(tokens: &Repository) -> anyhow::Result<usize> {
-        let rows = tokens
-            .query()
-            .select_fields(&["id"])?
-            .page(1, yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE)?
-            .all()
-            .await?;
-        Ok(rows.len())
+    /// 清空某个身份槽位（真实库测试用）。
+    async fn clear_slot(tokens: &Repository, identity: IdentitySlot) -> anyhow::Result<()> {
+        while let Some(existing) = load_slot(tokens, identity).await? {
+            tokens
+                .query()
+                .where_eq("id", json!(existing.id))?
+                .delete()
+                .await?;
+        }
+        Ok(())
     }
 
-    /// 真实 MySQL：授权落库 → 读回，**两个 secret 列必须原样回来**。
-    ///
-    /// 钉住一个真机踩到的坑：`access_token` / `refresh_token` 标了 `secret`（即
-    /// `hidden`），而框架的默认投影会**剔除 hidden 字段**
-    /// （`yang-base/src/table/table_query/validation.rs:34` 的 `default_read_fields`）。
-    /// 于是 `load_single` 用裸 `.query()` 时写入成功、读回必败，报
-    /// 「字段未找到 [表: record]: access_token」——只有显式 `select_fields` 点名才读得到。
-    /// 这条测试就是那道防线：把 `load_single` 的字段列表删掉，它会立刻红。
-    #[tokio::test]
-    #[ignore = "需要真实 MySQL 测试库"]
-    async fn real_mysql_round_trips_secret_token_columns() -> anyhow::Result<()> {
+    /// 造一个真实测试库 + 飞书上下文；含 `_test` 库守卫与 schema 同步。
+    async fn test_database() -> anyhow::Result<(
+        yang_db::Database,
+        std::sync::Arc<crate::addon::feishu::domain::context::FeishuContext>,
+    )> {
         use yang_db::{Database, DatabaseConfig};
 
         let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
@@ -1159,22 +1304,58 @@ mod tests {
             security,
             None,
         )?;
+        Ok((database, context))
+    }
+
+    /// 全表行数（身份槽位独立性的探针）。
+    async fn row_count(tokens: &Repository) -> anyhow::Result<usize> {
+        let rows = tokens
+            .query()
+            .select_fields(&["id"])?
+            .page(1, yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE)?
+            .all()
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// 真实 MySQL：授权落库 → 读回，**两个 secret 列必须原样回来**。
+    ///
+    /// 钉住一个真机踩到的坑：`access_token` / `refresh_token` 标了 `secret`（即
+    /// `hidden`），而框架的默认投影会**剔除 hidden 字段**
+    /// （`yang-base/src/table/table_query/validation.rs:34` 的 `default_read_fields`）。
+    /// 于是 `load_slot` 用裸 `.query()` 时写入成功、读回必败，报
+    /// 「字段未找到 [表: record]: access_token」——只有显式 `select_fields` 点名才读得到。
+    /// 这条测试就是那道防线：把 `load_slot` 的字段列表删掉，它会立刻红。
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn real_mysql_round_trips_secret_token_columns() -> anyhow::Result<()> {
+        let (database, context) = test_database().await?;
         let tokens = context.user_tokens();
 
-        // 清成空表，保证下面先走**插入**分支（单例行表，全表至多一行）。
-        while let Some(existing) = load_single(tokens).await? {
-            tokens
-                .query()
-                .where_eq("id", json!(existing.id))?
-                .delete()
-                .await?;
-        }
-        assert!(load_single(tokens).await?.is_none(), "清表后应读不到行");
+        // 清成空表，保证下面先走**插入**分支（每个身份槽位至多一行）。
+        clear_slot(tokens, IdentitySlot::Dispatch).await?;
+        clear_slot(tokens, IdentitySlot::Comment).await?;
+        assert!(
+            load_slot(tokens, IdentitySlot::Dispatch).await?.is_none(),
+            "清表后应读不到行"
+        );
+        assert!(
+            load_slot(tokens, IdentitySlot::Comment).await?.is_none(),
+            "清表后应读不到行"
+        );
 
         // ---- 插入分支 ----
         let first = bundle("access-first", "refresh-first", 100);
-        store_authorization(tokens, "ou_first", Some("张三"), &first, 1_700_000_000).await?;
-        let loaded = expect_row(tokens, "刚存进去的行应能读回").await?;
+        store_authorization(
+            tokens,
+            IdentitySlot::Dispatch,
+            "ou_first",
+            Some("张三"),
+            &first,
+            1_700_000_000,
+        )
+        .await?;
+        let loaded = expect_row(tokens, IdentitySlot::Dispatch, "刚存进去的行应能读回").await?;
         assert_eq!(loaded.open_id, "ou_first");
         assert_eq!(loaded.user_name.as_deref(), Some("张三"));
         assert_eq!(loaded.access_token, first.access_token);
@@ -1194,8 +1375,16 @@ mod tests {
 
         // ---- 重授权 = 更新分支：整体替换，且 `authorized_at` 必须重置 ----
         let second = bundle("access-second", "refresh-second", 200);
-        store_authorization(tokens, "ou_second", Some("李四"), &second, 1_800_000_000).await?;
-        let loaded = expect_row(tokens, "重授权后应仍有一行").await?;
+        store_authorization(
+            tokens,
+            IdentitySlot::Dispatch,
+            "ou_second",
+            Some("李四"),
+            &second,
+            1_800_000_000,
+        )
+        .await?;
+        let loaded = expect_row(tokens, IdentitySlot::Dispatch, "重授权后应仍有一行").await?;
         assert_eq!(loaded.access_token, second.access_token);
         assert_eq!(loaded.refresh_token, second.refresh_token);
         assert_eq!(
@@ -1203,14 +1392,14 @@ mod tests {
             "重授权必须重置 350 天时钟"
         );
         assert_eq!(loaded.id, first_id, "重授权是替换而不是新增（主键不变）");
-        assert_eq!(row_count(tokens).await?, 1, "单例行不变式：全表只有一行");
+        assert_eq!(row_count(tokens).await?, 1, "该身份槽位只有一行");
 
         // ---- 刷新分支：只换凭证，**不碰** `authorized_at` ----
         let third = bundle("access-third", "refresh-third", 300);
         let mut transaction = crate::db::begin_mysql(&database).await?;
         update_tokens(tokens, &mut transaction, loaded.id, &third).await?;
         transaction.commit().await?;
-        let loaded = expect_row(tokens, "刷新后应仍有一行").await?;
+        let loaded = expect_row(tokens, IdentitySlot::Dispatch, "刷新后应仍有一行").await?;
         assert_eq!(loaded.access_token, third.access_token);
         assert_eq!(loaded.refresh_token, third.refresh_token);
         assert_eq!(loaded.authorized_at, 1_800_000_000, "刷新不得重置授权时钟");
@@ -1221,7 +1410,11 @@ mod tests {
             &mut competing,
             yang_db::QueryBuilder::from_pool(database.pool(), yang_db::table!("feishu_user_token"))
                 .field(yang_db::field!("id"))
-                .where_and(yang_db::field!("slot"), yang_db::CompareOp::Eq, SINGLE_SLOT)?,
+                .where_and(
+                    yang_db::field!("slot"),
+                    yang_db::CompareOp::Eq,
+                    IdentitySlot::Dispatch.slot(),
+                )?,
         )
         .await?;
         let transport = std::sync::Arc::new(PausedRefresh {
@@ -1231,7 +1424,16 @@ mod tests {
         let refresh = tokio::spawn({
             let tokens = tokens.clone();
             let transport = transport.clone();
-            async move { user_access_token(&tokens, transport.as_ref(), &NoSleep, &credentials()).await }
+            async move {
+                user_access_token(
+                    &tokens,
+                    transport.as_ref(),
+                    &NoSleep,
+                    &credentials(),
+                    IdentitySlot::Dispatch,
+                )
+                .await
+            }
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), transport.started.notified())
@@ -1248,7 +1450,16 @@ mod tests {
         let refresh = tokio::spawn({
             let tokens = tokens.clone();
             let transport = transport.clone();
-            async move { user_access_token(&tokens, transport.as_ref(), &NoSleep, &credentials()).await }
+            async move {
+                user_access_token(
+                    &tokens,
+                    transport.as_ref(),
+                    &NoSleep,
+                    &credentials(),
+                    IdentitySlot::Dispatch,
+                )
+                .await
+            }
         });
         tokio::time::timeout(Duration::from_secs(3), transport.started.notified()).await?;
         let fresh = bundle(
@@ -1262,6 +1473,7 @@ mod tests {
             async move {
                 store_authorization(
                     &tokens,
+                    IdentitySlot::Dispatch,
                     "ou_new_user",
                     Some("新授权人"),
                     &fresh,
@@ -1278,11 +1490,75 @@ mod tests {
         transport.release.notify_one();
         assert!(refresh.await?.is_ok());
         reauthorization.await??;
-        let latest = expect_row(tokens, "重新授权应落库").await?;
+        let latest = expect_row(tokens, IdentitySlot::Dispatch, "重新授权应落库").await?;
         assert_eq!(latest.open_id, "ou_new_user");
         assert_eq!(latest.access_token, fresh.access_token);
         assert_eq!(latest.refresh_token, fresh.refresh_token);
         assert_eq!(latest.authorized_at, 1_900_000_000);
+
+        Ok(())
+    }
+
+    /// 真实 MySQL：两个身份槽位互不覆盖。
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn real_mysql_identity_slots_are_independent() -> anyhow::Result<()> {
+        let (_database, context) = test_database().await?;
+        let tokens = context.user_tokens();
+        clear_slot(tokens, IdentitySlot::Dispatch).await?;
+        clear_slot(tokens, IdentitySlot::Comment).await?;
+
+        let dispatch_bundle = bundle("access-dispatch", "refresh-dispatch", 100);
+        store_authorization(
+            tokens,
+            IdentitySlot::Dispatch,
+            "ou_dispatch",
+            Some("派发人"),
+            &dispatch_bundle,
+            1_700_000_000,
+        )
+        .await?;
+        let comment_bundle = bundle("access-comment", "refresh-comment", 200);
+        store_authorization(
+            tokens,
+            IdentitySlot::Comment,
+            "ou_comment",
+            Some("回写人"),
+            &comment_bundle,
+            1_700_000_000,
+        )
+        .await?;
+
+        let dispatch = expect_row(tokens, IdentitySlot::Dispatch, "派发身份应可读回").await?;
+        assert_eq!(dispatch.open_id, "ou_dispatch");
+        assert_eq!(dispatch.access_token, dispatch_bundle.access_token);
+        let comment = expect_row(tokens, IdentitySlot::Comment, "回写身份应可读回").await?;
+        assert_eq!(comment.open_id, "ou_comment");
+        assert_eq!(comment.access_token, comment_bundle.access_token);
+        assert_eq!(row_count(tokens).await?, 2, "两个身份各占一行");
+        let dispatch_id = dispatch.id;
+
+        // 只重授权回写身份：派发行原封不动。
+        let renewed = bundle("access-comment-2", "refresh-comment-2", 300);
+        store_authorization(
+            tokens,
+            IdentitySlot::Comment,
+            "ou_comment_new",
+            Some("回写人二"),
+            &renewed,
+            1_800_000_000,
+        )
+        .await?;
+        let dispatch = expect_row(tokens, IdentitySlot::Dispatch, "派发行不得被覆盖").await?;
+        assert_eq!(dispatch.id, dispatch_id);
+        assert_eq!(dispatch.open_id, "ou_dispatch");
+        assert_eq!(dispatch.access_token, dispatch_bundle.access_token);
+        assert_eq!(dispatch.authorized_at, 1_700_000_000);
+        let comment = expect_row(tokens, IdentitySlot::Comment, "回写身份应已更新").await?;
+        assert_eq!(comment.open_id, "ou_comment_new");
+        assert_eq!(comment.access_token, renewed.access_token);
+        assert_eq!(comment.authorized_at, 1_800_000_000);
+        assert_eq!(row_count(tokens).await?, 2, "重授权是替换而不是新增");
 
         Ok(())
     }

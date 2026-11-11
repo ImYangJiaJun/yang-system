@@ -368,7 +368,7 @@ struct CommentRule {
     base_token: String,
     table_id: String,
     config: CommentConfig,
-    /// 页面顶部绑定的飞书运维身份；未授权时为 `None`。
+    /// 页面顶部绑定的审批回写身份；未授权时为 `None`。
     author_open_id: Option<String>,
 }
 
@@ -404,19 +404,25 @@ async fn load_enabled_rules(runner: &RoundRunner) -> anyhow::Result<Vec<CommentR
             author_open_id: None,
         });
     }
-    // 评论作者统一取页面顶部绑定的飞书运维身份。读不到也照常返回规则：
-    // 启动期事件订阅不依赖作者；process_due 会跳过未绑定的规则，等授权后自然处理。
-    let binding = match user_token::load_single(runner.context.user_tokens()).await {
+    // 评论作者统一取页面顶部绑定的审批回写身份（回写槽位，与派发身份相互独立）。
+    // 读不到也照常返回规则：启动期事件订阅不依赖作者；process_due 会跳过未绑定的
+    // 规则，等授权后自然处理。
+    let binding = match user_token::load_slot(
+        runner.context.user_tokens(),
+        user_token::IdentitySlot::Comment,
+    )
+    .await
+    {
         Ok(row) => row
             .map(|row| row.open_id.trim().to_string())
             .filter(|open_id| !open_id.is_empty()),
         Err(error) => {
-            tracing::warn!(error = %error, "读取飞书运维身份失败，本轮评论按未绑定处理");
+            tracing::warn!(error = %error, "读取审批回写身份失败，本轮评论按未绑定处理");
             None
         }
     };
     if binding.is_none() {
-        tracing::debug!("尚未绑定飞书运维身份，评论将等待授权后处理");
+        tracing::debug!("尚未绑定审批回写身份，评论将等待授权后处理");
     }
     apply_author(&mut rules, binding.as_deref());
     Ok(rules)
@@ -810,7 +816,7 @@ async fn process_due(runner: &RoundRunner, rules: &[CommentRule]) -> ProcessRepo
         };
         // 未绑定运维身份时整轮跳过：不认领、不改台账，授权后下一轮自然处理。
         let Some(author_open_id) = rule.author_open_id.as_deref() else {
-            tracing::debug!(rule_id = rule.id, "尚未绑定飞书运维身份，跳过评论台账行");
+            tracing::debug!(rule_id = rule.id, "尚未绑定审批回写身份，跳过评论台账行");
             continue;
         };
         match process_one(runner, rule, row, author_open_id, &mut status_names).await {

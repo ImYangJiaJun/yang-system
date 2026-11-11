@@ -73,6 +73,7 @@ import type {
   DatasourceItem,
   DatasourceListQuery,
   DatasourceStatusFilter,
+  FeishuOAuthPurpose,
   FeishuOAuthStatus,
   HealthReport,
   IngestMode,
@@ -338,8 +339,9 @@ export const feishuQueryKeys = {
     [FEISHU_QUERY_ROOT, "options", sourceKey] as const,
   /// 排程是**全局**的，所以 key 里没有 sourceKey。
   pullSchedule: () => [FEISHU_QUERY_ROOT, "pull-schedule"] as const,
-  /// 飞书用户身份授权状态（全局单例）。
-  oauthStatus: () => [FEISHU_QUERY_ROOT, "oauth-status"] as const,
+  /// 飞书用户身份授权状态（按用途区分：派发 / 回写互不共享缓存）。
+  oauthStatus: (purpose: FeishuOAuthPurpose) =>
+    [FEISHU_QUERY_ROOT, "oauth-status", purpose] as const,
   optionList: (query: OptionListQuery) =>
     [
       ...feishuQueryKeys.options(query.sourceKey),
@@ -4096,12 +4098,13 @@ export function useApprovalExportWizardClient(): ApprovalExportWizardClient {
 /// 读授权状态。
 export async function fetchFeishuOAuthStatus(
   deps: FeishuInvokeDeps,
+  purpose: FeishuOAuthPurpose,
   signal?: AbortSignal,
 ): Promise<FeishuOAuthStatus> {
   const result = await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.oauthStatus,
-    {},
+    { purpose },
     signal,
   );
   const data = asRecord(result.data);
@@ -4117,11 +4120,12 @@ export async function fetchFeishuOAuthStatus(
 /// 取授权链接（服务端签发 state，10 分钟有效、一次性）。
 export async function fetchFeishuAuthorizeUrl(
   deps: FeishuInvokeDeps,
+  purpose: FeishuOAuthPurpose,
 ): Promise<string> {
   const result = await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.oauthAuthorizeUrl,
-    {},
+    { purpose },
   );
   const data = asRecord(result.data);
   const url = typeof data?.authorize_url === "string" ? data.authorize_url : "";
@@ -4133,7 +4137,7 @@ export async function fetchFeishuAuthorizeUrl(
 ///
 /// 取链接是**写**权限、看状态是**读**权限：只读身份看得见「未授权」，但按钮不渲染
 /// （服务端也会拒）——两个方向都要知道，否则只读身份会点到一个必然 403 的按钮。
-export function useFeishuOAuth() {
+export function useFeishuOAuth(purpose: FeishuOAuthPurpose) {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
@@ -4145,12 +4149,15 @@ export function useFeishuOAuth() {
 
   const status = useQuery({
     enabled: canReadApproval(catalogData),
-    queryKey: feishuQueryKeys.oauthStatus(),
-    queryFn: ({ signal }) => fetchFeishuOAuthStatus(deps, signal),
+    queryKey: feishuQueryKeys.oauthStatus(purpose),
+    queryFn: ({ signal }) => fetchFeishuOAuthStatus(deps, purpose, signal),
     staleTime: 15_000,
   });
 
-  const authorizeUrl = useCallback(() => fetchFeishuAuthorizeUrl(deps), [deps]);
+  const authorizeUrl = useCallback(
+    () => fetchFeishuAuthorizeUrl(deps, purpose),
+    [deps, purpose],
+  );
 
   return {
     canRead: canReadApproval(catalogData),

@@ -72,7 +72,7 @@ pub(crate) struct CommentConfig {
     /// 状态文案。
     #[serde(default)]
     pub(crate) status_labels: CommentStatusLabels,
-    /// 旧字段：评论作者 open_id。运行期已改为使用页面顶部绑定的飞书运维身份，
+    /// 旧字段：评论作者 open_id。运行期已改为使用页面顶部绑定的审批回写身份，
     /// 保留仅为兼容旧配置；保存时仍会 trim。
     #[serde(default)]
     pub(crate) author_user_id: String,
