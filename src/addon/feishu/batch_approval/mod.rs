@@ -4,11 +4,9 @@
 //! `user_access_token` 限定，服务端不做跨用户查询。
 
 mod actions;
-pub(crate) mod api;
-mod rate_limit;
-pub(crate) mod worker;
-
+pub(crate) mod domain;
 pub(crate) use actions::cancel_job::cancel_user_jobs;
+pub(crate) use domain::{api, worker};
 
 use std::sync::Arc;
 

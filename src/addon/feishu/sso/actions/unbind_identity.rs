@@ -29,6 +29,7 @@ pub(super) fn register(
     context: Arc<FeishuContext>,
     external_login: Arc<dyn ExternalLoginPort>,
 ) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——登录用户只能访问自己的飞书身份与批量审批数据
     module
         .action_fn(
             yang_base::action_name!("feishu_unbind"),

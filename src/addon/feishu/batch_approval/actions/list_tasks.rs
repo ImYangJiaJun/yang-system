@@ -22,6 +22,7 @@ impl ParamInput for ListTasksInput {
 }
 
 pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——登录用户只能访问自己的飞书身份与批量审批数据
     module
         .action_fn(
             yang_base::action_name!("feishu_batch_list_tasks"),

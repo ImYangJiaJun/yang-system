@@ -18,19 +18,19 @@ use yang_base::BaseError;
 use crate::config::FeishuSettings;
 use crate::infrastructure::audit;
 
-use super::super::domain::batch_job_item_table::{
+use super::api;
+use crate::addon::feishu::domain::batch_job_item_table::{
     ITEM_ATTEMPTS, ITEM_FINISHED_AT, ITEM_ID, ITEM_INSTANCE_CODE, ITEM_JOB_ID, ITEM_MESSAGE,
     ITEM_RESULT_CODE, ITEM_STARTED_AT, ITEM_STATUS, ITEM_TASK_ID,
 };
-use super::super::domain::batch_job_table::{
+use crate::addon::feishu::domain::batch_job_table::{
     JOB_ACTION, JOB_ADD_SIGN_OPEN_IDS, JOB_ADD_SIGN_TYPE, JOB_APPROVAL_METHOD, JOB_COMMENT,
     JOB_FAILED, JOB_FINISHED_AT, JOB_ID, JOB_ROLLBACK_MODE, JOB_STATUS, JOB_SUCCEEDED, JOB_TOTAL,
     JOB_TRANSFER_OPEN_ID, JOB_UNKNOWN, JOB_USER_ID,
 };
-use super::super::domain::context::FeishuContext;
-use super::super::domain::user_token::now_unix_secs;
-use super::super::sso::credentials;
-use super::api;
+use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::user_token::now_unix_secs;
+use crate::addon::feishu::sso::credentials;
 
 const REAUTH_CODES: &[i32] = &[99991672, 99991679, 20026, 20037, 20064, 20073];
 const RATE_LIMIT_CODES: &[i32] = &[429, 230020, 99991400, 1254290];

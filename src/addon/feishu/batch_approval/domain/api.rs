@@ -12,11 +12,11 @@ use yang_base::BaseError;
 
 use crate::config::FeishuSettings;
 
-use super::super::domain::outbound::{
+use crate::addon::feishu::domain::outbound::{
     send_with_retry, OutboundMethod, OutboundRequest, PULL_RETRY,
 };
-use super::super::domain::outbound_setup;
-use super::super::domain::tenant_token::FEISHU_OPEN_BASE;
+use crate::addon::feishu::domain::outbound_setup;
+use crate::addon::feishu::domain::tenant_token::FEISHU_OPEN_BASE;
 
 const MAX_PAGES: usize = 10;
 const PAGE_SIZE: usize = 100;

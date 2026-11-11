@@ -19,7 +19,7 @@ use crate::addon::feishu::domain::tenant_token::FeishuCredentials;
 use crate::addon::feishu::domain::user_token::{self, TokenBundle};
 use crate::config::FeishuSettings;
 
-use super::super::domain::user_credential_table::{
+use crate::addon::feishu::domain::user_credential_table::{
     CREDENTIAL_ACCESS_EXPIRES_AT, CREDENTIAL_ACCESS_TOKEN, CREDENTIAL_ACTIVE,
     CREDENTIAL_AUTHORIZED_AT, CREDENTIAL_ID, CREDENTIAL_IDENTITY_ID, CREDENTIAL_LAST_REFRESHED_AT,
     CREDENTIAL_OPEN_ID, CREDENTIAL_REAUTH_REQUIRED, CREDENTIAL_REFRESH_EXPIRES_AT,

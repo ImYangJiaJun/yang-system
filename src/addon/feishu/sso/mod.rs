@@ -5,8 +5,8 @@
 //! 查找/建号/绑定/签发会话能力。
 
 mod actions;
-pub(crate) mod credentials;
-pub(crate) mod state;
+pub(crate) mod domain;
+pub(crate) use domain::{credentials, state};
 
 use std::sync::Arc;
 
