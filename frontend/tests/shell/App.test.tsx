@@ -81,6 +81,9 @@ describe("App", () => {
     expect(
       within(screen.getByRole("navigation")).queryAllByRole("link"),
     ).toHaveLength(0);
+    expect(
+      screen.getByRole("button", { name: "批量审批" }),
+    ).toBeInTheDocument();
   });
   it("导航与首页卡片仅消费 Catalog 落点", async () => {
     vi.stubGlobal(

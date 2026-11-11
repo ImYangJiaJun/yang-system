@@ -4,6 +4,7 @@ import {
   Check,
   ChevronsUpDown,
   CircleUser,
+  ClipboardCheck,
   Database,
   Send,
   LogOut,
@@ -212,6 +213,7 @@ function SidebarSessionFooter() {
 }
 
 export default function AppLayout() {
+  const navigate = useNavigate();
   const [dark, setDark] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const catalogQuery = useUiCatalog();
@@ -314,6 +316,15 @@ export default function AppLayout() {
                 <Menu />
               </Button>
             </DialogTrigger>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => navigate("/batch-approval")}
+            >
+              <ClipboardCheck className="size-4" />
+              <span className="hidden sm:inline">批量审批</span>
+            </Button>
             <DensityMenu />
             <Button
               variant="outline"
