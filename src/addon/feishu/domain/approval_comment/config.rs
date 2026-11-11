@@ -420,7 +420,8 @@ mod tests {
 
     #[test]
     fn required_subset_trigger_and_placeholders_are_enforced() {
-        let mut value: serde_json::Value = serde_json::from_str(&valid_raw()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&valid_raw())
+            .unwrap_or_else(|error| panic!("valid raw config must parse: {error}"));
         value["required_field_ids"] = serde_json::json!(["fldUnknown"]);
         value["trigger_field_id"] = serde_json::json!("fldNotConfigured");
         value["record_url_template"] = serde_json::json!("https://tenant/base/{record_id}");
@@ -473,7 +474,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_and_missing_author_are_rejected() {
-        let mut value: serde_json::Value = serde_json::from_str(&valid_raw()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&valid_raw())
+            .unwrap_or_else(|error| panic!("valid raw config must parse: {error}"));
         value["author_user_id"] = serde_json::json!(" ");
         value["typo_key"] = serde_json::json!(true);
         let reasons = parse_comment_config(Some(&value.to_string()))
@@ -484,7 +486,8 @@ mod tests {
 
     #[test]
     fn missing_field_ids_are_reported_against_the_target_table() {
-        let mut value: serde_json::Value = serde_json::from_str(&valid_raw()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&valid_raw())
+            .unwrap_or_else(|error| panic!("valid raw config must parse: {error}"));
         value["field_ids"] = serde_json::json!(["fldBB53wVj", "fldGone"]);
         value["required_field_ids"] = serde_json::json!(["fldBB53wVj"]);
         value["trigger_field_id"] = serde_json::json!("fldBB53wVj");

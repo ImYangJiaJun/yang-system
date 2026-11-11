@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn empty_attachment_urls_are_dropped() {
-        let files: Vec<CommentFile> = vec![
+        let files: Vec<CommentFile> = [
             TestCommentFileInput {
                 url: " https://files/1.png ".into(),
                 title: "回单".into(),

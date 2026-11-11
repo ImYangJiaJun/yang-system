@@ -58,7 +58,7 @@ pub(crate) fn evaluate_condition(
             continue;
         }
         let value = fields.get(field_id);
-        if value.is_none_or(is_empty) {
+        if value.map_or(true, is_empty) {
             return CommentCondition::Waiting(format!(
                 "必填字段「{}」为空",
                 config.field_name(field_id)
@@ -74,7 +74,7 @@ pub(crate) fn evaluate_condition(
         return CommentCondition::Ready;
     };
     let value = fields.get(trigger_field_id);
-    if value.is_none_or(is_empty) {
+    if value.map_or(true, is_empty) {
         return CommentCondition::Waiting(format!(
             "触发字段「{}」为空",
             config.field_name(trigger_field_id)
