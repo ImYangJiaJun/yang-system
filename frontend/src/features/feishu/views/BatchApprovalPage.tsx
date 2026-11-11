@@ -244,8 +244,9 @@ export default function BatchApprovalPage() {
         return false;
       }
       const date = dateKey(task.createdAt);
-      if (filters.from && date && date < filters.from) return false;
-      if (filters.to && date && date > filters.to) return false;
+      if ((filters.from || filters.to) && !date) return false;
+      if (filters.from && date < filters.from) return false;
+      if (filters.to && date > filters.to) return false;
       if (
         filters.status !== "all" &&
         taskStatusLabel(task) !== filters.status
