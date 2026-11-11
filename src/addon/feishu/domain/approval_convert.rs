@@ -24,12 +24,13 @@
 
 #![allow(dead_code)] // 转换器先落地并自带测试；消费者（派发编排）在后续任务接入。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
+use super::approval_attachment::attachments;
 use super::approval_match::{is_eligible_for_mapping, FormWidget};
-use super::widget_rules::{self, is_container, is_media, upload_type};
+use super::widget_rules::{self, is_container, is_media, is_multi_select, upload_type};
 
 /// 一个审批控件在库里的映射快照。
 #[derive(Debug, Clone)]
@@ -397,6 +398,9 @@ fn assemble(
 /// - **任意深度**的 `fieldList` 整棵跳过（明细值不进顶层表单，也不该拆组）；
 /// - **顶层公式控件**跳过：它是按成员求和的整单合计（见 [`assemble_group_formula`]），
 ///   天然随各成员的明细金额不同而不同；
+/// - **顶层附件/多选**跳过：它们按成员取并集（见 [`assemble_group_attachments`] /
+///   [`assemble_group_options`]），同一份文件在各行上传得到不同 token、勾选项也
+///   可能不同，参与签名会让本该合组的记录各成一组；
 /// - 控件组递归，只收已映射的子控件；
 /// - 空值（含必填缺失）统一编码 `null`，**不抛** `MissingRequired`——签名阶段
 ///   只回答「两条记录像不像」，必填是否满足由处理期的真实校验决定；
@@ -408,11 +412,11 @@ pub(crate) fn build_signature(input: &FormInput<'_>) -> Result<String, ConvertEr
     build_signature_inner(input, true)
 }
 
-/// 旧口径签名：顶层 formula 也参与摘要。
+/// 旧口径签名：顶层 formula / 附件 / 多选也参与摘要。
 ///
 /// 只服务升级兼容——2026-11-10 之前播种的组行里存的是这个口径的
 /// `signature_hash`。处理期在「成员彼此一致、但都不等于组行存的摘要」时，
-/// 再用它复核一次，避免把「仅公式口径变化」误判成「排队期间数据被改」。
+/// 再用它复核一次，避免把「仅口径变化」误判成「排队期间数据被改」。
 /// 新代码不得用它做分组。
 pub(crate) fn build_legacy_signature(input: &FormInput<'_>) -> Result<String, ConvertError> {
     build_signature_inner(input, false)
@@ -420,7 +424,7 @@ pub(crate) fn build_legacy_signature(input: &FormInput<'_>) -> Result<String, Co
 
 fn build_signature_inner(
     input: &FormInput<'_>,
-    exclude_formula: bool,
+    exclude_aggregated: bool,
 ) -> Result<String, ConvertError> {
     let (definition, mappings) = prepare_definition(input.form_snapshot, input.widgets)?;
     let mut values = Map::new();
@@ -430,7 +434,7 @@ fn build_signature_inner(
         input,
         &mut values,
         false,
-        exclude_formula,
+        exclude_aggregated,
     )?;
     serde_json::to_string(&Value::Object(values)).map_err(|error| ConvertError::BadValue {
         widget_id: String::new(),
@@ -440,16 +444,16 @@ fn build_signature_inner(
 
 /// 按定义顺序遍历定义树，把已映射控件的规范值写进签名。
 ///
-/// `inside_container` 只用于区分「顶层公式控件」：控件组里的公式子控件按
+/// `inside_container` 只用于区分「顶层整单字段」：控件组里的公式子控件按
 /// 配置期白名单本就不会进映射，万一有旧映射，仍按既有语义参与签名（不聚合）。
-/// `exclude_formula=false` 是旧口径（见 [`build_legacy_signature`]）。
+/// `exclude_aggregated=false` 是旧口径（见 [`build_legacy_signature`]）。
 fn collect_signature(
     nodes: &[FormWidget],
     mappings: &BTreeMap<&str, &WidgetMap>,
     input: &FormInput<'_>,
     values: &mut Map<String, Value>,
     inside_container: bool,
-    exclude_formula: bool,
+    exclude_aggregated: bool,
 ) -> Result<(), ConvertError> {
     for node in nodes {
         // 明细子树在任意深度都整棵跳过（含 workGroup 内嵌的 fieldList）。
@@ -460,7 +464,16 @@ fn collect_signature(
         // 按成员求和（见 [`assemble_group_formula`]），天然会随每条记录的
         // 明细金额不同而不同；它若参与签名，同一次批量点击的每条记录都会
         // 各成一组，永远合并不了。
-        if exclude_formula && node.r#type == "formula" && !inside_container {
+        if exclude_aggregated && node.r#type == "formula" && !inside_container {
+            continue;
+        }
+        // 顶层附件/多选是「整单合并」字段（[`assemble_group_attachments`] /
+        // [`assemble_group_options`] 按成员取并集）：各行分别上传的同一份文件
+        // token 不同、勾选项也可能不同，参与签名会让本该合组的记录各成一组。
+        if exclude_aggregated
+            && !inside_container
+            && (is_media(&node.r#type) || is_multi_select(&node.r#type))
+        {
             continue;
         }
         if is_container(&node.r#type) {
@@ -470,7 +483,7 @@ fn collect_signature(
                 input,
                 values,
                 true,
-                exclude_formula,
+                exclude_aggregated,
             )?;
             continue;
         }
@@ -660,19 +673,20 @@ fn assemble_definition(
         } else if let Some(mapping) = mappings.get(node.id.as_str()) {
             let mut mapping = (*mapping).clone();
             mapping.required |= node.required;
-            // 聚合组的顶层公式控件是整单合计：按成员求和，不能取 leader。
-            // 明细行内的公式（inside_detail_row）仍按该行自己的值组装。
-            let assembled =
-                if enforce_member_rows && !inside_detail_row && mapping.widget_type == "formula" {
-                    assemble_group_formula(&mapping, rows)?
-                } else {
-                    assemble_widget(
-                        &mapping,
-                        primary.cells,
-                        primary.attachment_codes,
-                        timezone_offset,
-                    )?
-                };
+            // 聚合组的顶层整单字段按成员合并：公式求和、附件并集、多选并集；
+            // 明细行内（inside_detail_row）仍按该行自己的值组装。
+            let group_level = enforce_member_rows && !inside_detail_row;
+            let assembled = match (group_level, mapping.widget_type.as_str()) {
+                (true, "formula") => assemble_group_formula(&mapping, rows)?,
+                (true, kind) if is_media(kind) => assemble_group_attachments(&mapping, rows)?,
+                (true, kind) if is_multi_select(kind) => assemble_group_options(&mapping, rows)?,
+                _ => assemble_widget(
+                    &mapping,
+                    primary.cells,
+                    primary.attachment_codes,
+                    timezone_offset,
+                )?,
+            };
             if let Some(value) = assembled {
                 if let Err(reason) = node.connect_definition_codes() {
                     return Err(ConvertError::InvalidDefinition(format!(
@@ -857,6 +871,92 @@ fn assemble_group_formula(
         reason: format!("公式合计不是有效数值：{text}（{error}）"),
     })?;
     Ok(Some(wrap_widget_value(widget, value)))
+}
+
+/// 聚合组里顶层附件/图片控件的值：各成员的附件取并集。
+///
+/// 同一份文件在每条记录里分别上传会拿到不同的 file_token，按「文件名 + 大小」
+/// 只保留一份；文件名或大小不同则视为不同文件全部保留，不静默丢附件。
+/// 成员行本来就没上传附件时贡献为空（整单是否必填仍按控件必填判定）。
+fn assemble_group_attachments(
+    widget: &WidgetMap,
+    rows: &[GroupFormRow<'_>],
+) -> Result<Option<Value>, ConvertError> {
+    check_converter_matches(widget)?;
+    let label = if upload_type(&widget.widget_type) == "image" {
+        "图片"
+    } else {
+        "附件"
+    };
+    let mut codes = Vec::new();
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let files = attachments(widget, row.cells)?;
+        if files.is_empty() {
+            continue;
+        }
+        // 上传链路按源文件顺序产出 code，数量对不上即代表这一行还没搬运完。
+        let row_codes = row
+            .attachment_codes
+            .get(&widget.widget_id)
+            .filter(|codes| {
+                codes.len() == files.len() && codes.iter().all(|code| !code.trim().is_empty())
+            })
+            .ok_or_else(|| ConvertError::BadValue {
+                widget_id: widget.widget_id.clone(),
+                reason: format!("记录 {} 的{label}尚未搬运到审批系统", row.record_id),
+            })?;
+        for (file, code) in files.iter().zip(row_codes) {
+            if seen.insert((file.name.clone(), file.size)) {
+                codes.push(Value::String(code.clone()));
+            }
+        }
+    }
+    if codes.is_empty() {
+        return if widget.required {
+            Err(ConvertError::MissingRequired {
+                widget_id: widget.widget_id.clone(),
+            })
+        } else {
+            Ok(None)
+        };
+    }
+    Ok(Some(wrap_widget_value(widget, Value::Array(codes))))
+}
+
+/// 聚合组里顶层多选控件的值：各成员选中项取并集（首次出现顺序）。
+fn assemble_group_options(
+    widget: &WidgetMap,
+    rows: &[GroupFormRow<'_>],
+) -> Result<Option<Value>, ConvertError> {
+    check_converter_matches(widget)?;
+    let mut values: Vec<Value> = Vec::new();
+    for row in rows {
+        let Some(cell) = row
+            .cells
+            .get(&widget.bitable_field)
+            .filter(|value| !is_empty(value))
+        else {
+            continue;
+        };
+        if let Value::Array(items) = assemble_option(widget, cell)? {
+            for item in items {
+                if !values.contains(&item) {
+                    values.push(item);
+                }
+            }
+        }
+    }
+    if values.is_empty() {
+        return if widget.required {
+            Err(ConvertError::MissingRequired {
+                widget_id: widget.widget_id.clone(),
+            })
+        } else {
+            Ok(None)
+        };
+    }
+    Ok(Some(wrap_widget_value(widget, Value::Array(values))))
 }
 
 /// 单元格文本的有效小数位（去掉末尾 0；指数形态按 10 位兜底）。
@@ -3206,30 +3306,158 @@ mod tests {
     }
 
     #[test]
-    fn signature_separates_attachment_source_identity() {
-        let widgets = [widget("file", "attachmentV2")];
-        let snapshot = flat_snapshot(&widgets);
-        let sign = |cell: Value| {
-            let cell_map = cells(&[("fld_src", cell)]);
-            let identities =
-                super::super::approval_attachment::source_identities(&widgets, &cell_map)
-                    .unwrap_or_else(|e| panic!("{e}"));
-            signature(&snapshot, &widgets, &cell_map, &identities).unwrap_or_else(|e| panic!("{e}"))
+    fn signature_ignores_group_merged_attachments_and_multiselect() {
+        let snapshot = r#"[
+            {"id":"file","type":"attachmentV2"},
+            {"id":"tags","type":"checkboxV2"},
+            {"id":"top","type":"input"}
+        ]"#;
+        let mut file = widget("file", "attachmentV2");
+        file.bitable_field = "fld_file".to_string();
+        let mut tags = widget("tags", "checkboxV2");
+        tags.bitable_field = "fld_tags".to_string();
+        tags.option_map.insert("A".to_string(), "va".to_string());
+        tags.option_map.insert("B".to_string(), "vb".to_string());
+        let mut top = widget("top", "input");
+        top.bitable_field = "fld_top".to_string();
+        let widgets = [file, tags, top];
+
+        let cell_map = |token: &str, tag: &str, top_text: &str| {
+            cells(&[
+                (
+                    "fld_file",
+                    json!([{"file_token": token, "name": "a.pdf", "size": 10}]),
+                ),
+                ("fld_tags", json!([tag])),
+                ("fld_top", json!(top_text)),
+            ])
         };
-        let base = sign(json!([{"file_token":"Token1","name":"a.pdf","size":10}]));
+        let sign = |token: &str, tag: &str, top_text: &str| {
+            let cells = cell_map(token, tag, top_text);
+            signature(snapshot, &widgets, &cells, &BTreeMap::new())
+                .unwrap_or_else(|e| panic!("{e}"))
+        };
+        // 同一份文件在各行上传得到不同 token、勾选项也可能不同：合并字段不得拆组。
         assert_eq!(
-            base,
-            sign(json!([{"file_token":"Token1","name":"a.pdf","size":10}]))
+            sign("Token1", "A", "共同"),
+            sign("Token2", "B", "共同"),
+            "附件 token 与多选差异不得再拆组"
         );
         assert_ne!(
-            base,
-            sign(json!([{"file_token":"Token2","name":"a.pdf","size":10}])),
-            "不同 file_token 必须不同签名"
+            sign("Token1", "A", "共同"),
+            sign("Token1", "A", "不同"),
+            "其他非明细字段的差异仍必须拆组"
+        );
+
+        // 旧口径（升级兼容）仍包含附件与多选：只用于核对升级前播种的组。
+        let legacy = |token: &str, tag: &str| {
+            let cells = cell_map(token, tag, "共同");
+            let identities = super::super::approval_attachment::source_identities(&widgets, &cells)
+                .unwrap_or_else(|e| panic!("{e}"));
+            build_legacy_signature(&FormInput {
+                widgets: &widgets,
+                form_snapshot: snapshot,
+                cells: &cells,
+                attachment_codes: &identities,
+                timezone_offset: shanghai(),
+            })
+            .unwrap_or_else(|e| panic!("{e}"))
+        };
+        assert_ne!(
+            legacy("Token1", "A"),
+            legacy("Token2", "A"),
+            "旧口径必须仍含附件"
         );
         assert_ne!(
-            base,
-            sign(json!([{"file_token":"Token1","name":"a.pdf","size":11}])),
-            "不同 size 必须不同签名"
+            legacy("Token1", "A"),
+            legacy("Token1", "B"),
+            "旧口径必须仍含多选"
         );
+    }
+
+    #[test]
+    fn group_form_unions_attachments_and_collapses_duplicates() {
+        let snapshot = r#"[{"id":"file","type":"attachmentV2","required":true}]"#;
+        let widgets = [widget("file", "attachmentV2")];
+        let row_a = cells(&[(
+            "fld_src",
+            json!([{"file_token":"t1","name":"合同.pdf","size":10}]),
+        )]);
+        let row_b = cells(&[(
+            "fld_src",
+            json!([{"file_token":"t2","name":"合同.pdf","size":10}]),
+        )]);
+        let row_c = cells(&[(
+            "fld_src",
+            json!([{"file_token":"t3","name":"发票.pdf","size":20}]),
+        )]);
+        let codes_a = BTreeMap::from([("file".to_string(), vec!["code1".to_string()])]);
+        let codes_b = BTreeMap::from([("file".to_string(), vec!["code2".to_string()])]);
+        let codes_c = BTreeMap::from([("file".to_string(), vec!["code3".to_string()])]);
+        let rows = [
+            GroupFormRow {
+                record_id: "recA",
+                cells: &row_a,
+                attachment_codes: &codes_a,
+            },
+            GroupFormRow {
+                record_id: "recB",
+                cells: &row_b,
+                attachment_codes: &codes_b,
+            },
+            GroupFormRow {
+                record_id: "recC",
+                cells: &row_c,
+                attachment_codes: &codes_c,
+            },
+        ];
+        let form = build_group_form(&GroupFormInput {
+            widgets: &widgets,
+            form_snapshot: snapshot,
+            rows: &rows,
+            timezone_offset: shanghai(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let form: Value = serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            form[0]["value"],
+            json!(["code1", "code3"]),
+            "同一份文件只保留一份，不同文件全部保留"
+        );
+    }
+
+    #[test]
+    fn group_form_unions_multiselect_options() {
+        let snapshot = r#"[{"id":"tags","type":"checkboxV2"}]"#;
+        let mut tags = widget("tags", "checkboxV2");
+        tags.option_map
+            .insert("合同".to_string(), "opt_contract".to_string());
+        tags.option_map
+            .insert("发票".to_string(), "opt_invoice".to_string());
+        let widgets = [tags];
+        let row_a = cells(&[("fld_src", json!(["合同"]))]);
+        let row_b = cells(&[("fld_src", json!(["发票", "合同"]))]);
+        let codes = BTreeMap::new();
+        let rows = [
+            GroupFormRow {
+                record_id: "recA",
+                cells: &row_a,
+                attachment_codes: &codes,
+            },
+            GroupFormRow {
+                record_id: "recB",
+                cells: &row_b,
+                attachment_codes: &codes,
+            },
+        ];
+        let form = build_group_form(&GroupFormInput {
+            widgets: &widgets,
+            form_snapshot: snapshot,
+            rows: &rows,
+            timezone_offset: shanghai(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let form: Value = serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(form[0]["value"], json!(["opt_contract", "opt_invoice"]));
     }
 }

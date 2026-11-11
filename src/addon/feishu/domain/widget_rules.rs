@@ -99,6 +99,11 @@ pub(crate) fn is_media(widget_type: &str) -> bool {
     matches!(widget_type, "attachmentV2" | "image" | "imageV2")
 }
 
+/// 该类型是否是多选控件（表单值是选项标签数组，转换器为 `Option`）。
+pub(crate) fn is_multi_select(widget_type: &str) -> bool {
+    matches!(widget_type, "checkbox" | "checkboxV2")
+}
+
 /// 媒体控件上传到飞书时使用的文件类型：图片控件只能传图片。
 pub(crate) fn upload_type(widget_type: &str) -> &'static str {
     if matches!(widget_type, "image" | "imageV2") {

@@ -16,9 +16,10 @@ const UPLOAD_URL: &str = "https://www.feishu.cn/approval/openapi/v2/file/upload"
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Attachment {
-    file_token: String,
-    name: String,
-    size: u64,
+    pub(crate) file_token: String,
+    /// 聚合组按「文件名 + 大小」去重同一份文件的不同 token。
+    pub(crate) name: String,
+    pub(crate) size: u64,
 }
 
 pub(crate) fn attachments(
