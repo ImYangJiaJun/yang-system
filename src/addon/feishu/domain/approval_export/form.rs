@@ -260,12 +260,7 @@ impl FormNode {
 
     /// 数字/金额/公式控件的数值。
     pub(crate) fn number(&self) -> Option<FixedNumber> {
-        match &self.value {
-            Value::Number(number) => FixedNumber::parse(&number.to_string()),
-            Value::String(text) => FixedNumber::parse(text),
-            Value::Object(map) => map.get("value").and_then(FixedNumber::from_json),
-            _ => None,
-        }
+        numeric_value(&self.value).or_else(|| self.option.as_ref().and_then(numeric_value))
     }
 
     /// 日期/时间控件的毫秒时间戳。字符串 `"0"` 按 0 返回，由调用方决定是否当空。
@@ -342,6 +337,21 @@ impl FormNode {
 fn non_empty(text: &str) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// 从控件值里尽量取一个数值。
+///
+/// 外部数据源控件的值可能是数组/对象（`{value,text}`、`{number:...}`），
+/// 控件类型本身也不一定是 `number`；计算字段只关心「能不能解析成数」。
+fn numeric_value(value: &Value) -> Option<FixedNumber> {
+    match value {
+        Value::Number(_) | Value::String(_) => FixedNumber::from_json(value),
+        Value::Array(items) => items.iter().find_map(numeric_value),
+        Value::Object(map) => ["value", "number", "amount", "text", "name", "label"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(numeric_value)),
+        _ => None,
+    }
 }
 
 fn text_of_value(value: &Value) -> String {
@@ -498,6 +508,91 @@ impl FixedNumber {
         i64::try_from(self.units).ok()
     }
 
+    /// 单次二元加减乘除。除法按目标精度四舍五入（远离零），除零返回 `None`。
+    pub(crate) fn calculate(self, operator: &str, other: Self, precision: u32) -> Option<Self> {
+        let result = match operator {
+            "add" | "subtract" => {
+                let scale = self.scale.max(other.scale);
+                let left = self.rescaled_units(scale)?;
+                let right = other.rescaled_units(scale)?;
+                let units = if operator == "add" {
+                    left.checked_add(right)?
+                } else {
+                    left.checked_sub(right)?
+                };
+                Self { units, scale }
+            }
+            "multiply" => Self {
+                units: self.units.checked_mul(other.units)?,
+                scale: self.scale.checked_add(other.scale)?,
+            },
+            "divide" => {
+                if other.units == 0 {
+                    return None;
+                }
+                // value = (units / 10^scale) / (other.units / 10^other.scale)
+                // 目标 units = value * 10^precision
+                let exponent = precision as i32 + other.scale as i32 - self.scale as i32;
+                let (numerator, denominator) = if exponent >= 0 {
+                    (
+                        self.units.checked_mul(pow10(exponent as u32)?)?,
+                        other.units,
+                    )
+                } else {
+                    (
+                        self.units,
+                        other.units.checked_mul(pow10((-exponent) as u32)?)?,
+                    )
+                };
+                Self {
+                    units: divide_round(numerator, denominator)?,
+                    scale: precision,
+                }
+            }
+            _ => return None,
+        };
+        result.round_to(precision)
+    }
+
+    /// 四舍五入到指定小数位（远离零），并去掉末尾多余的 0。
+    pub(crate) fn round_to(self, precision: u32) -> Option<Self> {
+        let units = self.rescaled_units(precision)?;
+        let mut result = Self {
+            units,
+            scale: precision,
+        };
+        while result.scale > 0 && result.units % 10 == 0 {
+            result.units /= 10;
+            result.scale -= 1;
+        }
+        Some(result)
+    }
+
+    /// 固定小数位的展示文本（补足末尾 0，不丢精度）。
+    pub(crate) fn format_fixed(self, precision: u32) -> Option<String> {
+        let units = self.rescaled_units(precision)?;
+        let negative = units < 0;
+        let digits = units.unsigned_abs().to_string();
+        let scale = precision as usize;
+        let body = if scale == 0 {
+            digits
+        } else if digits.len() <= scale {
+            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+        } else {
+            let split = digits.len() - scale;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        };
+        Some(if negative { format!("-{body}") } else { body })
+    }
+
+    fn rescaled_units(self, target_scale: u32) -> Option<i128> {
+        if target_scale >= self.scale {
+            self.units.checked_mul(pow10(target_scale - self.scale)?)
+        } else {
+            divide_round(self.units, pow10(self.scale - target_scale)?)
+        }
+    }
+
     /// 编码回 JSON number（保留十进制字面量，不经过 `f64`）。
     pub(crate) fn to_json_value(self) -> Value {
         let text = self.canonical_text();
@@ -524,6 +619,25 @@ impl FixedNumber {
             text
         }
     }
+}
+
+fn pow10(exponent: u32) -> Option<i128> {
+    10i128.checked_pow(exponent)
+}
+
+/// 整数除法四舍五入（远离零）；除零返回 `None`。
+fn divide_round(numerator: i128, denominator: i128) -> Option<i128> {
+    if denominator == 0 {
+        return None;
+    }
+    let negative = (numerator < 0) ^ (denominator < 0);
+    let numerator = numerator.unsigned_abs();
+    let denominator = denominator.unsigned_abs();
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let rounded = quotient + u128::from(remainder * 2 >= denominator);
+    let rounded = i128::try_from(rounded).ok()?;
+    Some(if negative { -rounded } else { rounded })
 }
 
 #[cfg(test)]
@@ -584,6 +698,35 @@ mod tests {
             form.cell("detail", 1, "note"),
             None,
             "行内缺控件必须能区分出来"
+        );
+    }
+
+    #[test]
+    fn numeric_value_accepts_external_datasource_shapes() {
+        let form = form(
+            r#"[
+                {"id":"text","type":"text","value":{"value":"7.2"}},
+                {"id":"array","type":"text","value":[{"text":"1.35"}]},
+                {"id":"nested","type":"text","value":{"name":"汇率","value":{"amount":"6.9"}}},
+                {"id":"option","type":"select","value":"fld.x:d1","option":{"key":"fld.x:d1","text":"7.25"}}
+            ]"#,
+        );
+        assert_eq!(
+            form.top("text").and_then(FormNode::number),
+            FixedNumber::parse("7.2")
+        );
+        assert_eq!(
+            form.top("array").and_then(FormNode::number),
+            FixedNumber::parse("1.35")
+        );
+        assert_eq!(
+            form.top("nested").and_then(FormNode::number),
+            FixedNumber::parse("6.9")
+        );
+        assert_eq!(
+            form.top("option").and_then(FormNode::number),
+            FixedNumber::parse("7.25"),
+            "外部选项的数值可能在 option.text 里"
         );
     }
 
@@ -656,5 +799,29 @@ mod tests {
                 .unwrap_or(Value::Null),
             serde_json::json!(12.5)
         );
+    }
+
+    #[test]
+    fn fixed_numbers_calculate_with_requested_precision() {
+        let left = FixedNumber::parse("100.10").unwrap_or_else(|| panic!(""));
+        let right = FixedNumber::parse("87.86").unwrap_or_else(|| panic!(""));
+        assert_eq!(
+            left.calculate("multiply", right, 2)
+                .and_then(|value| value.format_fixed(2)),
+            Some("8794.79".to_string())
+        );
+        assert_eq!(
+            FixedNumber::parse("10")
+                .and_then(|value| value.calculate("divide", right, 4))
+                .and_then(|value| value.format_fixed(4)),
+            Some("0.1138".to_string())
+        );
+        assert!(left
+            .calculate(
+                "divide",
+                FixedNumber::parse("0").unwrap_or_else(|| panic!("")),
+                2
+            )
+            .is_none());
     }
 }

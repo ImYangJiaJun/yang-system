@@ -207,6 +207,16 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
+            // 批量审批只读计算字段配置：管理端维护，独立于派发配置详情。
+            path: "feishu/approval/computed-fields",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/BatchComputedFieldsPage")
+              ).default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
             // 旧 URL 保留为可替换历史记录的重定向。
             path: "feishu/approval/configs",
             element: <Navigate to="/feishu/approval?tab=configs" replace />,

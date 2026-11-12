@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { Plus } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/shared/ui/button";
@@ -309,17 +309,24 @@ export default function ApprovalConfigsPage() {
                 看清每张表发起什么审批，以及数据如何填写。
               </p>
             </div>
-            {actions.canWrite && (
-              <Button
-                onClick={() => {
-                  setEditTarget(undefined);
-                  setWizardOpen(true);
-                }}
-              >
-                <Plus aria-hidden="true" />
-                新建配置
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" asChild>
+                <Link to="/feishu/approval/computed-fields">
+                  批量审批计算字段
+                </Link>
               </Button>
-            )}
+              {actions.canWrite && (
+                <Button
+                  onClick={() => {
+                    setEditTarget(undefined);
+                    setWizardOpen(true);
+                  }}
+                >
+                  <Plus aria-hidden="true" />
+                  新建配置
+                </Button>
+              )}
+            </div>
           </div>
           <FeishuOAuthCard purpose="dispatch" />
           <div className="flex flex-wrap items-center gap-3">
