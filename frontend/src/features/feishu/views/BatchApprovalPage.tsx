@@ -862,9 +862,12 @@ const COLUMN_KIND_META: Record<
 /// 表头统一附带类型标记，一眼区分实例数据与个人配置的计算字段。
 function columnTitle(label: string, kind: ColumnKind): ReactNode {
   const meta = COLUMN_KIND_META[kind];
+  // 标签放到标题下方，避免挤占横向空间把表头文字压成竖排。
   return (
-    <span className="inline-flex items-center gap-1">
-      <span>{label}</span>
+    <span className="inline-flex flex-col items-start gap-0.5 leading-tight">
+      <span className="block max-w-full truncate" title={label}>
+        {label}
+      </span>
       <Tooltip title={meta.hint}>
         <Tag
           color={meta.color}

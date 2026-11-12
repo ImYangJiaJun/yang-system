@@ -242,6 +242,37 @@ export function BatchViewSettingsDrawer({
   };
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const pointerYRef = useRef(0);
+  const scrollFrameRef = useRef<number | null>(null);
+  const stopAutoScroll = () => {
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+  };
+  // 拖动到列表上下边缘时持续滚动，否则长列表里无法把列拖到视口外。
+  const startAutoScroll = () => {
+    stopAutoScroll();
+    if (typeof requestAnimationFrame !== "function") return;
+    const step = () => {
+      const list = listRef.current;
+      if (list) {
+        const rect = list.getBoundingClientRect();
+        if (pointerYRef.current < rect.top + 48) list.scrollTop -= 14;
+        else if (pointerYRef.current > rect.bottom - 48) list.scrollTop += 14;
+      }
+      scrollFrameRef.current = requestAnimationFrame(step);
+    };
+    scrollFrameRef.current = requestAnimationFrame(step);
+  };
+  useEffect(() => stopAutoScroll, []);
+  const finishDrag = () => {
+    stopAutoScroll();
+    setDragIndex(null);
+    setDropIndex(null);
+  };
   const moveColumnTo = (from: number, to: number) => {
     setColumns((current) => {
       if (
@@ -258,6 +289,12 @@ export function BatchViewSettingsDrawer({
       next.splice(to, 0, item);
       return next;
     });
+  };
+  const commitDrop = () => {
+    if (dragIndex !== null && dropIndex !== null) {
+      moveColumnTo(dragIndex, dropIndex > dragIndex ? dropIndex - 1 : dropIndex);
+    }
+    finishDrag();
   };
 
   const startNewRule = () => {
@@ -397,51 +434,81 @@ export function BatchViewSettingsDrawer({
             {loadError}
           </p>
         ) : tab === "columns" ? (
-          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1"
+          >
             {columns.map((column, index) => (
-              <div
-                key={column.key}
-                draggable
-                onDragStart={() => setDragIndex(index)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => {
-                  if (dragIndex !== null) moveColumnTo(dragIndex, index);
-                  setDragIndex(null);
-                }}
-                onDragEnd={() => setDragIndex(null)}
-                className={`flex items-center gap-2 rounded border px-2 py-1.5 ${
-                  dragIndex === index ? "opacity-50" : ""
-                }`}
-              >
-                <GripVertical
-                  className="size-4 shrink-0 cursor-grab text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <Checkbox
-                  checked={column.visible}
-                  aria-label={`显示 ${column.label}`}
-                  onCheckedChange={(checked) =>
-                    setColumns((current) =>
-                      current.map((entry) =>
-                        entry.key === column.key
-                          ? { ...entry, visible: checked === true }
-                          : entry,
-                      ),
-                    )
-                  }
-                />
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {column.label}
-                </span>
-                <span
-                  className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
-                    COLUMN_KIND_META[columnKind(column.key)].className
+              <div key={column.key}>
+                {dragIndex !== null && dropIndex === index && (
+                  <div
+                    className="mb-1 h-0.5 rounded-full bg-primary"
+                    data-slot="drop-indicator"
+                  />
+                )}
+                <div
+                  draggable
+                  onDragStart={(event) => {
+                    setDragIndex(index);
+                    setDropIndex(index);
+                    pointerYRef.current = event.clientY;
+                    startAutoScroll();
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    pointerYRef.current = event.clientY;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setDropIndex(
+                      event.clientY > rect.top + rect.height / 2
+                        ? index + 1
+                        : index,
+                    );
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    commitDrop();
+                  }}
+                  onDragEnd={finishDrag}
+                  className={`flex cursor-grab items-center gap-2 rounded border px-2 py-1.5 ${
+                    dragIndex === index ? "opacity-50" : ""
                   }`}
                 >
-                  {COLUMN_KIND_META[columnKind(column.key)].label}
-                </span>
+                  <GripVertical
+                    className="size-4 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <Checkbox
+                    checked={column.visible}
+                    aria-label={`显示 ${column.label}`}
+                    onCheckedChange={(checked) =>
+                      setColumns((current) =>
+                        current.map((entry) =>
+                          entry.key === column.key
+                            ? { ...entry, visible: checked === true }
+                            : entry,
+                        ),
+                      )
+                    }
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {column.label}
+                  </span>
+                  <span
+                    className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
+                      COLUMN_KIND_META[columnKind(column.key)].className
+                    }`}
+                  >
+                    {COLUMN_KIND_META[columnKind(column.key)].label}
+                  </span>
+                </div>
               </div>
             ))}
+            {dragIndex !== null && dropIndex === columns.length && (
+              <div
+                className="h-0.5 rounded-full bg-primary"
+                data-slot="drop-indicator"
+              />
+            )}
           </div>
         ) : (
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
