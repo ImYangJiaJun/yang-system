@@ -572,7 +572,7 @@ function AttachmentPreview({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="relative flex h-[85vh] max-h-[85vh] flex-col gap-2 sm:max-w-6xl">
+      <DialogContent className="flex h-[85vh] max-h-[85vh] flex-col gap-2 sm:max-w-6xl">
         <div className="flex items-center gap-3 pr-8">
           <DialogTitle className="min-w-0 flex-1 truncate">
             {file.name}
