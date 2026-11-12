@@ -217,12 +217,12 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             "batch_job_items()",
         ),
         (
-            "feishu_batch_computed_field",
+            "feishu_batch_user_view",
             spec(
-                crate::addon::feishu::domain::batch_computed_field_table::table_spec(),
-                "批量审批计算字段",
+                crate::addon::feishu::domain::batch_user_view_table::table_spec(),
+                "批量审批个人视图",
             ),
-            "batch_computed_fields()",
+            "batch_user_views()",
         ),
         (
             "feishu_user_credential",

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { Plus } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/shared/ui/button";
@@ -310,11 +310,6 @@ export default function ApprovalConfigsPage() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" asChild>
-                <Link to="/feishu/approval/computed-fields">
-                  批量审批计算字段
-                </Link>
-              </Button>
               {actions.canWrite && (
                 <Button
                   onClick={() => {

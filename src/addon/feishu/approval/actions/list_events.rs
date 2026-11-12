@@ -234,7 +234,7 @@ mod tests {
             repository(crate::addon::feishu::domain::user_credential_table::table_spec()),
             repository(crate::addon::feishu::domain::batch_job_table::table_spec()),
             repository(crate::addon::feishu::domain::batch_job_item_table::table_spec()),
-            repository(crate::addon::feishu::domain::batch_computed_field_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_user_view_table::table_spec()),
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::event_table::table_spec()),

@@ -1,20 +1,28 @@
-//! 批量审批列表的只读计算字段：按审批定义配置二元运算，在服务端算好随列表下发。
+//! 批量审批列表的只读计算字段：按每个用户自己的规则做二元运算，在服务端算好随列表下发。
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use yang_base::table::Record;
-use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval_export::form::InstanceForm;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ComputedRule {
-    pub(crate) id: i64,
-    pub(crate) approval_code: String,
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) left_field_id: String,
+    #[serde(default)]
+    pub(crate) left_field_name: Option<String>,
     pub(crate) operator: String,
     pub(crate) right_field_id: String,
+    #[serde(default)]
+    pub(crate) right_field_name: Option<String>,
     pub(crate) precision: u32,
+    #[serde(default = "default_enabled")]
+    pub(crate) enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,34 +43,6 @@ impl Operator {
             _ => None,
         }
     }
-
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Subtract => "subtract",
-            Self::Multiply => "multiply",
-            Self::Divide => "divide",
-        }
-    }
-}
-
-impl ComputedRule {
-    pub(crate) fn from_record(row: &Record) -> Result<Self, BaseError> {
-        let precision = row.require::<i64>("precision")?;
-        let precision = u32::try_from(precision)
-            .ok()
-            .filter(|value| *value <= 6)
-            .ok_or_else(|| BaseError::ConfigError("计算字段精度必须在 0 到 6 之间".to_string()))?;
-        Ok(Self {
-            id: row.require("id")?,
-            approval_code: row.require("approval_code")?,
-            name: row.require("name")?,
-            left_field_id: row.require("left_field_id")?,
-            operator: row.require("operator")?,
-            right_field_id: row.require("right_field_id")?,
-            precision,
-        })
-    }
 }
 
 /// 计算一条任务的全部配置字段。
@@ -76,10 +56,11 @@ pub(crate) fn computed_fields(detail: &Value, rules: &[ComputedRule]) -> Vec<Val
     let form = instance_form(detail);
     rules
         .iter()
+        .filter(|rule| rule.enabled)
         .map(|rule| {
             let value = form.as_ref().and_then(|form| evaluate(form, rule));
             serde_json::json!({
-                "key": format!("computed_{}", rule.id),
+                "key": format!("computed:{}", rule.id),
                 "name": rule.name,
                 "value": value.map(|number| number.to_json_value()).unwrap_or(Value::Null),
                 "display": value
@@ -118,13 +99,15 @@ mod tests {
 
     fn rule(id: i64, operator: &str, precision: u32) -> ComputedRule {
         ComputedRule {
-            id,
-            approval_code: "CODE".to_string(),
+            id: format!("c{id}"),
             name: format!("字段{id}"),
             left_field_id: "amount".to_string(),
+            left_field_name: None,
             operator: operator.to_string(),
             right_field_id: "rate".to_string(),
+            right_field_name: None,
             precision,
+            enabled: true,
         }
     }
 
@@ -134,7 +117,7 @@ mod tests {
             "form": r#"[{"id":"amount","type":"amount","value":1234.5},{"id":"rate","type":"number","value":7.1234}]"#
         });
         let fields = computed_fields(&detail, &[rule(1, "multiply", 2)]);
-        assert_eq!(fields[0]["key"], "computed_1");
+        assert_eq!(fields[0]["key"], "computed:c1");
         assert_eq!(fields[0]["value"], json!(8793.84));
         assert_eq!(fields[0]["display"], "8793.84");
     }

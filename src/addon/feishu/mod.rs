@@ -89,7 +89,7 @@ pub(crate) fn build_addon(
     // 与 worker 经 `FeishuContext` 完成。job 主表由 `batch_approval` 主 module 声明。
     .module(build_user_credential_module()?)
     .module(build_batch_job_item_module()?)
-    .module(batch_approval::build_computed_field_module()?)
+    .module(batch_approval::build_user_view_module()?)
     // 查询门户：两张表 = 两个 module（框架硬形状）。
     // 主模块挂 Action + presentation，日志模块只挂表。
     .module(portal::build_module(
@@ -206,7 +206,7 @@ pub(crate) fn build_context(
             Arc::clone(&pool),
         ),
         Repository::new(
-            domain::batch_computed_field_table::table_spec()?.table_definition()?,
+            domain::batch_user_view_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         Repository::new(

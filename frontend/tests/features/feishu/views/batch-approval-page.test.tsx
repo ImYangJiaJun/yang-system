@@ -92,12 +92,12 @@ const TASKS = [
     status: "PENDING",
     create_time: 1_700_000_000,
     form_fields: [
-      { name: "金额", value: { text: "100" } },
-      { name: "部门", value: "研发" },
+      { id: "amount", name: "金额", value: { text: "100" } },
+      { id: "dept", name: "部门", value: "研发" },
     ],
     computed_fields: [
       {
-        key: "computed_7",
+        key: "computed:c7",
         name: "参考人民币金额",
         value: 8794.79,
         display: "8794.79",
@@ -117,7 +117,7 @@ const TASKS = [
     summaries: ["2 天"],
     support_api_operate: false,
     status: "PENDING",
-    form_fields: [{ name: "天数", value: "2" }],
+    form_fields: [{ id: "days", name: "天数", value: "2" }],
     current_node_names: ["主管审批"],
     my_node_name: "主管审批",
   },
@@ -142,6 +142,9 @@ type StubOptions = {
   jobResponses?: Record<string, unknown>;
   onCreateJob?: (body: unknown) => { job_id: string };
   onSearch?: (query: string) => unknown;
+  viewConfig?: unknown;
+  catalog?: unknown[];
+  onSaveView?: (body: unknown) => void;
 };
 
 function stubBatchApi(options: StubOptions = {}): Call[] {
@@ -216,6 +219,31 @@ function stubBatchApi(options: StubOptions = {}): Call[] {
               : [],
           },
         });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/view-configs") {
+        return jsonResponse({ code: 0, data: { views: {} } });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/field-catalog") {
+        return jsonResponse({
+          code: 0,
+          data: { widgets: options.catalog ?? [] },
+        });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/view-config") {
+        if (method === "POST") {
+          options.onSaveView?.(body);
+          return jsonResponse({ code: 0, data: { view: body } });
+        }
+        return jsonResponse({
+          code: 0,
+          data: {
+            approval_code: url.searchParams.get("approval_code") ?? "",
+            view: options.viewConfig ?? null,
+          },
+        });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/view-config/reset") {
+        return jsonResponse({ code: 0, data: { reset: true } });
       }
       if (
         url.pathname === "/api/v1/feishu/batch-approval/jobs" &&
@@ -381,8 +409,8 @@ describe("BatchApprovalPage", () => {
       instance_code: "i1b",
       title: "报销单 A2",
       form_fields: [
-        { name: "金额", value: { text: "200" } },
-        { name: "部门", value: "研发" },
+        { id: "amount", name: "金额", value: { text: "200" } },
+        { id: "dept", name: "部门", value: "研发" },
       ],
       current_node_names: ["财务审批"],
       my_node_name: "财务审批",
@@ -419,29 +447,114 @@ describe("BatchApprovalPage", () => {
     expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
   });
 
+  it("字段设置按用户保存列可见性与计算字段规则", async () => {
+    let saved: unknown;
+    const view = {
+      computed_fields: [
+        {
+          id: "c1",
+          name: "参考人民币金额",
+          left_field_id: "amount",
+          left_field_name: "金额",
+          operator: "multiply",
+          right_field_id: "rate",
+          right_field_name: "汇率",
+          precision: 2,
+          enabled: true,
+        },
+      ],
+      columns: [
+        { key: "base:title", visible: true },
+        { key: "form:amount", visible: true },
+        { key: "form:dept", visible: false },
+        { key: "computed:c1", visible: true },
+      ],
+    };
+    stubBatchApi({
+      catalog: [
+        { id: "amount", name: "金额", type: "number" },
+        { id: "dept", name: "部门", type: "select" },
+        { id: "rate", name: "汇率", type: "text" },
+      ],
+      viewConfig: view,
+      onSaveView: (body) => {
+        saved = body;
+      },
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [TASKS[0]], truncated: false, views: { D1: view } },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    await screen.findByText("报销单 A");
+    // 已保存的布局生效：部门列隐藏，计算列照常展示。
+    expect(screen.queryByText("部门")).not.toBeInTheDocument();
+    expect(screen.getAllByText("参考人民币金额").length).toBeGreaterThan(0);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "字段设置" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("显示字段")).toBeInTheDocument();
+
+    const dept = within(dialog).getByRole("checkbox", { name: "显示 部门" });
+    expect(dept).not.toBeChecked();
+    await user.click(dept);
+
+    await user.click(within(dialog).getByRole("button", { name: "计算字段" }));
+    expect(
+      await within(dialog).findByText("参考人民币金额"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "启用 参考人民币金额" }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(saved).toBeDefined());
+    expect(saved).toMatchObject({
+      approval_code: "D1",
+      computed_fields: [
+        expect.objectContaining({
+          id: "c1",
+          name: "参考人民币金额",
+          enabled: false,
+        }),
+      ],
+    });
+    const columns = (
+      saved as { columns: Array<{ key: string; visible: boolean }> }
+    ).columns;
+    expect(columns).toContainEqual({ key: "form:dept", visible: true });
+    expect(columns.some((column) => column.key === "computed:c1")).toBe(false);
+  });
+
   it("附件字段展示文件名，图片和 PDF 可预览，Excel 可下载", async () => {
     const attachmentTask = {
       ...TASKS[0],
       form_fields: [
         {
+          id: "invoice",
           name: "发票",
           value: ["https://files.example.com/发票.pdf"],
           field_type: "attachmentV2",
           ext: "'发票.pdf'",
         },
         {
+          id: "voucher",
           name: "凭证",
           value: ["https://files.example.com/凭证.png"],
           field_type: "imageV2",
           ext: "'凭证.png'",
         },
         {
+          id: "detail",
           name: "明细",
           value: ["https://files.example.com/明细.xlsx"],
           field_type: "attachmentV2",
           ext: "'明细.xlsx'",
         },
         {
+          id: "note",
           name: "说明",
           value: "请上传发票原件",
           field_type: "text",
@@ -494,6 +607,7 @@ describe("BatchApprovalPage", () => {
       ...TASKS[0],
       form_fields: [
         {
+          id: "attachments",
           name: "附件",
           value: [
             "https://files.example.com/第一份.pdf",
@@ -535,6 +649,7 @@ describe("BatchApprovalPage", () => {
       ...TASKS[0],
       form_fields: [
         {
+          id: "detail",
           name: "明细",
           value: ["https://files.example.com/明细.xlsx"],
           field_type: "attachmentV2",

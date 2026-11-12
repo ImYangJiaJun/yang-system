@@ -53,12 +53,14 @@ import {
   type BatchJobItem,
   type BatchTask,
   type BatchTaskFormField,
+  type BatchViewConfig,
 } from "../batch-approval-api";
 import {
   BatchActionDialog,
   type BatchActionParams,
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
+import { BatchViewSettingsDrawer } from "../components/BatchViewSettingsDrawer";
 import { StatusBadge } from "../components/StatusBadge";
 
 function timeText(value: number | null): string {
@@ -775,9 +777,16 @@ function fieldDisplayText(field: BatchTaskFormField): string {
   return fieldValueText(field.value);
 }
 
-function formFieldText(task: BatchTask, name: string): string {
+function formFieldText(
+  task: BatchTask,
+  field: { id: string | null; name: string },
+): string {
   return task.formFields
-    .filter((field) => field.name === name && !isDescriptionField(field))
+    .filter(
+      (row) =>
+        !isDescriptionField(row) &&
+        (field.id ? row.id === field.id : row.name === field.name),
+    )
     .map(fieldDisplayText)
     .filter(Boolean)
     .join("；");
@@ -798,17 +807,47 @@ function uniqueFilters(values: string[]): ColumnFilter[] {
   );
 }
 
-function fieldNames(tasks: BatchTask[]): string[] {
+type FormColumn = { id: string | null; name: string; key: string };
+
+/// 表单列以控件 ID 为键；实例数据缺 ID（旧任务）时回退到字段名。
+function formColumns(tasks: BatchTask[]): FormColumn[] {
   const seen = new Set<string>();
-  const names: string[] = [];
+  const columns: FormColumn[] = [];
   for (const task of tasks) {
     for (const field of task.formFields) {
-      if (isDescriptionField(field) || seen.has(field.name)) continue;
-      seen.add(field.name);
-      names.push(field.name);
+      if (isDescriptionField(field)) continue;
+      const id = field.id ?? null;
+      const key = id ? `form:${id}` : `form:${field.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      columns.push({ id, name: field.name, key });
     }
   }
-  return names;
+  return columns;
+}
+
+/// 用户保存的列顺序/可见性；未配置时按默认顺序全部展示，
+/// 配置后新增的字段追加在末尾保持可见。
+function applyViewLayout(
+  columns: TableColumnsType<BatchTask>,
+  view: BatchViewConfig | undefined,
+): TableColumnsType<BatchTask> {
+  const byKey = new Map(columns.map((column) => [String(column.key), column]));
+  const used = new Set<string>();
+  const ordered: TableColumnsType<BatchTask> = [];
+  for (const entry of view?.columns ?? []) {
+    const column = byKey.get(entry.key);
+    if (!column || used.has(entry.key)) continue;
+    used.add(entry.key);
+    if (entry.visible) ordered.push(column);
+  }
+  for (const column of columns) {
+    const key = String(column.key);
+    if (used.has(key)) continue;
+    used.add(key);
+    ordered.push(column);
+  }
+  return ordered;
 }
 
 function taskNodes(task: BatchTask): string[] {
@@ -816,8 +855,12 @@ function taskNodes(task: BatchTask): string[] {
   return task.myNodeName ? [task.myNodeName] : [];
 }
 
-function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
-  const columns: TableColumnsType<BatchTask> = [
+function buildTaskColumns(
+  tasks: BatchTask[],
+  view?: BatchViewConfig,
+): TableColumnsType<BatchTask> {
+  // 勾选、标题、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
+  const fixedColumns: TableColumnsType<BatchTask> = [
     {
       title: "标题",
       dataIndex: "title",
@@ -897,6 +940,9 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
         return <StatusBadge tone={statusTone(label)}>{label}</StatusBadge>;
       },
     },
+  ];
+
+  const baseColumns: TableColumnsType<BatchTask> = [
     {
       title: "审批定义",
       key: "definition",
@@ -1006,24 +1052,33 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
     },
   ];
 
-  for (const name of fieldNames(tasks)) {
-    const values = tasks.map((task) => formFieldText(task, name) || "—");
+  const columns: TableColumnsType<BatchTask> = baseColumns.map((column) => ({
+    ...column,
+    key: `base:${String(column.key)}`,
+  }));
+
+  for (const field of formColumns(tasks)) {
+    const values = tasks.map((task) => formFieldText(task, field) || "—");
     columns.push({
-      title: name,
-      key: `form:${name}`,
+      title: field.name,
+      key: field.key,
       width: 180,
       filters: uniqueFilters(values),
       filterSearch: true,
       onFilter: (value, task) =>
-        (formFieldText(task, name) || "—") === String(value),
+        (formFieldText(task, field) || "—") === String(value),
       render: (_, task) => {
         const files = task.formFields
-          .filter((field) => field.name === name)
+          .filter(
+            (row) =>
+              !isDescriptionField(row) &&
+              (field.id ? row.id === field.id : row.name === field.name),
+          )
           .flatMap(attachmentsOf);
         if (files.length > 0) {
           return <AttachmentCell files={files} />;
         }
-        const text = formFieldText(task, name) || "—";
+        const text = formFieldText(task, field) || "—";
         return (
           <span className="block max-w-48 truncate text-xs" title={text}>
             {text}
@@ -1036,7 +1091,7 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
   for (const field of computedFieldNames(tasks)) {
     columns.push({
       title: field.name,
-      key: `computed:${field.key}`,
+      key: field.key,
       width: 160,
       align: "right",
       sorter: (left, right) =>
@@ -1063,7 +1118,7 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
     });
   }
 
-  return columns;
+  return [...fixedColumns, ...applyViewLayout(columns, view)];
 }
 
 function computedFieldNames(
@@ -1126,14 +1181,19 @@ const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
 
 function DefinitionTable({
   tasks,
+  view,
   selected,
   onSelect,
 }: {
   tasks: BatchTask[];
+  view?: BatchViewConfig;
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
 }) {
-  const baseColumns = useMemo(() => buildTaskColumns(tasks), [tasks]);
+  const baseColumns = useMemo(
+    () => buildTaskColumns(tasks, view),
+    [tasks, view],
+  );
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const columns = useMemo(
     () =>
@@ -1211,6 +1271,8 @@ export default function BatchApprovalPage() {
   const toast = useToast();
 
   const [tasks, setTasks] = useState<BatchTask[]>([]);
+  const [views, setViews] = useState<Record<string, BatchViewConfig>>({});
+  const [settingsCode, setSettingsCode] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -1240,6 +1302,7 @@ export default function BatchApprovalPage() {
         if (signal?.aborted) return;
         setTasks(result.tasks);
         setTruncated(result.truncated);
+        setViews(result.views);
         // 刷新后只保留仍然存在且可操作的选择，避免把已处理任务再次提交。
         setSelected((prev) => {
           const next: SelectedMap = {};
@@ -1654,9 +1717,20 @@ export default function BatchApprovalPage() {
                       <span className="text-xs text-muted-foreground">
                         {group.code || "—"} · {group.tasks.length} 条
                       </span>
+                      {group.code && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setSettingsCode(group.code)}
+                        >
+                          字段设置
+                        </Button>
+                      )}
                     </div>
                     <DefinitionTable
                       tasks={group.tasks}
+                      view={views[group.code]}
                       selected={selected}
                       onSelect={(tableTasks, nextSelection) =>
                         replaceTableSelection(tableTasks, nextSelection)
@@ -1670,6 +1744,19 @@ export default function BatchApprovalPage() {
         </div>
       </main>
 
+      <BatchViewSettingsDrawer
+        open={settingsCode !== null}
+        approvalCode={settingsCode ?? ""}
+        accessToken={token}
+        fields={formColumns(
+          tasks.filter((task) => task.definitionCode === settingsCode),
+        )}
+        onClose={() => setSettingsCode(null)}
+        onSaved={() => {
+          setSettingsCode(null);
+          void loadTasks();
+        }}
+      />
       <BatchActionDialog
         open={action !== null}
         action={action}

@@ -176,9 +176,9 @@ export const BATCH_COMPUTED_OPERATOR_LABELS: Record<
   divide: "除",
 };
 
-export type BatchComputedFieldConfig = {
-  id: number;
-  approvalCode: string;
+/// 用户级视图配置里的一条计算字段规则（`id` 由前端生成，用户维度保存）。
+export type BatchViewComputedRule = {
+  id: string;
   name: string;
   leftFieldId: string;
   leftFieldName: string | null;
@@ -187,14 +187,27 @@ export type BatchComputedFieldConfig = {
   rightFieldName: string | null;
   precision: number;
   enabled: boolean;
-  sortOrder: number;
-  updatedAt: number | null;
 };
 
-export type BatchComputedFieldInput = Omit<
-  BatchComputedFieldConfig,
-  "id" | "updatedAt"
->;
+/// 列顺序即展示顺序；`form:<widget_id>` 或 `computed:<rule_id>`。
+export type BatchViewColumn = {
+  key: string;
+  visible: boolean;
+};
+
+export type BatchViewConfig = {
+  computedFields: BatchViewComputedRule[];
+  columns: BatchViewColumn[];
+};
+
+/// 审批定义里可供计算与展示的控件。
+export type BatchFieldCatalogEntry = {
+  id: string;
+  name: string;
+  qualifiedName: string | null;
+  type: string | null;
+  required: boolean;
+};
 
 export type BatchTaskGroup = {
   key: string;
@@ -204,6 +217,8 @@ export type BatchTaskGroup = {
 };
 
 export type BatchTaskFormField = {
+  /// 飞书表单控件 ID；列配置以它为键。
+  id: string | null;
   name: string;
   value: unknown;
   /// 飞书表单控件类型（如 attachmentV2、imageV2）。
@@ -448,10 +463,15 @@ function parseComputedFields(value: unknown): BatchComputedFieldValue[] {
 }
 
 /// 拉取当前用户的全部待办。服务端聚合分页；超过上限时 `truncated=true`。
+/// `views` 是当前用户按审批定义保存的字段/计算配置，键为审批定义 Code。
 export async function fetchBatchTasks(
   accessToken: string | undefined,
   signal?: AbortSignal,
-): Promise<{ tasks: BatchTask[]; truncated: boolean }> {
+): Promise<{
+  tasks: BatchTask[];
+  truncated: boolean;
+  views: Record<string, BatchViewConfig>;
+}> {
   const data = await request(
     "/api/v1/feishu/batch-approval/tasks",
     { method: "GET" },
@@ -478,7 +498,11 @@ export async function fetchBatchTasks(
       seen.add(key);
       return true;
     });
-  return { tasks, truncated: container?.truncated === true };
+  return {
+    tasks,
+    truncated: container?.truncated === true,
+    views: parseBatchViews(container?.views),
+  };
 }
 
 /// 定义分组键：Code + Name。Code 缺失时仍按 Name 分组，避免整页堆在一起。
@@ -539,6 +563,7 @@ function parseDetailForm(value: unknown): BatchTaskFormField[] {
   return rows.map((raw, index) => {
     const record = recordOf(raw);
     return {
+      id: firstText(record, "id"),
       name:
         firstText(record, "name", "label", "custom_id", "title") ??
         `字段 ${index + 1}`,
@@ -886,19 +911,24 @@ export function describeBatchError(cause: unknown): string {
   return cause instanceof Error ? cause.message : "操作失败，请稍后重试";
 }
 
-/* ---------------------------- 计算字段配置 ---------------------------- */
+/* -------------------------- 用户级视图配置 --------------------------- */
 
-function parseComputedConfig(raw: unknown): BatchComputedFieldConfig | null {
+function parseViewColumn(raw: unknown): BatchViewColumn | null {
   const record = recordOf(raw);
-  const id = numberField(record?.id);
-  const approvalCode = firstText(record, "approvalCode", "approval_code");
+  const key = firstText(record, "key");
+  if (!key) return null;
+  return { key, visible: record?.visible !== false };
+}
+
+function parseViewComputedRule(raw: unknown): BatchViewComputedRule | null {
+  const record = recordOf(raw);
+  const id = firstText(record, "id");
   const name = firstText(record, "name");
   const leftFieldId = firstText(record, "leftFieldId", "left_field_id");
   const rightFieldId = firstText(record, "rightFieldId", "right_field_id");
   const operator = firstText(record, "operator");
   if (
-    id === null ||
-    !approvalCode ||
+    !id ||
     !name ||
     !leftFieldId ||
     !rightFieldId ||
@@ -909,7 +939,6 @@ function parseComputedConfig(raw: unknown): BatchComputedFieldConfig | null {
   }
   return {
     id,
-    approvalCode,
     name,
     leftFieldId,
     leftFieldName: firstText(record, "leftFieldName", "left_field_name"),
@@ -918,84 +947,134 @@ function parseComputedConfig(raw: unknown): BatchComputedFieldConfig | null {
     rightFieldName: firstText(record, "rightFieldName", "right_field_name"),
     precision: numberField(record?.precision) ?? 2,
     enabled: record?.enabled !== false,
-    sortOrder: numberField(record?.sortOrder ?? record?.sort_order) ?? 0,
-    updatedAt: timestampOf(record?.updatedAt ?? record?.updated_at),
   };
 }
 
-export async function fetchBatchComputedFields(
+function parseViewConfig(raw: unknown): BatchViewConfig {
+  const record = recordOf(raw);
+  const rawComputed = Array.isArray(record?.computedFields)
+    ? record.computedFields
+    : Array.isArray(record?.computed_fields)
+      ? record.computed_fields
+      : [];
+  const rawColumns = Array.isArray(record?.columns) ? record.columns : [];
+  return {
+    computedFields: rawComputed
+      .map(parseViewComputedRule)
+      .filter((rule): rule is BatchViewComputedRule => rule !== null),
+    columns: rawColumns
+      .map(parseViewColumn)
+      .filter((column): column is BatchViewColumn => column !== null),
+  };
+}
+
+/// `views` 形如 `{ "定义Code": { computed_fields, columns } }`。
+export function parseBatchViews(
+  value: unknown,
+): Record<string, BatchViewConfig> {
+  const record = recordOf(value);
+  const views: Record<string, BatchViewConfig> = {};
+  if (!record) return views;
+  for (const [code, raw] of Object.entries(record)) {
+    if (!code.trim()) continue;
+    views[code] = parseViewConfig(raw);
+  }
+  return views;
+}
+
+function viewRequestBody(
+  approvalCode: string,
+  view: BatchViewConfig,
+): Record<string, unknown> {
+  return {
+    approval_code: approvalCode,
+    computed_fields: view.computedFields.map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      left_field_id: rule.leftFieldId,
+      left_field_name: rule.leftFieldName,
+      operator: rule.operator,
+      right_field_id: rule.rightFieldId,
+      right_field_name: rule.rightFieldName,
+      precision: rule.precision,
+      enabled: rule.enabled,
+    })),
+    columns: view.columns.map((column) => ({
+      key: column.key,
+      visible: column.visible,
+    })),
+  };
+}
+
+export async function fetchBatchFieldCatalog(
+  approvalCode: string,
   accessToken: string | undefined,
-  approvalCode?: string,
   signal?: AbortSignal,
-): Promise<BatchComputedFieldConfig[]> {
-  const query = approvalCode?.trim()
-    ? `?approval_code=${encodeURIComponent(approvalCode.trim())}`
-    : "";
+): Promise<BatchFieldCatalogEntry[]> {
   const data = await request(
-    `/api/v1/feishu/batch-approval/computed-fields${query}`,
+    `/api/v1/feishu/batch-approval/field-catalog?approval_code=${encodeURIComponent(approvalCode)}`,
     { method: "GET" },
     accessToken,
     signal,
   );
-  const rows = recordOf(data)?.fields;
-  return Array.isArray(rows)
-    ? rows
-        .map(parseComputedConfig)
-        .filter((row): row is BatchComputedFieldConfig => row !== null)
-    : [];
+  const rows = recordOf(data)?.widgets;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((raw) => {
+      const record = recordOf(raw);
+      const id = firstText(record, "id");
+      const name = firstText(record, "name");
+      if (!id || !name) return null;
+      return {
+        id,
+        name,
+        qualifiedName: firstText(record, "qualifiedName", "qualified_name"),
+        type: firstText(record, "type"),
+        required: record?.required === true,
+      } satisfies BatchFieldCatalogEntry;
+    })
+    .filter((row): row is BatchFieldCatalogEntry => row !== null);
 }
 
-function computedInputBody(input: BatchComputedFieldInput) {
-  return {
-    approval_code: input.approvalCode,
-    name: input.name,
-    left_field_id: input.leftFieldId,
-    left_field_name: input.leftFieldName,
-    operator: input.operator,
-    right_field_id: input.rightFieldId,
-    right_field_name: input.rightFieldName,
-    precision: input.precision,
-    enabled: input.enabled,
-    sort_order: input.sortOrder,
-  };
-}
-
-export async function createBatchComputedField(
-  input: BatchComputedFieldInput,
+/// 未保存过配置时返回空规则与空列（= 默认视图）。
+export async function fetchBatchViewConfig(
+  approvalCode: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-): Promise<number> {
+): Promise<BatchViewConfig> {
   const data = await request(
-    "/api/v1/feishu/batch-approval/computed-fields",
-    { method: "POST", body: computedInputBody(input) },
+    `/api/v1/feishu/batch-approval/view-config?approval_code=${encodeURIComponent(approvalCode)}`,
+    { method: "GET" },
     accessToken,
     signal,
   );
-  return numberField(recordOf(data)?.id) ?? 0;
+  return parseViewConfig(recordOf(data)?.view);
 }
 
-export async function updateBatchComputedField(
-  id: number,
-  input: BatchComputedFieldInput,
+/// 保存后返回服务端规范化后的配置。
+export async function saveBatchViewConfig(
+  approvalCode: string,
+  view: BatchViewConfig,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<BatchViewConfig> {
+  const data = await request(
+    "/api/v1/feishu/batch-approval/view-config",
+    { method: "POST", body: viewRequestBody(approvalCode, view) },
+    accessToken,
+    signal,
+  );
+  return parseViewConfig(recordOf(data)?.view);
+}
+
+export async function resetBatchViewConfig(
+  approvalCode: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<void> {
   await request(
-    "/api/v1/feishu/batch-approval/computed-fields/update",
-    { method: "POST", body: { id, ...computedInputBody(input) } },
-    accessToken,
-    signal,
-  );
-}
-
-export async function deleteBatchComputedField(
-  id: number,
-  accessToken: string | undefined,
-  signal?: AbortSignal,
-): Promise<void> {
-  await request(
-    "/api/v1/feishu/batch-approval/computed-fields/delete",
-    { method: "POST", body: { id } },
+    "/api/v1/feishu/batch-approval/view-config/reset",
+    { method: "POST", body: { approval_code: approvalCode } },
     accessToken,
     signal,
   );

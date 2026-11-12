@@ -17,17 +17,17 @@ use yang_base::BaseError;
 use crate::addon::account::user_from_claims;
 use crate::authorization::AuthorizationVersionValidator;
 
-use super::domain::batch_computed_field_table;
 use super::domain::batch_job_table;
+use super::domain::batch_user_view_table;
 use super::domain::context::FeishuContext;
 
-/// 只声明计算字段配置表，CRUD 由批量审批 module 的 Action 经上下文跨表完成。
-pub(crate) fn build_computed_field_module() -> Result<ModuleSpec, BaseError> {
+/// 只声明用户级视图配置表，CRUD 由批量审批 module 的 Action 经上下文跨表完成。
+pub(crate) fn build_user_view_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(
-        ModuleName::new("feishu.batch_computed_field")
+        ModuleName::new("feishu.batch_user_view")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
-    .table(batch_computed_field_table::table_spec()?))
+    .table(batch_user_view_table::table_spec()?))
 }
 
 pub(crate) fn build_module(

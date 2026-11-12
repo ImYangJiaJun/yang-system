@@ -54,9 +54,9 @@ pub(crate) struct FeishuContext {
     /// 批量审批 job 明细。
     #[allow(dead_code)]
     batch_job_item: Repository,
-    /// 批量审批列表的只读计算字段配置。
+    /// 批量审批的个人视图配置（计算字段 + 列布局）。
     #[allow(dead_code)]
-    batch_computed_field: Repository,
+    batch_user_view: Repository,
     /// 查询门户表。
     #[allow(dead_code)]
     portal: Repository,
@@ -108,7 +108,7 @@ impl FeishuContext {
         user_credential: Repository,
         batch_job: Repository,
         batch_job_item: Repository,
-        batch_computed_field: Repository,
+        batch_user_view: Repository,
         portal: Repository,
         portal_log: Repository,
         approval_event: Repository,
@@ -134,7 +134,7 @@ impl FeishuContext {
             user_credential,
             batch_job,
             batch_job_item,
-            batch_computed_field,
+            batch_user_view,
             portal,
             portal_log,
             approval_event,
@@ -251,10 +251,10 @@ impl FeishuContext {
         &self.batch_job_item
     }
 
-    /// 批量审批计算字段配置表。
+    /// 批量审批个人视图配置表。
     #[allow(dead_code)]
-    pub(crate) fn batch_computed_fields(&self) -> &Repository {
-        &self.batch_computed_field
+    pub(crate) fn batch_user_views(&self) -> &Repository {
+        &self.batch_user_view
     }
 
     /// 查询门户表。消费者（门户 Action）在后续批次接入。
@@ -396,7 +396,7 @@ mod tests {
             repository(crate::addon::feishu::domain::user_credential_table::table_spec()),
             repository(crate::addon::feishu::domain::batch_job_table::table_spec()),
             repository(crate::addon::feishu::domain::batch_job_item_table::table_spec()),
-            repository(crate::addon::feishu::domain::batch_computed_field_table::table_spec()),
+            repository(crate::addon::feishu::domain::batch_user_view_table::table_spec()),
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::event_table::table_spec()),

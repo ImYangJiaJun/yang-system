@@ -2,12 +2,16 @@
 
 mod attachment;
 pub(crate) mod cancel_job;
-mod computed_fields;
 mod create_job;
+mod field_catalog;
 mod get_job;
 mod list_tasks;
 mod task_detail;
 mod user_search;
+mod view_config_get;
+mod view_config_reset;
+mod view_config_save;
+mod view_configs;
 
 use std::sync::Arc;
 
@@ -22,7 +26,11 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = create_job::register(module, Arc::clone(&context));
     let module = get_job::register(module, Arc::clone(&context));
     let module = attachment::register(module, Arc::clone(&context));
-    let module = computed_fields::register(module, Arc::clone(&context));
+    let module = field_catalog::register(module, Arc::clone(&context));
+    let module = view_configs::register(module, Arc::clone(&context));
+    let module = view_config_get::register(module, Arc::clone(&context));
+    let module = view_config_save::register(module, Arc::clone(&context));
+    let module = view_config_reset::register(module, Arc::clone(&context));
     cancel_job::register(module, context)
 }
 

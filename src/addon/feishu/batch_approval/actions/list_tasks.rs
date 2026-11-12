@@ -3,17 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
-use yang_base::table::SortOrder;
 use yang_base::BaseError;
 
 use super::super::api;
-use super::super::domain::computed::{computed_fields, ComputedRule};
+use super::super::domain::computed::computed_fields;
+use super::super::domain::view::{self, BatchUserView};
 use super::access_token_or_error;
 use crate::addon::feishu::domain::context::FeishuContext;
-use crate::addon::feishu::domain::repository::all_pages;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -87,7 +86,8 @@ pub(super) async fn handle(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let computed_rules = load_computed_rules(&context, &approval_codes).await?;
+    let views = view::load_many(&context, user_id, &approval_codes).await?;
+    let view_payload = view_map(&approval_codes, &views);
     let mut rows = Vec::with_capacity(list.tasks.len());
     let mut detail_cache: BTreeMap<String, Option<Value>> = BTreeMap::new();
     for task in list.tasks {
@@ -121,14 +121,20 @@ pub(super) async fn handle(
                         .map(Value::String)
                         .unwrap_or(Value::Null),
                 );
-                if let Some(rules) = task
+                if let Some(view) = task
                     .definition_code
                     .as_ref()
-                    .and_then(|code| computed_rules.get(code))
+                    .and_then(|code| views.get(code))
                 {
+                    let rules: Vec<_> = view
+                        .computed_fields
+                        .iter()
+                        .filter(|rule| rule.enabled)
+                        .cloned()
+                        .collect();
                     map.insert(
                         "computed_fields".to_string(),
-                        Value::Array(computed_fields(&detail, rules)),
+                        Value::Array(computed_fields(&detail, &rules)),
                     );
                 }
             }
@@ -139,49 +145,30 @@ pub(super) async fn handle(
         serde_json::json!({
             "tasks": rows,
             "definitions": definitions,
+            "views": view_payload,
             "truncated": list.truncated,
         }),
         "ok",
     )
 }
 
-async fn load_computed_rules(
-    context: &FeishuContext,
+fn view_map(
     approval_codes: &[String],
-) -> Result<BTreeMap<String, Vec<ComputedRule>>, BaseError> {
-    if approval_codes.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let codes: Vec<Value> = approval_codes.iter().cloned().map(Value::String).collect();
-    let rows = all_pages(
-        context
-            .batch_computed_fields()
-            .query()
-            .select_fields(&[
-                "id",
-                "approval_code",
-                "name",
-                "left_field_id",
-                "operator",
-                "right_field_id",
-                "precision",
-            ])?
-            .where_eq("enabled", Value::Bool(true))?
-            .where_in("approval_code", codes)?
-            .order_by("sort_order", SortOrder::Asc)?
-            .order_by("id", SortOrder::Asc)?,
-        100,
-    )
-    .await?;
-    let mut rules: BTreeMap<String, Vec<ComputedRule>> = BTreeMap::new();
-    for row in rows {
-        let rule = ComputedRule::from_record(&row)?;
-        rules
-            .entry(rule.approval_code.clone())
-            .or_default()
-            .push(rule);
-    }
-    Ok(rules)
+    views: &BTreeMap<String, BatchUserView>,
+) -> BTreeMap<String, Value> {
+    let empty = json!({ "computed_fields": [], "columns": [] });
+    approval_codes
+        .iter()
+        .map(|code| {
+            (
+                code.clone(),
+                views
+                    .get(code)
+                    .map(BatchUserView::to_json)
+                    .unwrap_or_else(|| empty.clone()),
+            )
+        })
+        .collect()
 }
 
 fn form_fields(detail: &Value) -> Vec<Value> {
@@ -298,16 +285,17 @@ fn my_node_name(detail: &Value, task_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_node_names, form_fields, my_node_name};
+    use super::{current_node_names, form_fields, my_node_name, view_map};
     use serde_json::json;
 
     #[test]
     fn form_fields_parse_json_string_and_field_value() {
         let detail = json!({
-            "form": "[{\"name\":\"金额\",\"value\":{\"text\":\"100\"}},{\"label\":\"部门\",\"field_value\":\"研发\"},{\"name\":\"附件\",\"type\":\"attachmentV2\",\"ext\":\"'发票.pdf'\",\"value\":[\"https://files.example.com/a.pdf\"]}]"
+            "form": "[{\"id\":\"w1\",\"name\":\"金额\",\"value\":{\"text\":\"100\"}},{\"label\":\"部门\",\"field_value\":\"研发\"},{\"name\":\"附件\",\"type\":\"attachmentV2\",\"ext\":\"'发票.pdf'\",\"value\":[\"https://files.example.com/a.pdf\"]}]"
         });
         let fields = form_fields(&detail);
         assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0]["id"], "w1");
         assert_eq!(fields[0]["name"], "金额");
         assert_eq!(fields[0]["value"]["text"], "100");
         assert_eq!(fields[1]["name"], "部门");
@@ -317,6 +305,15 @@ mod tests {
         assert_eq!(fields[2]["field_type"], "attachmentV2");
         assert_eq!(fields[2]["ext"], "'发票.pdf'");
         assert_eq!(fields[2]["value"][0], "https://files.example.com/a.pdf");
+    }
+
+    #[test]
+    fn view_map_returns_empty_views_for_unconfigured_codes() {
+        let views = std::collections::BTreeMap::new();
+        let codes = vec!["A".to_string(), "B".to_string()];
+        let payload = view_map(&codes, &views);
+        assert_eq!(payload["A"]["computed_fields"], json!([]));
+        assert_eq!(payload["B"]["columns"], json!([]));
     }
 
     #[test]
