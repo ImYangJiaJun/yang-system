@@ -1,28 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { Inbox, RefreshCw, RotateCcw } from "lucide-react";
+import { Table, type TableColumnsType } from "antd";
+import { Inbox, RefreshCw } from "lucide-react";
 
 import { useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
-import { Checkbox } from "@/shared/ui/checkbox";
-import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/shared/ui/table";
 import { formatProductDateTime } from "@/shared/lib/product-locale";
 import { useToast } from "@/shared/lib/toast";
 
 import {
   BATCH_ACTION_LABELS,
-  FEISHU_STATUS_FILTER_OPTIONS,
   createBatchJob,
-  definitionKey,
   describeBatchError,
   fetchBatchTasks,
   fetchCurrentUsername,
@@ -82,39 +71,6 @@ type LastJobRequest = {
   items: BatchJobItem[];
 };
 
-type Filters = {
-  title: string;
-  definition: string;
-  instance: string;
-  initiator: string;
-  summary: string;
-  from: string;
-  to: string;
-  node: string;
-  status: string;
-  api: "all" | "supported" | "unsupported";
-};
-
-const EMPTY_FILTERS: Filters = {
-  title: "",
-  definition: "",
-  instance: "",
-  initiator: "",
-  summary: "",
-  from: "",
-  to: "",
-  node: "",
-  status: "all",
-  api: "all",
-};
-
-function includesText(
-  value: string | null | undefined,
-  needle: string,
-): boolean {
-  return (value ?? "").toLocaleLowerCase().includes(needle.toLocaleLowerCase());
-}
-
 function fieldValueText(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
@@ -144,6 +100,280 @@ function formFieldText(task: BatchTask, name: string): string {
     .join("；");
 }
 
+type ColumnFilter = { text: string; value: string };
+
+function uniqueFilters(values: string[]): ColumnFilter[] {
+  const seen = new Set<string>();
+  const filters: ColumnFilter[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    filters.push({ text: value, value });
+  }
+  return filters.sort((left, right) =>
+    left.text.localeCompare(right.text, "zh-CN"),
+  );
+}
+
+function fieldNames(tasks: BatchTask[]): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const task of tasks) {
+    for (const field of task.formFields) {
+      if (!seen.has(field.name)) {
+        seen.add(field.name);
+        names.push(field.name);
+      }
+    }
+  }
+  return names;
+}
+
+function taskNodes(task: BatchTask): string[] {
+  if (task.currentNodeNames.length > 0) return task.currentNodeNames;
+  return task.myNodeName ? [task.myNodeName] : [];
+}
+
+function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
+  const columns: TableColumnsType<BatchTask> = [
+    {
+      title: "标题",
+      dataIndex: "title",
+      key: "title",
+      width: 220,
+      sorter: (left, right) => left.title.localeCompare(right.title, "zh-CN"),
+      filters: uniqueFilters(tasks.map((task) => task.title)),
+      filterSearch: true,
+      onFilter: (value, task) => task.title === String(value),
+      render: (_, task) => {
+        const operability = taskOperability(task);
+        return (
+          <div className="max-w-56">
+            <span className="block truncate font-medium" title={task.title}>
+              {task.title}
+            </span>
+            {!operability.operable && (
+              <span className="block text-xs text-muted-foreground">
+                {operability.reason}
+              </span>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      title: "当前节点",
+      key: "currentNode",
+      width: 240,
+      sorter: (left, right) =>
+        taskNodes(left)
+          .join("、")
+          .localeCompare(taskNodes(right).join("、"), "zh-CN"),
+      filters: uniqueFilters(tasks.flatMap(taskNodes)),
+      filterSearch: true,
+      onFilter: (value, task) => taskNodes(task).includes(String(value)),
+      render: (_, task) => {
+        const nodes = taskNodes(task);
+        if (nodes.length === 0) {
+          return <span className="text-xs text-muted-foreground">—</span>;
+        }
+        const ordered = task.myNodeName
+          ? [
+              task.myNodeName,
+              ...nodes.filter((node) => node !== task.myNodeName),
+            ]
+          : nodes;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {ordered.map((node) => {
+              const mine = node === task.myNodeName;
+              return (
+                <StatusBadge key={node} tone={mine ? "info" : "neutral"}>
+                  {node}
+                  {mine ? "（我的节点）" : ""}
+                </StatusBadge>
+              );
+            })}
+          </div>
+        );
+      },
+    },
+    {
+      title: "实例状态",
+      key: "status",
+      width: 120,
+      sorter: (left, right) =>
+        taskStatusLabel(left).localeCompare(taskStatusLabel(right), "zh-CN"),
+      filters: uniqueFilters(tasks.map(taskStatusLabel)),
+      onFilter: (value, task) => taskStatusLabel(task) === String(value),
+      render: (_, task) => {
+        const label = taskStatusLabel(task);
+        return <StatusBadge tone={statusTone(label)}>{label}</StatusBadge>;
+      },
+    },
+    {
+      title: "审批定义",
+      key: "definition",
+      width: 220,
+      sorter: (left, right) =>
+        left.definitionName.localeCompare(right.definitionName, "zh-CN"),
+      filters: uniqueFilters(tasks.map((task) => task.definitionName)),
+      filterSearch: true,
+      onFilter: (value, task) => task.definitionName === String(value),
+      render: (_, task) => (
+        <div className="max-w-52">
+          <span className="block truncate">{task.definitionName}</span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {task.definitionCode || "—"}
+          </span>
+        </div>
+      ),
+    },
+    {
+      title: "实例编号",
+      dataIndex: "instanceCode",
+      key: "instanceCode",
+      width: 300,
+      sorter: (left, right) =>
+        left.instanceCode.localeCompare(right.instanceCode),
+      filters: uniqueFilters(tasks.map((task) => task.instanceCode)),
+      filterSearch: true,
+      onFilter: (value, task) => task.instanceCode === String(value),
+      render: (_, task) => (
+        <span className="text-xs" title={task.instanceCode}>
+          {task.instanceCode}
+        </span>
+      ),
+    },
+    {
+      title: "发起人",
+      key: "initiator",
+      width: 120,
+      sorter: (left, right) =>
+        (left.initiatorName ?? "").localeCompare(
+          right.initiatorName ?? "",
+          "zh-CN",
+        ),
+      filters: uniqueFilters(tasks.map((task) => task.initiatorName ?? "—")),
+      onFilter: (value, task) => (task.initiatorName ?? "—") === String(value),
+      render: (_, task) => task.initiatorName ?? "—",
+    },
+    {
+      title: "摘要",
+      key: "summary",
+      width: 280,
+      filters: uniqueFilters(
+        tasks.map((task) => task.summaries.join("；") || "—"),
+      ),
+      filterSearch: true,
+      onFilter: (value, task) =>
+        (task.summaries.join("；") || "—") === String(value),
+      render: (_, task) => (
+        <span className="block max-w-72 truncate text-xs">
+          {task.summaries.join("；") || "—"}
+        </span>
+      ),
+    },
+    {
+      title: "提交时间",
+      key: "createdAt",
+      width: 180,
+      sorter: (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
+      defaultSortOrder: "descend",
+      filters: uniqueFilters(tasks.map((task) => dateKey(task.createdAt))),
+      onFilter: (value, task) => dateKey(task.createdAt) === String(value),
+      render: (_, task) => (
+        <span className="tabular-nums">{timeText(task.createdAt)}</span>
+      ),
+    },
+    {
+      title: "API 操作",
+      key: "apiOperate",
+      width: 110,
+      filters: [
+        { text: "支持", value: "supported" },
+        { text: "不支持", value: "unsupported" },
+      ],
+      onFilter: (value, task) =>
+        value === "supported"
+          ? task.supportApiOperate
+          : !task.supportApiOperate,
+      render: (_, task) => (
+        <StatusBadge tone={task.supportApiOperate ? "positive" : "warning"}>
+          {task.supportApiOperate ? "支持" : "不支持"}
+        </StatusBadge>
+      ),
+    },
+  ];
+
+  for (const name of fieldNames(tasks)) {
+    const values = tasks.map((task) => formFieldText(task, name) || "—");
+    columns.push({
+      title: name,
+      key: `form:${name}`,
+      width: 180,
+      filters: uniqueFilters(values),
+      filterSearch: true,
+      onFilter: (value, task) =>
+        (formFieldText(task, name) || "—") === String(value),
+      render: (_, task) => (
+        <span className="block max-w-48 truncate text-xs">
+          {formFieldText(task, name) || "—"}
+        </span>
+      ),
+    });
+  }
+
+  return columns;
+}
+
+function DefinitionTable({
+  tasks,
+  selected,
+  onSelect,
+}: {
+  tasks: BatchTask[];
+  selected: SelectedMap;
+  onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
+}) {
+  const columns = useMemo(() => buildTaskColumns(tasks), [tasks]);
+  const selectedRowKeys = tasks
+    .filter((task) => selected[task.taskId])
+    .map((task) => task.taskId);
+
+  return (
+    <Table<BatchTask>
+      rowKey="taskId"
+      size="small"
+      bordered
+      columns={columns}
+      dataSource={tasks}
+      scroll={{ x: "max-content" }}
+      pagination={{
+        pageSize: 20,
+        showSizeChanger: true,
+        hideOnSinglePage: true,
+      }}
+      rowSelection={{
+        selectedRowKeys,
+        preserveSelectedRowKeys: true,
+        getCheckboxProps: (task) => ({
+          disabled: !taskOperability(task).operable,
+          "aria-label": `选择 ${task.title}`,
+        }),
+        onChange: (keys) => {
+          const selectedKeys = new Set(keys.map(String));
+          onSelect(
+            tasks,
+            tasks.filter((task) => selectedKeys.has(task.taskId)),
+          );
+        },
+      }}
+      locale={{ emptyText: "没有符合筛选条件的待办" }}
+    />
+  );
+}
+
 /// 批量审批页：独立专注页（根层 RequireAuth，不套 AppLayout）。
 ///
 /// 数据流：拉本人待办 → 表格展示与逐列筛选 → 勾选可操作任务 → 在确认对话框里选动作
@@ -166,9 +396,7 @@ export default function BatchApprovalPage() {
   const [authorizing, setAuthorizing] = useState(false);
 
   const [definitionGroup, setDefinitionGroup] = useState("all");
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [selected, setSelected] = useState<SelectedMap>({});
-  const [fieldFilters, setFieldFilters] = useState<Record<string, string>>({});
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
   const [actionError, setActionError] = useState("");
   const [submittingAction, setSubmittingAction] = useState(false);
@@ -228,129 +456,32 @@ export default function BatchApprovalPage() {
   }, [loadTasks, token]);
 
   const groups = useMemo(() => groupBatchTasks(tasks), [tasks]);
-  const formColumns = useMemo(() => {
-    const seen = new Set<string>();
-    const columns: string[] = [];
-    for (const task of tasks) {
-      for (const field of task.formFields) {
-        if (!seen.has(field.name)) {
-          seen.add(field.name);
-          columns.push(field.name);
-        }
-      }
-    }
-    return columns;
-  }, [tasks]);
-
-  const filteredTasks = useMemo(() => {
-    const needleTitle = filters.title.trim();
-    const needleDefinition = filters.definition.trim();
-    const needleInstance = filters.instance.trim();
-    const needleInitiator = filters.initiator.trim();
-    const needleSummary = filters.summary.trim();
-    const needleNode = filters.node.trim();
-    const activeFieldFilters = Object.entries(fieldFilters).filter(
-      ([, value]) => value.trim().length > 0,
-    );
-    return tasks.filter((task) => {
-      if (
-        definitionGroup !== "all" &&
-        definitionKey(task) !== definitionGroup
-      ) {
-        return false;
-      }
-      if (needleTitle && !includesText(task.title, needleTitle)) return false;
-      if (
-        needleDefinition &&
-        !includesText(task.definitionName, needleDefinition) &&
-        !includesText(task.definitionCode, needleDefinition)
-      ) {
-        return false;
-      }
-      if (needleInstance && !includesText(task.instanceCode, needleInstance)) {
-        return false;
-      }
-      if (
-        needleInitiator &&
-        !includesText(task.initiatorName, needleInitiator)
-      ) {
-        return false;
-      }
-      if (
-        needleSummary &&
-        !task.summaries.some((summary) => includesText(summary, needleSummary))
-      ) {
-        return false;
-      }
-      const date = dateKey(task.createdAt);
-      if ((filters.from || filters.to) && !date) return false;
-      if (filters.from && date < filters.from) return false;
-      if (filters.to && date > filters.to) return false;
-      if (
-        filters.status !== "all" &&
-        taskStatusLabel(task) !== filters.status
-      ) {
-        return false;
-      }
-      if (filters.api === "supported" && !task.supportApiOperate) return false;
-      if (filters.api === "unsupported" && task.supportApiOperate) return false;
-      if (
-        needleNode &&
-        !task.currentNodeNames.some((node) => includesText(node, needleNode))
-      ) {
-        return false;
-      }
-      for (const [name, value] of activeFieldFilters) {
-        if (!includesText(formFieldText(task, name), value.trim()))
-          return false;
-      }
-      return true;
-    });
-  }, [tasks, definitionGroup, filters, fieldFilters]);
-
-  const filteredOperable = useMemo(
-    () => filteredTasks.filter((task) => taskOperability(task).operable),
-    [filteredTasks],
+  const visibleGroups = useMemo(
+    () =>
+      definitionGroup === "all"
+        ? groups
+        : groups.filter((group) => group.key === definitionGroup),
+    [definitionGroup, groups],
+  );
+  const visibleTaskCount = useMemo(
+    () => visibleGroups.reduce((total, group) => total + group.tasks.length, 0),
+    [visibleGroups],
   );
   const selectedTasks = useMemo(() => Object.values(selected), [selected]);
-  const selectedVisibleCount = filteredOperable.filter(
-    (task) => selected[task.taskId],
-  ).length;
-  const allVisibleSelected =
-    filteredOperable.length > 0 &&
-    selectedVisibleCount === filteredOperable.length;
-  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
-
-  const updateFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-  };
 
   const resetFilters = () => {
-    setFilters(EMPTY_FILTERS);
-    setFieldFilters({});
     setDefinitionGroup("all");
   };
 
-  const toggleTask = (task: BatchTask) => {
-    if (!taskOperability(task).operable) return;
+  const replaceTableSelection = (
+    tableTasks: BatchTask[],
+    nextSelection: BatchTask[],
+  ) => {
     setSelected((prev) => {
       const next = { ...prev };
-      if (next[task.taskId]) {
-        delete next[task.taskId];
-      } else {
-        next[task.taskId] = task;
-      }
-      return next;
-    });
-  };
-
-  const toggleAllVisible = () => {
-    setSelected((prev) => {
-      const next = { ...prev };
-      if (allVisibleSelected) {
-        for (const task of filteredOperable) delete next[task.taskId];
-      } else {
-        for (const task of filteredOperable) next[task.taskId] = task;
+      for (const task of tableTasks) delete next[task.taskId];
+      for (const task of nextSelection) {
+        if (taskOperability(task).operable) next[task.taskId] = task;
       }
       return next;
     });
@@ -611,8 +742,7 @@ export default function BatchApprovalPage() {
           <section className="min-w-0 flex-1 space-y-3">
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
               <span className="text-sm text-muted-foreground">
-                已选 {selectedTasks.length} 条 · 当前筛选 {filteredTasks.length}{" "}
-                条
+                已选 {selectedTasks.length} 条 · 共 {visibleTaskCount} 条
               </span>
               <Button
                 variant="ghost"
@@ -681,326 +811,32 @@ export default function BatchApprovalPage() {
                   </p>
                 </div>
               )
-            ) : filteredTasks.length === 0 ? (
+            ) : visibleGroups.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border py-16 text-center">
-                <p className="font-medium">没有符合筛选条件的待办</p>
+                <p className="font-medium">该审批定义暂无待办</p>
                 <Button variant="outline" size="sm" onClick={resetFilters}>
-                  重置筛选
+                  查看全部待办
                 </Button>
               </div>
             ) : (
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-10">
-                        <Checkbox
-                          aria-label="全选当前可操作任务"
-                          checked={
-                            allVisibleSelected
-                              ? true
-                              : someVisibleSelected
-                                ? "indeterminate"
-                                : false
-                          }
-                          disabled={filteredOperable.length === 0}
-                          onCheckedChange={toggleAllVisible}
-                        />
-                      </TableHead>
-                      <TableHead className="min-w-44">标题</TableHead>
-                      <TableHead className="min-w-44">当前节点</TableHead>
-                      <TableHead className="min-w-28">实例状态</TableHead>
-                      <TableHead className="min-w-44">审批定义</TableHead>
-                      <TableHead className="min-w-44">实例编号</TableHead>
-                      <TableHead className="min-w-28">发起人</TableHead>
-                      <TableHead className="min-w-52">摘要</TableHead>
-                      <TableHead className="min-w-44">提交时间</TableHead>
-                      <TableHead className="min-w-24">API 操作</TableHead>
-                      {formColumns.map((name) => (
-                        <TableHead key={name} className="min-w-40">
-                          {name}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                    <TableRow className="bg-muted/30 hover:bg-muted/30">
-                      <TableHead>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 px-1 text-xs"
-                          onClick={resetFilters}
-                          title="重置全部筛选"
-                        >
-                          <RotateCcw className="size-3.5" />
-                        </Button>
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按标题筛选"
-                          placeholder="标题"
-                          className="h-8 text-xs"
-                          value={filters.title}
-                          onChange={(event) =>
-                            updateFilter("title", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按当前节点筛选"
-                          placeholder="节点名称"
-                          className="h-8 text-xs"
-                          value={filters.node}
-                          onChange={(event) =>
-                            updateFilter("node", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <select
-                          aria-label="按实例状态筛选"
-                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                          value={filters.status}
-                          onChange={(event) =>
-                            updateFilter("status", event.target.value)
-                          }
-                        >
-                          {FEISHU_STATUS_FILTER_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按审批定义筛选"
-                          placeholder="定义名称/Code"
-                          className="h-8 text-xs"
-                          value={filters.definition}
-                          onChange={(event) =>
-                            updateFilter("definition", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按实例编号筛选"
-                          placeholder="实例编号"
-                          className="h-8 text-xs"
-                          value={filters.instance}
-                          onChange={(event) =>
-                            updateFilter("instance", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按发起人筛选"
-                          placeholder="发起人"
-                          className="h-8 text-xs"
-                          value={filters.initiator}
-                          onChange={(event) =>
-                            updateFilter("initiator", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <Input
-                          aria-label="按摘要筛选"
-                          placeholder="摘要关键字"
-                          className="h-8 text-xs"
-                          value={filters.summary}
-                          onChange={(event) =>
-                            updateFilter("summary", event.target.value)
-                          }
-                        />
-                      </TableHead>
-                      <TableHead>
-                        <div className="flex gap-1">
-                          <Input
-                            aria-label="开始日期"
-                            type="date"
-                            className="h-8 w-32 text-xs"
-                            value={filters.from}
-                            onChange={(event) =>
-                              updateFilter("from", event.target.value)
-                            }
-                          />
-                          <Input
-                            aria-label="结束日期"
-                            type="date"
-                            className="h-8 w-32 text-xs"
-                            value={filters.to}
-                            onChange={(event) =>
-                              updateFilter("to", event.target.value)
-                            }
-                          />
-                        </div>
-                      </TableHead>
-                      <TableHead>
-                        <select
-                          aria-label="按 API 操作能力筛选"
-                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                          value={filters.api}
-                          onChange={(event) =>
-                            updateFilter(
-                              "api",
-                              event.target.value as Filters["api"],
-                            )
-                          }
-                        >
-                          <option value="all">全部</option>
-                          <option value="supported">支持</option>
-                          <option value="unsupported">不支持</option>
-                        </select>
-                      </TableHead>
-                      {formColumns.map((name) => (
-                        <TableHead key={name}>
-                          <Input
-                            aria-label={`按字段 ${name} 筛选`}
-                            placeholder={name}
-                            className="h-8 text-xs"
-                            value={fieldFilters[name] ?? ""}
-                            onChange={(event) =>
-                              setFieldFilters((prev) => ({
-                                ...prev,
-                                [name]: event.target.value,
-                              }))
-                            }
-                          />
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredTasks.map((task) => {
-                      const operability = taskOperability(task);
-                      const checked = Boolean(selected[task.taskId]);
-                      const statusLabel = taskStatusLabel(task);
-                      const nodes =
-                        task.currentNodeNames.length > 0
-                          ? task.currentNodeNames
-                          : task.myNodeName
-                            ? [task.myNodeName]
-                            : [];
-                      const currentNodes =
-                        task.myNodeName && nodes.includes(task.myNodeName)
-                          ? [
-                              task.myNodeName,
-                              ...nodes.filter(
-                                (node) => node !== task.myNodeName,
-                              ),
-                            ]
-                          : nodes;
-                      return (
-                        <TableRow
-                          key={task.taskId}
-                          data-state={checked ? "selected" : undefined}
-                        >
-                          <TableCell>
-                            <Checkbox
-                              aria-label={`选择 ${task.title}`}
-                              checked={checked}
-                              disabled={!operability.operable}
-                              onCheckedChange={() => toggleTask(task)}
-                            />
-                          </TableCell>
-                          <TableCell
-                            className="max-w-64 font-medium"
-                            title={task.title}
-                          >
-                            <span className="block truncate">{task.title}</span>
-                            {!operability.operable && (
-                              <span className="block text-xs font-normal text-muted-foreground">
-                                {operability.reason}
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {currentNodes.length > 0 ? (
-                              <div className="flex flex-wrap gap-1">
-                                {currentNodes.map((node) => {
-                                  const mine = node === task.myNodeName;
-                                  return (
-                                    <StatusBadge
-                                      key={node}
-                                      tone={mine ? "info" : "neutral"}
-                                    >
-                                      {node}
-                                      {mine ? "（我的节点）" : ""}
-                                    </StatusBadge>
-                                  );
-                                })}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">
-                                —
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <StatusBadge tone={statusTone(statusLabel)}>
-                              {statusLabel}
-                            </StatusBadge>
-                          </TableCell>
-                          <TableCell
-                            className="max-w-56"
-                            title={task.definitionName}
-                          >
-                            <span className="block truncate">
-                              {task.definitionName}
-                            </span>
-                            <span className="block truncate text-xs text-muted-foreground">
-                              {task.definitionCode || "—"}
-                            </span>
-                          </TableCell>
-                          <TableCell
-                            className="max-w-44 truncate text-xs"
-                            title={task.instanceCode}
-                          >
-                            {task.instanceCode}
-                          </TableCell>
-                          <TableCell>{task.initiatorName ?? "—"}</TableCell>
-                          <TableCell
-                            className="max-w-72"
-                            title={task.summaries.join("；")}
-                          >
-                            <span className="block truncate">
-                              {task.summaries.join("；") || "—"}
-                            </span>
-                          </TableCell>
-                          <TableCell className="text-xs tabular-nums">
-                            {timeText(task.createdAt)}
-                          </TableCell>
-                          <TableCell>
-                            <StatusBadge
-                              tone={
-                                task.supportApiOperate ? "positive" : "warning"
-                              }
-                            >
-                              {task.supportApiOperate ? "支持" : "不支持"}
-                            </StatusBadge>
-                          </TableCell>
-                          {formColumns.map((name) => {
-                            const value = formFieldText(task, name);
-                            return (
-                              <TableCell
-                                key={name}
-                                className="max-w-56 text-xs"
-                                title={value}
-                              >
-                                <span className="block truncate">
-                                  {value || "—"}
-                                </span>
-                              </TableCell>
-                            );
-                          })}
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
+              <div className="space-y-6">
+                {visibleGroups.map((group) => (
+                  <div key={group.key} className="space-y-2">
+                    <div className="flex flex-wrap items-baseline gap-2">
+                      <h2 className="text-base font-semibold">{group.name}</h2>
+                      <span className="text-xs text-muted-foreground">
+                        {group.code || "—"} · {group.tasks.length} 条
+                      </span>
+                    </div>
+                    <DefinitionTable
+                      tasks={group.tasks}
+                      selected={selected}
+                      onSelect={(tableTasks, nextSelection) =>
+                        replaceTableSelection(tableTasks, nextSelection)
+                      }
+                    />
+                  </div>
+                ))}
               </div>
             )}
           </section>

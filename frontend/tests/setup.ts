@@ -1,6 +1,28 @@
 import "@testing-library/jest-dom/vitest";
 import { configure } from "@testing-library/react";
 
+// jsdom 没有 matchMedia/ResizeObserver，Ant Design 的响应式栅格与表格列宽监听依赖它们。
+if (!window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }) as MediaQueryList;
+}
+if (!window.ResizeObserver) {
+  window.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 // 默认 findBy*/waitFor 超时是 1000ms，在 full 套件多 worker 并行下（本机核数多、
 // 每个 worker 都渲染整套 App）会因 CPU/内存竞争误超时——已用 base 提交实测证明是
 // 既有 flakiness，与权限修复无关。提到 5s：真失败仍会在 5s 内如实报错，只是不再

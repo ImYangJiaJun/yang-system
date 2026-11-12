@@ -5,7 +5,45 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
+// Ant Design 的表格在 jsdom 中首屏渲染较慢（rc-table + CSS-in-JS），单测给足时间。
+vi.setConfig({ testTimeout: 15_000 });
+
 /// 批量审批页：分组、可操作性、动作确认、job 轮询、详情与重新授权引导。
+
+async function filterColumn(
+  user: ReturnType<typeof userEvent.setup>,
+  groupName: string,
+  columnName: string,
+  optionLabel: string,
+) {
+  const heading = screen.getByRole("heading", { name: groupName });
+  const section = heading.parentElement?.parentElement;
+  const header = Array.from(section?.querySelectorAll("th") ?? []).find(
+    (cell) => cell.textContent?.includes(columnName),
+  );
+  const trigger = header?.querySelector(".ant-table-filter-trigger");
+  expect(trigger).not.toBeNull();
+  await user.click(trigger as HTMLElement);
+
+  const dropdown = await waitFor(() => {
+    const elements = document.querySelectorAll(
+      ".ant-table-filter-dropdown:not(.ant-dropdown-hidden)",
+    );
+    const element = elements[elements.length - 1];
+    if (!element) throw new Error("筛选菜单未打开");
+    return element as HTMLElement;
+  });
+  const option = within(dropdown).getByText(optionLabel);
+  const item = option.closest("li");
+  await user.click(item ?? option);
+  const confirms = document.querySelectorAll(
+    ".ant-table-filter-dropdown:not(.ant-dropdown-hidden)",
+  );
+  const active = confirms[confirms.length - 1] ?? dropdown;
+  await user.click(
+    within(active as HTMLElement).getByRole("button", { name: /OK|确定/ }),
+  );
+}
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -153,7 +191,11 @@ describe("BatchApprovalPage", () => {
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     expect(
-      await screen.findByRole("heading", { name: "批量审批" }),
+      await screen.findByRole(
+        "heading",
+        { name: "批量审批" },
+        { timeout: 15_000 },
+      ),
     ).toBeInTheDocument();
     expect(await screen.findByText("报销单 A")).toBeInTheDocument();
     // 左侧分组带数量。
@@ -267,26 +309,46 @@ describe("BatchApprovalPage", () => {
   });
 
   it("表格直接展示全部表单字段，并支持按字段与当前节点筛选", async () => {
-    stubBatchApi();
+    const extraTask = {
+      ...TASKS[0],
+      task_id: "t1b",
+      instance_code: "i1b",
+      title: "报销单 A2",
+      form_fields: [
+        { name: "金额", value: { text: "200" } },
+        { name: "部门", value: "研发" },
+      ],
+      current_node_names: ["财务审批"],
+      my_node_name: "财务审批",
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [TASKS[0], extraTask, ...TASKS.slice(1)],
+          truncated: false,
+        },
+      }),
+    });
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     await screen.findByText("报销单 A");
     // 表头与值都在同一张表内，不需要点开详情。
-    expect(screen.getByText("金额")).toBeInTheDocument();
-    expect(screen.getByText("部门")).toBeInTheDocument();
+    expect(screen.getAllByText("金额").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("部门").length).toBeGreaterThan(0);
     expect(screen.getByText("100")).toBeInTheDocument();
     expect(screen.getByText("部门审批（我的节点）")).toBeInTheDocument();
     expect(screen.getByText("财务审批")).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("按字段 金额 筛选"), "100");
+    await filterColumn(user, "报销审批", "金额", "100");
     expect(screen.getByText("报销单 A")).toBeInTheDocument();
-    expect(screen.queryByText("请假单 B")).not.toBeInTheDocument();
+    expect(screen.queryByText("报销单 A2")).not.toBeInTheDocument();
 
-    await user.clear(screen.getByLabelText("按字段 金额 筛选"));
-    await user.type(screen.getByLabelText("按当前节点筛选"), "主管");
-    expect(screen.queryByText("报销单 A")).not.toBeInTheDocument();
+    await filterColumn(user, "请假审批", "当前节点", "主管审批");
+    expect(screen.getByText("报销单 A")).toBeInTheDocument();
     expect(screen.getByText("请假单 B")).toBeInTheDocument();
+    expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
   });
 
   it("凭证失效时显示重新授权入口", async () => {
@@ -392,6 +454,12 @@ describe("BatchApprovalPage", () => {
               topic: "1",
               title: "待办请假单",
             },
+            {
+              ...TASKS[0],
+              task_id: "t4",
+              instance_code: "i4",
+              title: "待办报销单",
+            },
           ],
           truncated: false,
         },
@@ -412,8 +480,17 @@ describe("BatchApprovalPage", () => {
     expect(screen.queryByText("状态 1")).not.toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("按标题筛选"), "请假");
-    expect(screen.queryByText("流转中的报销单")).not.toBeInTheDocument();
-    expect(screen.getByText("待办请假单")).toBeInTheDocument();
+    await filterColumn(user, "报销审批", "标题", "流转中的报销单");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("cell", { name: "待办报销单" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("cell", { name: "流转中的报销单" }),
+    ).toBeInTheDocument();
+    expect(
+      (await screen.findAllByRole("cell", { name: /待办请假单/ })).length,
+    ).toBeGreaterThan(0);
   });
 });

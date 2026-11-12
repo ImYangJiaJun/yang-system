@@ -16,6 +16,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    // Ant Design 的 rc-table + CSS-in-JS 在 jsdom 首次渲染较慢，并发跑全量时
+    // 既有页面的 5s 默认超时会假失败；统一放宽到 15s。
+    testTimeout: 15_000,
     setupFiles: ["./tests/setup.ts"],
     // e2e/ 与 e2e-production/ 是 Playwright 规格，不走 Vitest。
     // 单元测试与 src/ 生产代码隔离，集中在 tests/ 并镜像 src 目录结构。
