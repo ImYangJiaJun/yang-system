@@ -5,10 +5,17 @@ import {
   useRef,
   useState,
   type HTMLAttributes,
+  type ReactNode,
   type SyntheticEvent,
 } from "react";
 import { Link, useNavigate } from "react-router";
-import { ConfigProvider, Table, type TableColumnsType } from "antd";
+import {
+  ConfigProvider,
+  Table,
+  Tag,
+  Tooltip,
+  type TableColumnsType,
+} from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
   ChevronLeft,
@@ -826,8 +833,53 @@ function formColumns(tasks: BatchTask[]): FormColumn[] {
   return columns;
 }
 
-/// 用户保存的列顺序/可见性；未配置时按默认顺序全部展示，
-/// 配置后新增的字段追加在末尾保持可见。
+/// 技术定位字段默认不展示，需要时可在字段设置里打开。
+const DEFAULT_HIDDEN_COLUMNS = new Set(["base:instanceCode"]);
+
+type ColumnKind = "instance" | "form" | "computed";
+
+const COLUMN_KIND_META: Record<
+  ColumnKind,
+  { label: string; color: string; hint: string }
+> = {
+  instance: {
+    label: "实例",
+    color: "default",
+    hint: "审批实例自带的数据",
+  },
+  form: {
+    label: "表单",
+    color: "blue",
+    hint: "审批表单里的控件值",
+  },
+  computed: {
+    label: "计算",
+    color: "purple",
+    hint: "按你在字段设置里配置的规则计算得出",
+  },
+};
+
+/// 表头统一附带类型标记，一眼区分实例数据与个人配置的计算字段。
+function columnTitle(label: string, kind: ColumnKind): ReactNode {
+  const meta = COLUMN_KIND_META[kind];
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span>{label}</span>
+      <Tooltip title={meta.hint}>
+        <Tag
+          color={meta.color}
+          variant="filled"
+          style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: "16px" }}
+        >
+          {meta.label}
+        </Tag>
+      </Tooltip>
+    </span>
+  );
+}
+
+/// 用户保存的列顺序/可见性；未配置时按默认顺序展示，
+/// 配置后新增的字段追加在末尾保持可见（技术定位字段除外）。
 function applyViewLayout(
   columns: TableColumnsType<BatchTask>,
   view: BatchViewConfig | undefined,
@@ -845,6 +897,7 @@ function applyViewLayout(
     const key = String(column.key);
     if (used.has(key)) continue;
     used.add(key);
+    if (DEFAULT_HIDDEN_COLUMNS.has(key)) continue;
     ordered.push(column);
   }
   return ordered;
@@ -862,7 +915,7 @@ function buildTaskColumns(
   // 勾选、标题、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
   const fixedColumns: TableColumnsType<BatchTask> = [
     {
-      title: "标题",
+      title: columnTitle("标题", "instance"),
       dataIndex: "title",
       key: "title",
       width: 220,
@@ -887,7 +940,7 @@ function buildTaskColumns(
       },
     },
     {
-      title: "当前节点",
+      title: columnTitle("当前节点", "instance"),
       key: "currentNode",
       width: 240,
       sorter: (left, right) =>
@@ -928,7 +981,7 @@ function buildTaskColumns(
       },
     },
     {
-      title: "实例状态",
+      title: columnTitle("实例状态", "instance"),
       key: "status",
       width: 120,
       sorter: (left, right) =>
@@ -944,7 +997,7 @@ function buildTaskColumns(
 
   const baseColumns: TableColumnsType<BatchTask> = [
     {
-      title: "审批定义",
+      title: columnTitle("审批定义", "instance"),
       key: "definition",
       width: 220,
       sorter: (left, right) =>
@@ -967,7 +1020,7 @@ function buildTaskColumns(
       ),
     },
     {
-      title: "实例编号",
+      title: columnTitle("实例编号", "instance"),
       dataIndex: "instanceCode",
       key: "instanceCode",
       width: 300,
@@ -983,7 +1036,7 @@ function buildTaskColumns(
       ),
     },
     {
-      title: "发起人",
+      title: columnTitle("发起人", "instance"),
       key: "initiator",
       width: 120,
       sorter: (left, right) =>
@@ -1000,7 +1053,7 @@ function buildTaskColumns(
       ),
     },
     {
-      title: "摘要",
+      title: columnTitle("摘要", "instance"),
       key: "summary",
       width: 280,
       filters: uniqueFilters(
@@ -1019,7 +1072,7 @@ function buildTaskColumns(
       },
     },
     {
-      title: "提交时间",
+      title: columnTitle("提交时间", "instance"),
       key: "createdAt",
       width: 180,
       sorter: (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
@@ -1033,7 +1086,7 @@ function buildTaskColumns(
       ),
     },
     {
-      title: "API 操作",
+      title: columnTitle("API 操作", "instance"),
       key: "apiOperate",
       width: 110,
       filters: [
@@ -1060,7 +1113,7 @@ function buildTaskColumns(
   for (const field of formColumns(tasks)) {
     const values = tasks.map((task) => formFieldText(task, field) || "—");
     columns.push({
-      title: field.name,
+      title: columnTitle(field.name, "form"),
       key: field.key,
       width: 180,
       filters: uniqueFilters(values),
@@ -1090,7 +1143,7 @@ function buildTaskColumns(
 
   for (const field of computedFieldNames(tasks)) {
     columns.push({
-      title: field.name,
+      title: columnTitle(field.name, "computed"),
       key: field.key,
       width: 160,
       align: "right",

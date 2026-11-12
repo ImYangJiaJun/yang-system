@@ -435,6 +435,11 @@ describe("BatchApprovalPage", () => {
     expect(screen.getAllByText("8794.79").length).toBeGreaterThan(0);
     expect(screen.getByText("部门审批（我的节点）")).toBeInTheDocument();
     expect(screen.getByText("财务审批")).toBeInTheDocument();
+    // 表头用类型标记区分实例数据、表单控件和个人计算字段。
+    expect(screen.getAllByText("计算").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("表单").length).toBeGreaterThan(0);
+    // 实例编号属于技术定位字段，默认不展示。
+    expect(screen.queryByText("实例编号")).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await filterColumn(user, "报销审批", "金额", "100");
@@ -496,6 +501,9 @@ describe("BatchApprovalPage", () => {
     await user.click(screen.getByRole("button", { name: "字段设置" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("显示字段")).toBeInTheDocument();
+    // 配置面板同样标注每列的类型，便于区分实例数据与个人计算字段。
+    expect(within(dialog).getAllByText("实例").length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText("表单").length).toBeGreaterThan(0);
 
     const dept = within(dialog).getByRole("checkbox", { name: "显示 部门" });
     expect(dept).not.toBeChecked();

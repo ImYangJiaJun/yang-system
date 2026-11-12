@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
+import { GripVertical, Plus, Trash2 } from "lucide-react";
 
 import { useToast } from "@/shared/lib/toast";
 import { Button } from "@/shared/ui/button";
@@ -43,6 +43,30 @@ const BASE_COLUMNS: Array<{ key: string; label: string }> = [
   { key: "base:createdAt", label: "提交时间" },
   { key: "base:apiOperate", label: "API 操作" },
 ];
+
+/// 技术定位字段默认不展示，需要时勾选即可。
+const DEFAULT_HIDDEN_COLUMNS = new Set(["base:instanceCode"]);
+
+const COLUMN_KIND_META = {
+  instance: {
+    label: "实例",
+    className: "border-slate-300 bg-slate-50 text-slate-600",
+  },
+  form: {
+    label: "表单",
+    className: "border-sky-300 bg-sky-50 text-sky-700",
+  },
+  computed: {
+    label: "计算",
+    className: "border-violet-300 bg-violet-50 text-violet-700",
+  },
+} as const;
+
+function columnKind(key: string): keyof typeof COLUMN_KIND_META {
+  if (key.startsWith("computed:")) return "computed";
+  if (key.startsWith("form:")) return "form";
+  return "instance";
+}
 
 const DESCRIPTION_TYPES = new Set([
   "text",
@@ -98,7 +122,10 @@ function draftColumns(
   for (const entry of base) {
     if (used.has(entry.key)) continue;
     used.add(entry.key);
-    ordered.push({ ...entry, visible: visible.get(entry.key) !== false });
+    ordered.push({
+      ...entry,
+      visible: visible.get(entry.key) ?? !DEFAULT_HIDDEN_COLUMNS.has(entry.key),
+    });
   }
   return ordered;
 }
@@ -214,12 +241,21 @@ export function BatchViewSettingsDrawer({
     setColumns((current) => syncComputedColumns(current, next));
   };
 
-  const moveColumn = (index: number, delta: number) => {
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const moveColumnTo = (from: number, to: number) => {
     setColumns((current) => {
-      const target = index + delta;
-      if (target < 0 || target >= current.length) return current;
+      if (
+        from === to ||
+        from < 0 ||
+        to < 0 ||
+        from >= current.length ||
+        to >= current.length
+      ) {
+        return current;
+      }
       const next = [...current];
-      [next[index], next[target]] = [next[target], next[index]];
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
       return next;
     });
   };
@@ -365,8 +401,22 @@ export function BatchViewSettingsDrawer({
             {columns.map((column, index) => (
               <div
                 key={column.key}
-                className="flex items-center gap-2 rounded border px-2 py-1.5"
+                draggable
+                onDragStart={() => setDragIndex(index)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => {
+                  if (dragIndex !== null) moveColumnTo(dragIndex, index);
+                  setDragIndex(null);
+                }}
+                onDragEnd={() => setDragIndex(null)}
+                className={`flex items-center gap-2 rounded border px-2 py-1.5 ${
+                  dragIndex === index ? "opacity-50" : ""
+                }`}
               >
+                <GripVertical
+                  className="size-4 shrink-0 cursor-grab text-muted-foreground"
+                  aria-hidden="true"
+                />
                 <Checkbox
                   checked={column.visible}
                   aria-label={`显示 ${column.label}`}
@@ -383,26 +433,13 @@ export function BatchViewSettingsDrawer({
                 <span className="min-w-0 flex-1 truncate text-sm">
                   {column.label}
                 </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`上移 ${column.label}`}
-                  disabled={index === 0}
-                  onClick={() => moveColumn(index, -1)}
+                <span
+                  className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
+                    COLUMN_KIND_META[columnKind(column.key)].className
+                  }`}
                 >
-                  <ArrowUp className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`下移 ${column.label}`}
-                  disabled={index === columns.length - 1}
-                  onClick={() => moveColumn(index, 1)}
-                >
-                  <ArrowDown className="size-3.5" />
-                </Button>
+                  {COLUMN_KIND_META[columnKind(column.key)].label}
+                </span>
               </div>
             ))}
           </div>
