@@ -38,8 +38,8 @@ use crate::addon::feishu::domain::approval::{
     create_instance_comment, list_instance_comments, subscribe_bitable_file,
 };
 use crate::addon::feishu::domain::approval_comment::{
-    evaluate_condition, find_marker, parse_comment_config, payment_fingerprint, render_comment,
-    CommentCondition, CommentConfig,
+    evaluate_condition, find_marker, parse_comment_config, payment_fingerprint,
+    render_comment_with_origin, CommentCondition, CommentConfig,
 };
 use crate::addon::feishu::domain::approval_export::RULE_ROW_KEY;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates, RecordItem};
@@ -82,6 +82,7 @@ const RULE_FIELDS: &[&str] = &[
     "title",
     "target_base_token",
     "target_table_id",
+    "target_base_url",
     "comment_config_json",
 ];
 
@@ -367,6 +368,8 @@ struct CommentRule {
     title: String,
     base_token: String,
     table_id: String,
+    /// 目标 Base 的租户域名；记录链接模板留空时用它自动生成。
+    base_origin: Option<String>,
     config: CommentConfig,
     /// 页面顶部绑定的审批回写身份；未授权时为 `None`。
     author_open_id: Option<String>,
@@ -400,6 +403,7 @@ async fn load_enabled_rules(runner: &RoundRunner) -> anyhow::Result<Vec<CommentR
             title: row.optional::<String>("title")?.unwrap_or_default(),
             base_token: row.require("target_base_token")?,
             table_id: row.require("target_table_id")?,
+            base_origin: row.optional("target_base_url")?,
             config,
             author_open_id: None,
         });
@@ -1017,11 +1021,12 @@ async fn process_one(
         if let Err(error) = update_run(runner, row.id, lease).await {
             tracing::warn!(error = %error, run_id = row.id, "写 commenting 租约失败");
         }
-        let rendered = render_comment(
+        let rendered = render_comment_with_origin(
             &rule.config,
             &row.record_id,
             &rule.base_token,
             &rule.table_id,
+            rule.base_origin.as_deref(),
             &fields,
         );
         let fingerprint = payment_fingerprint(&rule.config, &fields);
@@ -1467,6 +1472,7 @@ mod tests {
             title: format!("规则{id}"),
             base_token: "bascn".to_string(),
             table_id: "tbl".to_string(),
+            base_origin: None,
             config: config(),
             author_open_id: Some("ou_ops".to_string()),
         }

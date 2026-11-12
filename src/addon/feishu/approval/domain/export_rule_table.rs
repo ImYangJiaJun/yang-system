@@ -67,6 +67,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .max_length(128)
                 .filterable(true),
+            // 目标 Base 的租户域名（如 https://tenant.feishu.cn），用于留空记录链接时自动生成。
+            target_base_url => Str::new().title("目标多维表格链接").max_length(512),
             target_base_name => Str::new().title("目标多维表名称").max_length(512).searchable(true),
             target_table_name => Str::new()
                 .title("目标数据表名称")

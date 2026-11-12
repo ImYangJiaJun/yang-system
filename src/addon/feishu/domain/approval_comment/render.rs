@@ -104,11 +104,25 @@ pub(crate) fn evaluate_condition(
 ///
 /// 标记行固定为 `prefix + record_id`（去重依据）；随后是每个配置字段一行
 /// 「列名：值」，最后是记录链接。
+/// 旧入口（测试沿用）：不携带租户域名，留空模板回退通用域名。
+#[cfg(test)]
 pub(crate) fn render_comment(
     config: &CommentConfig,
     record_id: &str,
     base_token: &str,
     table_id: &str,
+    fields: &BTreeMap<String, Value>,
+) -> RenderedComment {
+    render_comment_with_origin(config, record_id, base_token, table_id, None, fields)
+}
+
+/// 渲染评论正文与附件；`base_origin` 用于模板留空时自动生成记录链接。
+pub(crate) fn render_comment_with_origin(
+    config: &CommentConfig,
+    record_id: &str,
+    base_token: &str,
+    table_id: &str,
+    base_origin: Option<&str>,
     fields: &BTreeMap<String, Value>,
 ) -> RenderedComment {
     let mut lines = vec![config.marker(record_id)];
@@ -121,7 +135,13 @@ pub(crate) fn render_comment(
         }
         lines.push(format!("{}：{}", config.field_name(field_id), text));
     }
-    let url = render_record_url(&config.record_url_template, base_token, table_id, record_id);
+    let url = render_record_url(
+        &config.record_url_template,
+        base_origin,
+        base_token,
+        table_id,
+        record_id,
+    );
     if !url.is_empty() {
         lines.push(url);
     }
@@ -304,7 +324,28 @@ fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
-fn render_record_url(template: &str, base_token: &str, table_id: &str, record_id: &str) -> String {
+/// 渲染记录链接：模板留空时按租户域名自动拼；非空模板替换三个占位符。
+pub(crate) fn render_record_url(
+    template: &str,
+    base_origin: Option<&str>,
+    base_token: &str,
+    table_id: &str,
+    record_id: &str,
+) -> String {
+    let template = template.trim();
+    if template.is_empty() {
+        let origin = base_origin
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https://feishu.cn");
+        return format!(
+            "{}/base/{}?table={}&record={}",
+            origin.trim_end_matches('/'),
+            base_token,
+            table_id,
+            record_id
+        );
+    }
     template
         .replace("{base_token}", base_token)
         .replace("{table_id}", table_id)
@@ -527,6 +568,61 @@ mod tests {
         let rendered = render_comment(&config, "rec1", "b", "t", &fields);
         assert!(
             rendered.text.contains("支付凭证：（空）"),
+            "{}",
+            rendered.text
+        );
+    }
+
+    #[test]
+    fn empty_template_auto_generates_link_with_tenant_origin() {
+        let mut config = config();
+        config.record_url_template = String::new();
+        let rendered = render_comment_with_origin(
+            &config,
+            "rec123",
+            "bascn",
+            "tblX",
+            Some("https://tenant.feishu.cn"),
+            &fields(),
+        );
+        assert!(
+            rendered
+                .text
+                .ends_with("https://tenant.feishu.cn/base/bascn?table=tblX&record=rec123"),
+            "{}",
+            rendered.text
+        );
+    }
+
+    #[test]
+    fn empty_template_without_origin_falls_back_to_generic_domain() {
+        let mut config = config();
+        config.record_url_template = "   ".to_string();
+        let rendered =
+            render_comment_with_origin(&config, "rec123", "bascn", "tblX", None, &fields());
+        assert!(
+            rendered
+                .text
+                .ends_with("https://feishu.cn/base/bascn?table=tblX&record=rec123"),
+            "{}",
+            rendered.text
+        );
+    }
+
+    #[test]
+    fn non_empty_template_still_replaces_all_placeholders() {
+        let rendered = render_comment_with_origin(
+            &config(),
+            "rec123",
+            "bascn",
+            "tblX",
+            Some("https://tenant.feishu.cn"),
+            &fields(),
+        );
+        assert!(
+            rendered
+                .text
+                .ends_with("https://tenant/base/bascn?table=tblX&record=rec123"),
             "{}",
             rendered.text
         );

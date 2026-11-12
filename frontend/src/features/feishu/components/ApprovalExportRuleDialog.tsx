@@ -377,6 +377,16 @@ export function ApprovalExportRuleDialog({
     initialRule?.targetBaseToken ?? "",
   );
   const [tableId, setTableId] = useState(initialRule?.targetTableId ?? "");
+  // 目标 Base 的租户域名：从粘贴的多维表格链接里带出，保存时随规则透传；
+  // 记录链接模板留空时由后端用它拼记录链接。
+  const [baseOrigin, setBaseOrigin] = useState(
+    initialRule?.targetBaseUrl ?? "",
+  );
+  // origin 与哪个 Base Token 配对。用户手填/改成别的 token 后 origin 不再适用，
+  // 自动生成时回退通用域名，避免拿 A 租户的域名拼 B 租户的 token。
+  const [originBaseToken, setOriginBaseToken] = useState(
+    initialRule?.targetBaseToken ?? "",
+  );
   const [tables, setTables] = useState<BitableTable[]>([]);
   const [tablesPending, setTablesPending] = useState(false);
   const [tablesMessage, setTablesMessage] = useState<string | null>(null);
@@ -477,6 +487,12 @@ export function ApprovalExportRuleDialog({
   const effectiveTableId = (
     tableId.trim() !== "" ? tableId : (parsedCoordinate?.tableId ?? "")
   ).trim();
+  const effectiveBaseOrigin =
+    parsedCoordinate && baseToken.includes("://")
+      ? parsedCoordinate.origin
+      : effectiveBaseToken === originBaseToken.trim()
+        ? baseOrigin.trim()
+        : "";
 
   function patchCommentConfig(patch: Partial<ApprovalCommentConfig>) {
     setCommentConfig((current) => ({ ...current, ...patch }));
@@ -585,9 +601,10 @@ export function ApprovalExportRuleDialog({
       commentConfig.statusLabels.commented.trim() !== "" &&
       commentConfig.statusLabels.failed.trim() !== "" &&
       commentConfig.prefix.trim() !== "" &&
-      ["{base_token}", "{table_id}", "{record_id}"].every((placeholder) =>
-        commentConfig.recordUrlTemplate.includes(placeholder),
-      ));
+      (commentConfig.recordUrlTemplate.trim() === "" ||
+        ["{base_token}", "{table_id}", "{record_id}"].every((placeholder) =>
+          commentConfig.recordUrlTemplate.includes(placeholder),
+        )));
 
   const stepReady: Record<Step, boolean> = {
     1:
@@ -651,6 +668,8 @@ export function ApprovalExportRuleDialog({
       if (parsed && raw.includes("://")) {
         setBaseToken(parsed.baseToken);
         setTableId(parsed.tableId);
+        setBaseOrigin(parsed.origin);
+        setOriginBaseToken(parsed.baseToken);
       }
       const loaded = await client.listTables(token);
       setTables(loaded);
@@ -727,6 +746,7 @@ export function ApprovalExportRuleDialog({
       ),
       targetBaseToken: effectiveBaseToken,
       targetTableId: effectiveTableId,
+      targetBaseUrl: effectiveBaseOrigin,
       statusField: markEnabled ? statusField : null,
       markEnabled,
       enabled,
@@ -1053,6 +1073,10 @@ export function ApprovalExportRuleDialog({
                   // 不必再从链接里抄一遍。
                   const parsed = parseBitableLink(value);
                   if (parsed?.tableId) setTableId(parsed.tableId);
+                  if (parsed && value.includes("://")) {
+                    setBaseOrigin(parsed.origin);
+                    setOriginBaseToken(parsed.baseToken);
+                  }
                 }}
                 placeholder="粘贴完整数据表链接，或 appbcbWCzen6…"
                 autoComplete="off"
@@ -1490,8 +1514,9 @@ export function ApprovalExportRuleDialog({
                             autoComplete="off"
                           />
                           <p className="text-xs text-muted-foreground">
-                            必须含 {"{base_token}"} / {"{table_id}"} /{" "}
-                            {"{record_id}"} 三个占位符。
+                            {
+                              "留空自动生成 {origin}/base/{base_token}?table={table_id}&record={record_id}（优先使用保存的租户域名，否则使用 https://feishu.cn）；填写时必须含三个占位符。"
+                            }
                           </p>
                         </div>
                       </div>

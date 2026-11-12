@@ -3278,6 +3278,7 @@ function parseApprovalExportRule(
     conditionJson,
     targetBaseToken: asString(raw.target_base_token),
     targetTableId: asString(raw.target_table_id),
+    targetBaseUrl: asString(raw.target_base_url),
     targetBaseName: asNullableString(raw.target_base_name),
     targetTableName: asNullableString(raw.target_table_name),
     statusField: asNullableString(raw.status_field),
@@ -3484,6 +3485,8 @@ export type ApprovalExportRuleInput = {
   condition: ApprovalExportCondition | null;
   targetBaseToken: string;
   targetTableId: string;
+  /// 目标 Base 的租户域名 origin；空串由后端 normalize 成 None（清除）。
+  targetBaseUrl: string;
   statusField: string | null;
   markEnabled: boolean;
   enabled: boolean;
@@ -3532,6 +3535,7 @@ function buildApprovalExportRuleBody(
     ...(conditionJson === null ? {} : { condition_json: conditionJson }),
     target_base_token: input.targetBaseToken.trim(),
     target_table_id: input.targetTableId.trim(),
+    target_base_url: input.targetBaseUrl.trim(),
     ...(statusField === "" ? {} : { status_field: statusField }),
     mark_enabled: input.markEnabled,
     enabled: input.enabled,

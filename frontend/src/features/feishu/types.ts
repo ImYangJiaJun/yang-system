@@ -827,15 +827,17 @@ export type BitableTable = {
 };
 
 /// 解析多维表格完整链接；host 不参与判断，纯 Base Token 继续按旧格式返回。
+/// `origin` 只在完整链接时有值（如 `https://tenant.feishu.cn`），供记录链接模板留空时自动生成。
 export function parseBitableLink(value: string): {
   baseToken: string;
   tableId: string;
   viewId: string;
+  origin: string;
 } | null {
   const raw = value.trim();
   if (raw === "") return null;
   if (!raw.includes("://")) {
-    return { baseToken: raw, tableId: "", viewId: "" };
+    return { baseToken: raw, tableId: "", viewId: "", origin: "" };
   }
   let url: URL;
   try {
@@ -861,7 +863,7 @@ export function parseBitableLink(value: string): {
   ) {
     return null;
   }
-  return { baseToken, tableId, viewId };
+  return { baseToken, tableId, viewId, origin: url.origin };
 }
 
 /// 解析用户粘贴的审批定义输入：完整审批后台地址或裸 `definitionCode`。
@@ -1418,6 +1420,8 @@ export type ApprovalExportRule = {
   conditionJson: string | null;
   targetBaseToken: string;
   targetTableId: string;
+  /// 目标 Base 的租户域名 origin（如 `https://tenant.feishu.cn`）；空 = 未记录。
+  targetBaseUrl: string;
   targetBaseName: string | null;
   targetTableName: string | null;
   statusField: string | null;

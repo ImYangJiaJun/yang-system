@@ -150,6 +150,7 @@ const RULE_FIELDS: &[&str] = &[
     "condition_json",
     "target_base_token",
     "target_table_id",
+    "target_base_url",
     "status_field",
     "status_field_name",
     "status_labels_json",
@@ -482,6 +483,9 @@ fn parse_rule(row: &Record) -> Result<ExportRule, String> {
     let target_table_id: String = row
         .require("target_table_id")
         .map_err(|error| format!("target_table_id: {error}"))?;
+    let target_base_url: Option<String> = row
+        .optional("target_base_url")
+        .map_err(|error| format!("target_base_url: {error}"))?;
     let status_field = optional_nonempty(row, "status_field");
     let status_field_name = optional_nonempty(row, "status_field_name");
     let labels_raw: Option<String> = row
@@ -513,6 +517,7 @@ fn parse_rule(row: &Record) -> Result<ExportRule, String> {
         condition,
         target_base_token,
         target_table_id,
+        target_base_url,
         status_field,
         status_field_name,
         status_labels,
@@ -2542,6 +2547,7 @@ mod tests {
             condition: Condition::default(),
             target_base_token: "b".to_string(),
             target_table_id: "t".to_string(),
+            target_base_url: None,
             status_field: None,
             status_field_name: None,
             status_labels: StatusLabels::default(),

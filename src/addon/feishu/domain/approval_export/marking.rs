@@ -207,6 +207,7 @@ mod tests {
             condition: Condition::default(),
             target_base_token: "base".to_string(),
             target_table_id: "table".to_string(),
+            target_base_url: None,
             status_field: Some("fld_status".to_string()),
             status_field_name: Some("状态".to_string()),
             status_labels: StatusLabels::default(),

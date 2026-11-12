@@ -52,6 +52,9 @@ pub(super) struct UpdateExportRuleInput {
     pub(super) condition_json: Option<String>,
     pub(super) target_base_token: String,
     pub(super) target_table_id: String,
+    /// 目标 Base 的租户域名（如 `https://tenant.feishu.cn`）；记录链接模板留空时用它自动生成。
+    #[serde(default)]
+    pub(super) target_base_url: Option<String>,
     #[serde(default)]
     pub(super) status_field: Option<String>,
     #[serde(default)]
@@ -95,6 +98,7 @@ impl UpdateExportRuleInput {
             condition_json: self.condition_json,
             target_base_token: self.target_base_token,
             target_table_id: self.target_table_id,
+            target_base_url: self.target_base_url,
             status_field: self.status_field,
             status_labels_json: json_text(self.status_labels.as_ref()),
             mark_enabled: self.mark_enabled,
@@ -158,29 +162,45 @@ pub(super) async fn handle(
     // `into_draft` 按值消费输入；主键先取出来，后面的更新与响应都还用它。
     let rule_id = input.rule_id;
     let comment_config_provided = input.comment_config.is_some();
+    let target_base_url_provided = input.target_base_url.is_some();
 
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
         return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
     };
     let outbound = outbound_setup::build(&ctx, settings)?;
 
-    let existing_comment_config = if comment_config_provided {
-        None
-    } else {
-        let existing = context
-            .approval_export_rules()
-            .query()
-            .select_fields(&["comment_config_json"])?
-            .where_eq("id", serde_json::json!(rule_id))?
-            .optional()
-            .await?;
-        match existing {
-            Some(row) => row.optional::<String>("comment_config_json")?,
-            None => None,
-        }
-    };
+    let (existing_comment_config, existing_target_base_url) =
+        if comment_config_provided && target_base_url_provided {
+            (None, None)
+        } else {
+            let existing = context
+                .approval_export_rules()
+                .query()
+                .select_fields(&["comment_config_json", "target_base_url"])?
+                .where_eq("id", serde_json::json!(rule_id))?
+                .optional()
+                .await?;
+            match existing {
+                Some(row) => (
+                    if comment_config_provided {
+                        None
+                    } else {
+                        row.optional::<String>("comment_config_json")?
+                    },
+                    if target_base_url_provided {
+                        None
+                    } else {
+                        row.optional::<String>("target_base_url")?
+                    },
+                ),
+                None => (None, None),
+            }
+        };
     let mut draft = input.into_draft();
     keep_existing_comment_config(comment_config_provided, existing_comment_config, &mut draft);
+    if !target_base_url_provided {
+        draft.target_base_url = existing_target_base_url;
+    }
 
     let validated = validate_export_rule(
         outbound.transport(),

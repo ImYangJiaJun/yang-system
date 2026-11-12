@@ -65,6 +65,10 @@ pub(crate) struct ExportRule {
     pub(crate) condition: Condition,
     pub(crate) target_base_token: String,
     pub(crate) target_table_id: String,
+    /// 目标 Base 的租户域名（`https://tenant.feishu.cn`）；记录链接留空时用它自动生成。
+    /// 评论 worker 单独读规则表取该列，此字段供需要带域名的调用方使用。
+    #[allow(dead_code)]
+    pub(crate) target_base_url: Option<String>,
     /// 目标状态列 field_id。`None` = 不标记。
     pub(crate) status_field: Option<String>,
     pub(crate) status_field_name: Option<String>,

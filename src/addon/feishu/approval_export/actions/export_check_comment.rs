@@ -16,8 +16,11 @@ use yang_base::table::{Record, SortOrder};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval::{get_bitable_subscription, list_instance_comments};
-use crate::addon::feishu::domain::approval_comment::{parse_comment_config, CommentConfig};
+use crate::addon::feishu::domain::approval_comment::{
+    parse_comment_config, render_record_url, CommentConfig,
+};
 use crate::addon::feishu::domain::approval_convert::labels_equivalent;
+use crate::addon::feishu::domain::approval_export::config::normalize_base_origin;
 use crate::addon::feishu::domain::approval_export::RULE_ROW_KEY;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates, FieldItem};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -97,6 +100,7 @@ pub(super) async fn handle(
             "enabled",
             "target_base_token",
             "target_table_id",
+            "target_base_url",
             "comment_config_json",
         ])?
         .where_eq("id", serde_json::json!(input.rule_id))?
@@ -108,6 +112,7 @@ pub(super) async fn handle(
     let enabled: bool = rule.optional("enabled")?.unwrap_or(false);
     let base_token: String = rule.require("target_base_token")?;
     let table_id: String = rule.require("target_table_id")?;
+    let base_origin: Option<String> = rule.optional("target_base_url")?;
     let raw: Option<String> = rule.optional("comment_config_json")?;
 
     let mut items = Vec::new();
@@ -218,7 +223,14 @@ pub(super) async fn handle(
                 "comment_config.enabled=false：评论 worker 不会处理该规则".to_string()
             },
         });
-        check_fields(config, &fields, &mut items);
+        check_fields(
+            config,
+            base_origin.as_deref(),
+            &base_token,
+            &table_id,
+            &fields,
+            &mut items,
+        );
         check_status_field(config, &fields, &mut items);
         check_attachment_fields(config, &fields, &mut items);
     }
@@ -321,7 +333,14 @@ fn check_response(rule_id: i64, title: String, items: Vec<CommentCheckItem>) -> 
     )
 }
 
-fn check_fields(config: &CommentConfig, fields: &[FieldItem], items: &mut Vec<CommentCheckItem>) {
+fn check_fields(
+    config: &CommentConfig,
+    base_origin: Option<&str>,
+    base_token: &str,
+    table_id: &str,
+    fields: &[FieldItem],
+    items: &mut Vec<CommentCheckItem>,
+) {
     let missing: Vec<&str> = config
         .field_ids
         .iter()
@@ -376,13 +395,50 @@ fn check_fields(config: &CommentConfig, fields: &[FieldItem], items: &mut Vec<Co
         },
     });
 
+    // 模板留空 = 自动生成：此时校验租户域名；非空模板仍要求三个占位符。
+    let template = config.record_url_template.trim();
+    let (url_ok, url_detail) = if template.is_empty() {
+        match normalize_base_origin(base_origin) {
+            Ok(origin) => {
+                let example =
+                    render_record_url(template, origin.as_deref(), base_token, table_id, "recXXXX");
+                (
+                    true,
+                    format!(
+                        "留空，自动生成 {example}{}",
+                        if origin.is_none() {
+                            "（未配置租户域名，回退通用域名，建议填写目标多维表格链接）"
+                        } else {
+                            ""
+                        }
+                    ),
+                )
+            }
+            Err(error) => (
+                false,
+                format!("目标多维表格链接非法：{error}；留空记录链接模板时必须配置租户域名"),
+            ),
+        }
+    } else if ["{base_token}", "{table_id}", "{record_id}"]
+        .iter()
+        .all(|placeholder| template.contains(placeholder))
+    {
+        (
+            true,
+            render_record_url(template, base_origin, base_token, table_id, "recXXXX"),
+        )
+    } else {
+        (
+            false,
+            "记录链接模板缺少占位符（{base_token} / {table_id} / {record_id} 均为必需）"
+                .to_string(),
+        )
+    };
     items.push(CommentCheckItem {
         id: "record_url".to_string(),
-        name: "记录链接模板有效".to_string(),
-        passed: ["{base_token}", "{table_id}", "{record_id}"]
-            .iter()
-            .all(|placeholder| config.record_url_template.contains(placeholder)),
-        detail: config.record_url_template.clone(),
+        name: "记录链接可生成".to_string(),
+        passed: url_ok,
+        detail: url_detail,
     });
 }
 

@@ -8,6 +8,6 @@ pub(crate) mod render;
 
 pub(crate) use config::{parse_comment_config, validate_comment_config, CommentConfig};
 pub(crate) use render::{
-    evaluate_condition, find_marker, payment_fingerprint, render_comment, CommentCondition,
-    CommentFile, CommentItem,
+    evaluate_condition, find_marker, payment_fingerprint, render_comment_with_origin,
+    render_record_url, CommentCondition, CommentFile, CommentItem,
 };

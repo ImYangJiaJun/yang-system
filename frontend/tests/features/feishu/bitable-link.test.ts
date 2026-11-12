@@ -12,6 +12,7 @@ describe("parseBitableLink", () => {
       baseToken: "ZoCWb82JQaCCiAspCqbcUvlsnwg",
       tableId: "tblfFjlSuIQeMCJF",
       viewId: "vewAEKSbvO",
+      origin: "https://any-tenant.example",
     });
   });
 
@@ -20,14 +21,25 @@ describe("parseBitableLink", () => {
       baseToken: "appToken",
       tableId: "",
       viewId: "",
+      origin: "https://tenant",
     });
     expect(parseBitableLink("https://tenant/base/appToken?table=tblA")).toEqual(
       {
         baseToken: "appToken",
         tableId: "tblA",
         viewId: "",
+        origin: "https://tenant",
       },
     );
+  });
+
+  it("裸 token 原样返回且不带 origin", () => {
+    expect(parseBitableLink("appToken")).toEqual({
+      baseToken: "appToken",
+      tableId: "",
+      viewId: "",
+      origin: "",
+    });
   });
 
   it("拒绝非 Base 路径和非法坐标", () => {

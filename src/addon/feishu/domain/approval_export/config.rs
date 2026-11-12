@@ -80,6 +80,8 @@ pub(crate) struct ExportRuleDraft {
     pub(crate) condition_json: Option<String>,
     pub(crate) target_base_token: String,
     pub(crate) target_table_id: String,
+    /// 目标 Base 的租户域名（`https://tenant.feishu.cn`）；留空记录链接时用它自动生成。
+    pub(crate) target_base_url: Option<String>,
     pub(crate) status_field: Option<String>,
     pub(crate) status_labels_json: Option<String>,
     pub(crate) mark_enabled: bool,
@@ -131,6 +133,8 @@ pub(crate) struct ValidatedExportRule {
     pub(crate) condition_json: String,
     pub(crate) target_base_token: String,
     pub(crate) target_table_id: String,
+    /// 规范化后的目标 Base 租户域名；`None` = 未配置。
+    pub(crate) target_base_url: Option<String>,
     pub(crate) status_field: Option<String>,
     pub(crate) status_field_name: Option<String>,
     pub(crate) status_labels_json: Option<String>,
@@ -156,6 +160,7 @@ struct LocalRule {
     condition_json: String,
     target_base_token: String,
     target_table_id: String,
+    target_base_url: Option<String>,
     status_field: Option<String>,
     status_labels: StatusLabels,
     status_labels_json: Option<String>,
@@ -266,6 +271,7 @@ pub(crate) async fn validate_export_rule(
         condition_json: local.condition_json,
         target_base_token: local.target_base_token,
         target_table_id: local.target_table_id,
+        target_base_url: local.target_base_url,
         status_field: local.status_field,
         status_field_name,
         status_labels_json: local.status_labels_json,
@@ -277,6 +283,36 @@ pub(crate) async fn validate_export_rule(
         definition_hash,
         maps: resolved_maps,
     })
+}
+
+/// 把用户填写的链接规范化成租户域名（`scheme://host[:port]`）。
+///
+/// 空 / 纯空白 → `Ok(None)`；要求 http(s) 协议，取 `://` 之后到第一个 `/`
+/// 之前的部分（保留端口），拒绝空白、`?`、`#` 与空 host。
+pub(crate) fn normalize_base_origin(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let (scheme, rest) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("链接必须以 http:// 或 https:// 开头（当前为「{raw}」）"))?;
+    let scheme = scheme.trim().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "不支持的协议「{scheme}」：只支持 http:// 或 https://"
+        ));
+    }
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() {
+        return Err("链接缺少租户域名（形如 https://tenant.feishu.cn）".to_string());
+    }
+    if host
+        .chars()
+        .any(|c| c.is_whitespace() || c == '?' || c == '#')
+    {
+        return Err("租户域名不能包含空白、? 或 #（形如 https://tenant.feishu.cn）".to_string());
+    }
+    Ok(Some(format!("{scheme}://{host}")))
 }
 
 fn parse_local(draft: &ExportRuleDraft) -> Result<LocalRule, Vec<String>> {
@@ -335,6 +371,21 @@ fn parse_local(draft: &ExportRuleDraft) -> Result<LocalRule, Vec<String>> {
             Condition::default()
         }
     };
+
+    // 目标 Base 的租户域名：优先取显式填写的链接；未填时若目标坐标本身
+    // 是完整链接（含 http(s)://），从同一个链接里提取 origin，供记录链接
+    // 留空时自动生成。裸 token 不当作链接，不会因此报错。
+    let mut base_origin = match normalize_base_origin(draft.target_base_url.as_deref()) {
+        Ok(origin) => origin,
+        Err(error) => {
+            reasons.push(format!("目标多维表格链接非法：{error}"));
+            None
+        }
+    };
+    if base_origin.is_none() && draft.target_base_token.contains("://") {
+        // 提取失败交给 resolve_bitable_link 统一报错，避免重复提示。
+        base_origin = normalize_base_origin(Some(draft.target_base_token.as_str())).unwrap_or(None);
+    }
 
     // 目标坐标允许「完整多维表格链接」：用户直接粘贴
     // `https://…/base/<token>?table=<table_id>` 时，Base Token 与数据表 ID
@@ -435,6 +486,7 @@ fn parse_local(draft: &ExportRuleDraft) -> Result<LocalRule, Vec<String>> {
         condition_json,
         target_base_token: base_token,
         target_table_id: table_id,
+        target_base_url: base_origin,
         status_field,
         status_labels,
         status_labels_json,
@@ -963,6 +1015,7 @@ pub(crate) const RULE_FIELDS: &[&str] = &[
     "condition_json",
     "target_base_token",
     "target_table_id",
+    "target_base_url",
     "status_field",
     "status_field_name",
     "status_labels_json",
@@ -1068,6 +1121,9 @@ pub(crate) fn parse_rule_record(row: &Record) -> Result<ExportRule, ExportError>
     let target_table_id: String = row
         .require("target_table_id")
         .map_err(|error| fatal("target_table_id", error))?;
+    let target_base_url: Option<String> = row
+        .optional("target_base_url")
+        .map_err(|error| fatal("target_base_url", error))?;
     let status_field = optional_nonempty(row, "status_field");
     let status_field_name = optional_nonempty(row, "status_field_name");
     let labels_raw: Option<String> = row
@@ -1098,6 +1154,7 @@ pub(crate) fn parse_rule_record(row: &Record) -> Result<ExportRule, ExportError>
         condition,
         target_base_token,
         target_table_id,
+        target_base_url,
         status_field,
         status_field_name,
         status_labels,
@@ -1239,6 +1296,9 @@ pub(crate) fn stored_draft(row: &Record, map_rows: &[Record]) -> Result<ExportRu
             .map_err(|error| format!("condition_json: {error}"))?,
         target_base_token: text("target_base_token")?,
         target_table_id: text("target_table_id")?,
+        target_base_url: row
+            .optional::<String>("target_base_url")
+            .map_err(|error| format!("target_base_url: {error}"))?,
         status_field: row
             .optional::<String>("status_field")
             .map_err(|error| format!("status_field: {error}"))?,
@@ -1276,6 +1336,7 @@ mod tests {
             condition_json: None,
             target_base_token: "bascnTest".to_string(),
             target_table_id: "tblTest".to_string(),
+            target_base_url: None,
             status_field: Some("fldStatus".to_string()),
             status_labels_json: None,
             mark_enabled: true,
@@ -1301,6 +1362,45 @@ mod tests {
         assert_eq!(local.row_filter, RowFilter::MatchedRows);
         assert_eq!(local.maps.len(), 1);
         assert!(local.maps[0].required);
+    }
+
+    #[test]
+    fn base_origin_is_normalized_and_invalid_links_are_rejected() {
+        let normalize = |raw: Option<&str>| {
+            normalize_base_origin(raw).unwrap_or_else(|error| panic!("{error}"))
+        };
+        assert_eq!(normalize(None), None);
+        assert_eq!(normalize(Some("   ")), None);
+        assert_eq!(
+            normalize(Some("  HTTPS://Tenant.feishu.cn/base/bascn?table=tbl  ")),
+            Some("https://Tenant.feishu.cn".to_string()),
+            "取 :// 之后到第一个 / 之前的 host，scheme 转小写、去掉末尾斜杠"
+        );
+        assert!(
+            normalize_base_origin(Some("tenant.feishu.cn")).is_err(),
+            "缺少 scheme 必须报错"
+        );
+        assert!(
+            normalize_base_origin(Some("https:///base/bascn")).is_err(),
+            "空 host 必须报错"
+        );
+        assert!(
+            normalize_base_origin(Some("ftp://tenant.feishu.cn")).is_err(),
+            "只允许 http(s)"
+        );
+    }
+
+    #[test]
+    fn full_target_link_supplies_base_origin_when_url_column_is_empty() {
+        let mut draft = draft();
+        draft.target_base_token =
+            "https://tenant.feishu.cn/base/bascnTest?table=tblTest".to_string();
+        draft.target_table_id = String::new();
+        let local = parse_local(&draft).unwrap_or_else(|reasons| panic!("{reasons:?}"));
+        assert_eq!(
+            local.target_base_url.as_deref(),
+            Some("https://tenant.feishu.cn")
+        );
     }
 
     #[test]

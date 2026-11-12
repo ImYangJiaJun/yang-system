@@ -231,11 +231,15 @@ fn validate_local(config: &CommentConfig) -> Result<(), Vec<String>> {
     if config.prefix.trim().is_empty() {
         reasons.push("评论前缀不能为空（去重标记依赖 prefix + 记录 id）".to_string());
     }
-    for placeholder in ["{base_token}", "{table_id}", "{record_id}"] {
-        if !config.record_url_template.contains(placeholder) {
-            reasons.push(format!(
-                "记录链接模板缺少占位符 {placeholder}（{{base_token}} / {{table_id}} / {{record_id}} 均为必需）"
-            ));
+    // 模板留空时按目标 Base 的租户域名自动生成，只有非空模板才要求三占位符。
+    let template = config.record_url_template.trim();
+    if !template.is_empty() {
+        for placeholder in ["{base_token}", "{table_id}", "{record_id}"] {
+            if !template.contains(placeholder) {
+                reasons.push(format!(
+                    "记录链接模板缺少占位符 {placeholder}（{{base_token}} / {{table_id}} / {{record_id}} 均为必需；留空时自动生成）"
+                ));
+            }
         }
     }
     if reasons.is_empty() {
@@ -431,6 +435,23 @@ mod tests {
             "{reasons}"
         );
         assert!(reasons.contains("记录链接模板缺少占位符"), "{reasons}");
+    }
+
+    #[test]
+    fn empty_record_url_template_is_allowed() {
+        let mut value: serde_json::Value = serde_json::from_str(&valid_raw())
+            .unwrap_or_else(|error| panic!("valid raw config must parse: {error}"));
+        value["record_url_template"] = serde_json::json!("   ");
+        let normalized = validate_comment_config(Some(&value.to_string()), &fields())
+            .unwrap_or_else(|reasons| panic!("{reasons:?}"))
+            .unwrap_or_else(|| panic!("启用配置不应为空"));
+        let config = parse_comment_config(Some(&normalized))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("应解析出配置"));
+        assert_eq!(
+            config.record_url_template, "",
+            "留空模板应被 trim 成空串（运行期自动生成链接）"
+        );
     }
 
     #[test]

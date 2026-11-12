@@ -99,6 +99,9 @@ pub(super) struct CreateExportRuleInput {
     pub(super) target_base_token: String,
     /// 目标数据表 id。
     pub(super) target_table_id: String,
+    /// 目标 Base 的租户域名（如 `https://tenant.feishu.cn`）；记录链接模板留空时用它自动生成。
+    #[serde(default)]
+    pub(super) target_base_url: Option<String>,
     /// 目标状态列 field_id；`mark_enabled=true` 时必填。
     #[serde(default)]
     pub(super) status_field: Option<String>,
@@ -151,6 +154,7 @@ impl CreateExportRuleInput {
             condition_json: self.condition_json,
             target_base_token: self.target_base_token,
             target_table_id: self.target_table_id,
+            target_base_url: self.target_base_url,
             status_field: self.status_field,
             status_labels_json: json_text(self.status_labels.as_ref()),
             mark_enabled: self.mark_enabled,
@@ -427,6 +431,13 @@ pub(super) fn fill_rule_record(
     record.insert(
         "target_table_id",
         serde_json::json!(&validated.target_table_id),
+    );
+    record.insert(
+        "target_base_url",
+        validated
+            .target_base_url
+            .as_deref()
+            .map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
     );
     record.insert(
         "status_field",

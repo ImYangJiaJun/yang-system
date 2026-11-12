@@ -261,6 +261,7 @@ mod tests {
             condition: Condition::default(),
             target_base_token: "base".to_string(),
             target_table_id: "table".to_string(),
+            target_base_url: None,
             status_field: None,
             status_field_name: None,
             status_labels: StatusLabels::default(),
