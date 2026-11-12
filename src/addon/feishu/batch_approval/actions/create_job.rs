@@ -422,7 +422,8 @@ async fn validate_target_users(
         let detail = api::user_detail(ctx, settings, open_id)
             .await
             .map_err(|error| error.to_base())?;
-        let user = detail.pointer("/data/user").ok_or_else(|| {
+        // `api::user_detail` 返回的已经是信封里的 `data`，用户对象就在 `/user`。
+        let user = detail.pointer("/user").ok_or_else(|| {
             BaseError::ParamInvalid("target".to_string(), "目标用户不存在".to_string())
         })?;
         if user
