@@ -1,5 +1,6 @@
 //! 批量审批 Action 注册表。
 
+mod attachment;
 pub(crate) mod cancel_job;
 mod create_job;
 mod get_job;
@@ -19,6 +20,7 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = user_search::register(module, Arc::clone(&context));
     let module = create_job::register(module, Arc::clone(&context));
     let module = get_job::register(module, Arc::clone(&context));
+    let module = attachment::register(module, Arc::clone(&context));
     cancel_job::register(module, context)
 }
 

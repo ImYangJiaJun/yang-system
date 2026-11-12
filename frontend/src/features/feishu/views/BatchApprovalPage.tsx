@@ -11,8 +11,9 @@ import { ConfigProvider, Table, type TableColumnsType } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { Download, Eye, Inbox, RefreshCw } from "lucide-react";
 import { Resizable, type ResizeCallbackData } from "react-resizable";
+import * as XLSX from "xlsx";
 
-import { useSessionController, useSessionCredentials } from "@/engine";
+import { apiBase, useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -225,24 +226,262 @@ function attachmentsOf(field: BatchTaskFormField): AttachmentFile[] {
   });
 }
 
-async function downloadAttachment(file: AttachmentFile): Promise<void> {
-  try {
-    const response = await fetch(file.url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const objectUrl = URL.createObjectURL(await response.blob());
-    const anchor = document.createElement("a");
-    anchor.href = objectUrl;
-    anchor.download = file.name;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-  } catch {
-    window.open(file.url, "_blank", "noopener,noreferrer");
+function attachmentProxyUrl(file: AttachmentFile): string {
+  const query = new URLSearchParams({ url: file.url, name: file.name });
+  return `${apiBase}/api/v1/feishu/batch-approval/attachments?${query.toString()}`;
+}
+
+async function fetchAttachmentBlob(
+  file: AttachmentFile,
+  token: string | undefined,
+): Promise<Blob> {
+  const response = await fetch(attachmentProxyUrl(file), {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(`附件下载失败（HTTP ${response.status}）`);
   }
+  return response.blob();
+}
+
+async function downloadAttachment(
+  file: AttachmentFile,
+  token: string | undefined,
+): Promise<void> {
+  const blob = await fetchAttachmentBlob(file, token);
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = file.name;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+function SpreadsheetPreview({ blob }: { blob: Blob }) {
+  const [sheets, setSheets] = useState<
+    Array<{ name: string; rows: string[][] }>
+  >([]);
+  const [active, setActive] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void blob
+      .arrayBuffer()
+      .then((buffer) => {
+        if (cancelled) return;
+        const workbook = XLSX.read(buffer, { type: "array" });
+        const parsed = workbook.SheetNames.map((name) => {
+          const rows = XLSX.utils.sheet_to_json(workbook.Sheets[name], {
+            header: 1,
+            raw: false,
+            defval: "",
+          }) as unknown[][];
+          return {
+            name,
+            rows: rows
+              .slice(0, 200)
+              .map((row) =>
+                row
+                  .slice(0, 40)
+                  .map((cell) => (cell == null ? "" : String(cell))),
+              ),
+          };
+        });
+        setSheets(parsed);
+        setActive(0);
+      })
+      .catch(() => {
+        if (!cancelled) setError("表格解析失败，无法预览");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [blob]);
+
+  if (error) {
+    return (
+      <p role="alert" className="text-destructive text-sm">
+        {error}
+      </p>
+    );
+  }
+  if (sheets.length === 0) {
+    return <Skeleton className="h-40 w-full" />;
+  }
+  const sheet = sheets[active] ?? sheets[0];
+  return (
+    <div className="flex max-h-[70vh] flex-col gap-2">
+      {sheets.length > 1 && (
+        <div className="flex flex-wrap gap-1">
+          {sheets.map((sheet, index) => (
+            <Button
+              key={sheet.name}
+              type="button"
+              size="sm"
+              variant={index === active ? "secondary" : "ghost"}
+              onClick={() => setActive(index)}
+            >
+              {sheet.name}
+            </Button>
+          ))}
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto rounded border">
+        <table className="w-full border-collapse text-xs">
+          <tbody>
+            {sheet.rows.length === 0 ? (
+              <tr>
+                <td className="p-3 text-muted-foreground">空表格</td>
+              </tr>
+            ) : (
+              sheet.rows.map((row, rowIndex) => (
+                <tr key={rowIndex} className="border-b last:border-b-0">
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={cellIndex}
+                      className="max-w-56 truncate border-r px-2 py-1 align-top last:border-r-0"
+                      title={cell}
+                    >
+                      {cell || " "}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AttachmentPreview({
+  file,
+  onClose,
+}: {
+  file: AttachmentFile;
+  onClose: () => void;
+}) {
+  const { token } = useSessionCredentials();
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    let url: string | null = null;
+    setBlob(null);
+    setObjectUrl(null);
+    setError(null);
+    void fetchAttachmentBlob(file, token)
+      .then((next) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(next);
+        setBlob(next);
+        setObjectUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setError("附件加载失败，请重试");
+      });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [file, token]);
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="flex h-[85vh] max-h-[85vh] flex-col gap-2 sm:max-w-6xl">
+        <div className="flex items-center gap-3 pr-8">
+          <DialogTitle className="min-w-0 flex-1 truncate">
+            {file.name}
+          </DialogTitle>
+          {objectUrl && (
+            <a
+              href={objectUrl}
+              download={file.name}
+              className="text-primary shrink-0 text-xs underline-offset-4 hover:underline"
+            >
+              下载附件
+            </a>
+          )}
+        </div>
+        {error ? (
+          <p role="alert" className="text-destructive text-sm">
+            {error}
+          </p>
+        ) : !blob || !objectUrl ? (
+          <Skeleton className="h-full min-h-64 w-full" />
+        ) : file.kind === "image" ? (
+          <>
+            <div className="flex items-center gap-1 text-xs">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
+              >
+                缩小
+              </Button>
+              <span className="w-16 text-center tabular-nums">
+                {Math.round(zoom * 100)}%
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
+              >
+                放大
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setZoom(1)}
+              >
+                适应窗口
+              </Button>
+            </div>
+            <div className="bg-muted/30 flex min-h-0 flex-1 items-center justify-center overflow-auto rounded border p-2">
+              <img
+                src={objectUrl}
+                alt={file.name}
+                className="max-h-full max-w-full object-contain"
+                style={{ transform: `scale(${zoom})` }}
+              />
+            </div>
+          </>
+        ) : file.kind === "pdf" ? (
+          <iframe
+            src={objectUrl}
+            title={file.name}
+            className="min-h-0 w-full flex-1 rounded border"
+          />
+        ) : file.kind === "office" ? (
+          <SpreadsheetPreview blob={blob} />
+        ) : (
+          <p className="text-muted-foreground text-sm">
+            该格式不支持在线预览。
+          </p>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function AttachmentCell({ files }: { files: AttachmentFile[] }) {
+  const { token } = useSessionCredentials();
+  const { error: toastError } = useToast();
   const [preview, setPreview] = useState<AttachmentFile | null>(null);
   return (
     <div className="flex max-w-64 flex-col gap-1">
@@ -254,7 +493,9 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
           <span className="min-w-0 flex-1 truncate" title={file.name}>
             {file.name}
           </span>
-          {(file.kind === "image" || file.kind === "pdf") && (
+          {(file.kind === "image" ||
+            file.kind === "pdf" ||
+            file.kind === "office") && (
             <Button
               type="button"
               variant="link"
@@ -273,48 +514,20 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
             size="sm"
             className="h-5 px-0 text-xs"
             aria-label={`下载 ${file.name}`}
-            onClick={() => void downloadAttachment(file)}
+            onClick={() => {
+              void downloadAttachment(file, token).catch(() => {
+                toastError("附件下载失败，请重试");
+              });
+            }}
           >
             <Download className="size-3" />
             下载
           </Button>
         </div>
       ))}
-      <Dialog
-        open={preview !== null}
-        onOpenChange={(open) => {
-          if (!open) setPreview(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-4xl">
-          <DialogTitle className="truncate pr-8">
-            {preview?.name ?? "附件预览"}
-          </DialogTitle>
-          {preview?.kind === "image" ? (
-            <img
-              src={preview.url}
-              alt={preview.name}
-              className="max-h-[70vh] w-full object-contain"
-            />
-          ) : preview ? (
-            <iframe
-              src={preview.url}
-              title={preview.name}
-              className="h-[70vh] w-full rounded border"
-            />
-          ) : null}
-          {preview && (
-            <a
-              href={preview.url}
-              target="_blank"
-              rel="noreferrer"
-              className="text-primary text-xs underline-offset-4 hover:underline"
-            >
-              在新窗口打开
-            </a>
-          )}
-        </DialogContent>
-      </Dialog>
+      {preview && (
+        <AttachmentPreview file={preview} onClose={() => setPreview(null)} />
+      )}
     </div>
   );
 }

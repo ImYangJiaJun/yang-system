@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as XLSX from "xlsx";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
@@ -126,6 +127,36 @@ function stubBatchApi(options: StubOptions = {}): Call[] {
         return jsonResponse({
           code: 0,
           data: { username: "alice" },
+        });
+      }
+      if (url.pathname === "/api/v1/feishu/batch-approval/attachments") {
+        const name = url.searchParams.get("name") ?? "";
+        if (name.endsWith(".xlsx")) {
+          const workbook = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(
+            workbook,
+            XLSX.utils.aoa_to_sheet([
+              ["项目", "金额"],
+              ["差旅", "100"],
+            ]),
+            "明细",
+          );
+          return new Response(
+            XLSX.write(workbook, { type: "array", bookType: "xlsx" }),
+            {
+              headers: {
+                "content-type":
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              },
+            },
+          );
+        }
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: {
+            "content-type": name.endsWith(".pdf")
+              ? "application/pdf"
+              : "image/png",
+          },
         });
       }
       if (url.pathname === "/api/v1/feishu/batch-approval/tasks") {
@@ -404,8 +435,8 @@ describe("BatchApprovalPage", () => {
       screen.getByRole("button", { name: "预览 凭证.png" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "预览 明细.xlsx" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "预览 明细.xlsx" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "下载 明细.xlsx" }),
     ).toBeInTheDocument();
@@ -414,9 +445,43 @@ describe("BatchApprovalPage", () => {
     await user.click(screen.getByRole("button", { name: "预览 发票.pdf" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByTitle("发票.pdf")).toBeInTheDocument();
+    const frame = await within(dialog).findByTitle("发票.pdf");
+    await waitFor(() => {
+      expect(frame.getAttribute("src")).toMatch(/^blob:/);
+    });
     expect(
-      within(dialog).getByRole("link", { name: "在新窗口打开" }),
-    ).toHaveAttribute("href", "https://files.example.com/发票.pdf");
+      within(dialog).getByRole("link", { name: "下载附件" }),
+    ).toHaveAttribute("download", "发票.pdf");
+  });
+
+  it("Excel 附件在弹窗内解析为表格预览", async () => {
+    const attachmentTask = {
+      ...TASKS[0],
+      form_fields: [
+        {
+          name: "明细",
+          value: ["https://files.example.com/明细.xlsx"],
+          field_type: "attachmentV2",
+          ext: "'明细.xlsx'",
+        },
+      ],
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [attachmentTask], truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "预览 明细.xlsx" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("差旅")).toBeInTheDocument();
+    expect(within(dialog).getByText("金额")).toBeInTheDocument();
+    expect(within(dialog).getByText("100")).toBeInTheDocument();
   });
 
   it("凭证失效时显示重新授权入口", async () => {
