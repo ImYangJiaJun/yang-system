@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { Table, type TableColumnsType } from "antd";
-import { Inbox, RefreshCw } from "lucide-react";
+import { Download, Eye, Inbox, RefreshCw } from "lucide-react";
 
 import { useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { formatProductDateTime } from "@/shared/lib/product-locale";
 import { useToast } from "@/shared/lib/toast";
@@ -25,6 +26,7 @@ import {
   type BatchApprovalAction,
   type BatchJobItem,
   type BatchTask,
+  type BatchTaskFormField,
 } from "../batch-approval-api";
 import {
   BatchActionDialog,
@@ -92,10 +94,231 @@ function fieldValueText(value: unknown): string {
   return String(value);
 }
 
+type AttachmentKind = "image" | "pdf" | "office" | "other";
+
+type AttachmentFile = {
+  name: string;
+  url: string;
+  kind: AttachmentKind;
+};
+
+function attachmentNames(ext: unknown): string[] {
+  if (Array.isArray(ext)) {
+    return ext.filter((item): item is string => typeof item === "string");
+  }
+  if (typeof ext !== "string") return [];
+  const text = ext.trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (item): item is string => typeof item === "string",
+        );
+      }
+    } catch {
+      // 不是 JSON，继续按飞书的单引号列表解析。
+    }
+  }
+  const quoted = [...text.matchAll(/'([^']*)'/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+  if (quoted.length > 0) return quoted;
+  return text
+    .split(",")
+    .map((item) => item.trim().replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
+}
+
+function attachmentObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const hasUrl =
+    typeof record.url === "string" || typeof record.tmp_url === "string";
+  const hasToken = typeof record.file_token === "string";
+  const hasName =
+    typeof record.name === "string" || typeof record.file_name === "string";
+  return hasUrl || hasToken || hasName ? record : null;
+}
+
+function attachmentUrls(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value
+      .split(/,\s*(?=https?:\/\/)/)
+      .map((item) => item.trim())
+      .filter((item) => /^https?:\/\//i.test(item));
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(attachmentUrls);
+  }
+  const record = attachmentObject(value);
+  if (!record) return [];
+  const url = record.url ?? record.tmp_url;
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? [url] : [];
+}
+
+function fileKind(name: string, url: string): AttachmentKind {
+  const path = (() => {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url;
+    }
+  })();
+  const extension = `${name} ${path}`
+    .toLowerCase()
+    .match(/\.([a-z0-9]+)(?:\s|$)/)?.[1];
+  if (
+    extension &&
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"].includes(
+      extension,
+    )
+  ) {
+    return "image";
+  }
+  if (extension === "pdf") return "pdf";
+  if (extension && ["xls", "xlsx", "csv"].includes(extension)) return "office";
+  return "other";
+}
+
+function urlFileName(url: string): string {
+  try {
+    const segment = new URL(url).pathname.split("/").filter(Boolean).pop();
+    return segment ? decodeURIComponent(segment) : "";
+  } catch {
+    return "";
+  }
+}
+
+function attachmentsOf(field: BatchTaskFormField): AttachmentFile[] {
+  const fieldType = (field.fieldType ?? "").toLowerCase();
+  const urls = attachmentUrls(field.value);
+  if (urls.length === 0) return [];
+  const looksLikeAttachment =
+    fieldType.includes("attachment") ||
+    fieldType.includes("image") ||
+    (Array.isArray(field.value) &&
+      field.value.some((item) => attachmentObject(item) !== null));
+  if (!looksLikeAttachment) return [];
+
+  const names = attachmentNames(field.ext);
+  return urls.map((url, index) => {
+    const name = names[index] || urlFileName(url) || `附件 ${index + 1}`;
+    return {
+      name,
+      url,
+      kind:
+        fieldType.includes("image") && !/\.[a-z0-9]+$/i.test(name)
+          ? "image"
+          : fileKind(name, url),
+    };
+  });
+}
+
+async function downloadAttachment(file: AttachmentFile): Promise<void> {
+  try {
+    const response = await fetch(file.url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = file.name;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch {
+    window.open(file.url, "_blank", "noopener,noreferrer");
+  }
+}
+
+function AttachmentCell({ files }: { files: AttachmentFile[] }) {
+  const [preview, setPreview] = useState<AttachmentFile | null>(null);
+  return (
+    <div className="flex max-w-64 flex-col gap-1">
+      {files.map((file, index) => (
+        <div
+          key={`${file.url}-${index}`}
+          className="flex items-center gap-1 rounded border px-1.5 py-1 text-xs"
+        >
+          <span className="min-w-0 flex-1 truncate" title={file.name}>
+            {file.name}
+          </span>
+          {(file.kind === "image" || file.kind === "pdf") && (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-5 px-0 text-xs"
+              aria-label={`预览 ${file.name}`}
+              onClick={() => setPreview(file)}
+            >
+              <Eye className="size-3" />
+              预览
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-5 px-0 text-xs"
+            aria-label={`下载 ${file.name}`}
+            onClick={() => void downloadAttachment(file)}
+          >
+            <Download className="size-3" />
+            下载
+          </Button>
+        </div>
+      ))}
+      <Dialog
+        open={preview !== null}
+        onOpenChange={(open) => {
+          if (!open) setPreview(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-4xl">
+          <DialogTitle className="truncate pr-8">
+            {preview?.name ?? "附件预览"}
+          </DialogTitle>
+          {preview?.kind === "image" ? (
+            <img
+              src={preview.url}
+              alt={preview.name}
+              className="max-h-[70vh] w-full object-contain"
+            />
+          ) : preview ? (
+            <iframe
+              src={preview.url}
+              title={preview.name}
+              className="h-[70vh] w-full rounded border"
+            />
+          ) : null}
+          {preview && (
+            <a
+              href={preview.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary text-xs underline-offset-4 hover:underline"
+            >
+              在新窗口打开
+            </a>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function formFieldText(task: BatchTask, name: string): string {
   return task.formFields
     .filter((field) => field.name === name)
-    .map((field) => fieldValueText(field.value))
+    .map((field) => {
+      const files = attachmentsOf(field);
+      return files.length > 0
+        ? files.map((file) => file.name).join("、")
+        : fieldValueText(field.value);
+    })
     .filter(Boolean)
     .join("；");
 }
@@ -316,11 +539,19 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
       filterSearch: true,
       onFilter: (value, task) =>
         (formFieldText(task, name) || "—") === String(value),
-      render: (_, task) => (
-        <span className="block max-w-48 truncate text-xs">
-          {formFieldText(task, name) || "—"}
-        </span>
-      ),
+      render: (_, task) => {
+        const files = task.formFields
+          .filter((field) => field.name === name)
+          .flatMap(attachmentsOf);
+        if (files.length > 0) {
+          return <AttachmentCell files={files} />;
+        }
+        return (
+          <span className="block max-w-48 truncate text-xs">
+            {formFieldText(task, name) || "—"}
+          </span>
+        );
+      },
     });
   }
 

@@ -164,6 +164,10 @@ export type BatchTaskGroup = {
 export type BatchTaskFormField = {
   name: string;
   value: unknown;
+  /// 飞书表单控件类型（如 attachmentV2、imageV2）。
+  fieldType: string | null;
+  /// 飞书附件控件的原文件名列表等扩展信息。
+  ext: unknown;
 };
 
 export type BatchTaskTimelineEntry = {
@@ -482,6 +486,8 @@ function parseDetailForm(value: unknown): BatchTaskFormField[] {
           : record && "field_value" in record
             ? record.field_value
             : raw,
+      fieldType: firstText(record, "field_type", "type"),
+      ext: record && "ext" in record ? record.ext : null,
     };
   });
 }

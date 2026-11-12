@@ -146,7 +146,14 @@ fn form_fields(detail: &Value) -> Vec<Value> {
                 .or_else(|| row.get("field_value"))
                 .cloned()
                 .unwrap_or_else(|| row.clone());
-            serde_json::json!({ "name": name, "value": value })
+            let field_type = row.get("type").and_then(Value::as_str).unwrap_or("");
+            let ext = row.get("ext").cloned().unwrap_or(Value::Null);
+            serde_json::json!({
+                "name": name,
+                "value": value,
+                "field_type": field_type,
+                "ext": ext,
+            })
         })
         .collect()
 }
@@ -243,6 +250,8 @@ mod tests {
         assert_eq!(fields[0]["value"]["text"], "100");
         assert_eq!(fields[1]["name"], "部门");
         assert_eq!(fields[1]["value"], "研发");
+        assert_eq!(fields[0]["field_type"], "");
+        assert_eq!(fields[0]["ext"], serde_json::Value::Null);
     }
 
     #[test]

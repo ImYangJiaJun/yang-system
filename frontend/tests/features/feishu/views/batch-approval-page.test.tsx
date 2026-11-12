@@ -351,6 +351,63 @@ describe("BatchApprovalPage", () => {
     expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
   });
 
+  it("附件字段展示文件名，图片和 PDF 可预览，Excel 可下载", async () => {
+    const attachmentTask = {
+      ...TASKS[0],
+      form_fields: [
+        {
+          name: "发票",
+          value: ["https://files.example.com/发票.pdf"],
+          field_type: "attachmentV2",
+          ext: "'发票.pdf'",
+        },
+        {
+          name: "凭证",
+          value: ["https://files.example.com/凭证.png"],
+          field_type: "imageV2",
+          ext: "'凭证.png'",
+        },
+        {
+          name: "明细",
+          value: ["https://files.example.com/明细.xlsx"],
+          field_type: "attachmentV2",
+          ext: "'明细.xlsx'",
+        },
+      ],
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [attachmentTask], truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    expect(await screen.findByText("发票.pdf")).toBeInTheDocument();
+    expect(screen.getByText("凭证.png")).toBeInTheDocument();
+    expect(screen.getByText("明细.xlsx")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "预览 发票.pdf" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "预览 凭证.png" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "预览 明细.xlsx" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载 明细.xlsx" }),
+    ).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "预览 发票.pdf" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByTitle("发票.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("link", { name: "在新窗口打开" }),
+    ).toHaveAttribute("href", "https://files.example.com/发票.pdf");
+  });
+
   it("凭证失效时显示重新授权入口", async () => {
     stubBatchApi({
       tasksResponse: jsonResponse(
