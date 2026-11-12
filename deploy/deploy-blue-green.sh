@@ -653,11 +653,23 @@ preflight_release_data() {
   present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='feishu_user_token'") || die "发布前预检查询失败"
   require_integer "feishu_user_token 表存在性" "$present" || die "发布前预检查询结果异常"
   if [ "$present" = "1" ]; then
-    n=$(mysql_scalar "SELECT COUNT(*) FROM \`${db}\`.\`feishu_user_token\`") || die "发布前预检查询失败"
-    require_integer "feishu_user_token 行数" "$n" || die "发布前预检查询结果异常"
-    [ "$n" -le 1 ] || die "feishu_user_token 有 ${n} 行；新版本 slot 唯一索引需要至多一行。
+    has_slot=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${db}' AND table_name='feishu_user_token' AND column_name='slot'") || die "发布前预检查询失败"
+    require_integer "feishu_user_token.slot 列存在性" "$has_slot" || die "发布前预检查询结果异常"
+    if [ "$has_slot" = "1" ]; then
+      # 新版本允许 slot=1（审批派发）与 slot=2（审批回写）各一行，
+      # 真正会阻止唯一索引建立的是重复 slot，而不是总行数。
+      n=$(mysql_scalar "SELECT COUNT(*) FROM (SELECT slot FROM \`${db}\`.\`feishu_user_token\` GROUP BY slot HAVING COUNT(*) > 1) AS dup") || die "发布前预检查询失败"
+      require_integer "feishu_user_token 重复 slot 数" "$n" || die "发布前预检查询结果异常"
+      [ "$n" = "0" ] || die "feishu_user_token 有 ${n} 个重复 slot；新版本 slot 唯一索引会拒绝启动。
+  请先在维护窗口按 slot 保留最新一行、删除同 slot 的多余行（DB 写操作需单独批准），再重新部署。
+  预检 SQL：SELECT slot, COUNT(*) FROM \`${db}\`.\`feishu_user_token\` GROUP BY slot HAVING COUNT(*) > 1;"
+    else
+      n=$(mysql_scalar "SELECT COUNT(*) FROM \`${db}\`.\`feishu_user_token\`") || die "发布前预检查询失败"
+      require_integer "feishu_user_token 行数" "$n" || die "发布前预检查询结果异常"
+      [ "$n" -le 1 ] || die "feishu_user_token 有 ${n} 行；旧表升级前需要至多一行。
   请先在维护窗口保留最新一行、删除多余行（DB 写操作需单独批准），再重新部署。
   预检 SQL：SELECT id, authorized_at FROM \`${db}\`.\`feishu_user_token\` ORDER BY authorized_at DESC;"
+    fi
   fi
 
   present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='feishu_approval_task_applicant'") || die "发布前预检查询失败"
