@@ -327,6 +327,23 @@ describe("BatchApprovalPage", () => {
     expect(screen.getByLabelText("选择 报销单 A")).not.toBeDisabled();
   });
 
+  it("审批定义侧栏可收起，给表格腾出空间", async () => {
+    stubBatchApi();
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "收起审批定义侧栏" }),
+    );
+    expect(screen.queryByText("全部待办")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "展开审批定义侧栏" }),
+    );
+    expect(screen.getByText("全部待办")).toBeInTheDocument();
+  });
+
   it("勾选任务 → 同意确认 → 创建 job 并轮询逐条结果", async () => {
     const calls = stubBatchApi({
       jobResponses: {
@@ -641,7 +658,7 @@ describe("BatchApprovalPage", () => {
     ).toHaveTextContent("3 行");
     expect(screen.getByText("首行：笔记本 · 4500")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "展开明细" }),
+      document.querySelector(".ant-table-row-expand-icon"),
     ).toBeInTheDocument();
 
     const user = userEvent.setup();

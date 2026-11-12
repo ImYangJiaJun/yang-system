@@ -18,7 +18,6 @@ import {
 } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -939,10 +938,6 @@ function taskNodes(task: BatchTask): string[] {
 function buildTaskColumns(
   tasks: BatchTask[],
   view?: BatchViewConfig,
-  expand?: {
-    isExpanded: (taskId: string) => boolean;
-    onToggle: (taskId: string) => void;
-  },
 ): TableColumnsType<BatchTask> {
   // 勾选、标题、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
   const fixedColumns: TableColumnsType<BatchTask> = [
@@ -957,43 +952,16 @@ function buildTaskColumns(
       onFilter: (value, task) => task.title === String(value),
       render: (_, task) => {
         const operability = taskOperability(task);
-        const expandable = task.formFields.some(
-          (field) => isDetailField(field) && field.id,
-        );
         return (
-          <div className="flex items-start gap-1.5">
-            {expandable && expand && (
-              <button
-                type="button"
-                aria-label={
-                  expand.isExpanded(task.taskId) ? "收起明细" : "展开明细"
-                }
-                aria-expanded={expand.isExpanded(task.taskId)}
-                className="mt-px flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  expand.onToggle(task.taskId);
-                }}
-              >
-                <ChevronDown
-                  className={
-                    expand.isExpanded(task.taskId)
-                      ? "size-4 rotate-180 transition-transform"
-                      : "size-4 transition-transform"
-                  }
-                />
-              </button>
-            )}
-            <div className="min-w-0 flex-1">
-              <span className="block truncate font-medium" title={task.title}>
-                {task.title}
+          <div className="max-w-56">
+            <span className="block truncate font-medium" title={task.title}>
+              {task.title}
+            </span>
+            {!operability.operable && (
+              <span className="block text-xs text-muted-foreground">
+                {operability.reason}
               </span>
-              {!operability.operable && (
-                <span className="block text-xs text-muted-foreground">
-                  {operability.reason}
-                </span>
-              )}
-            </div>
+            )}
           </div>
         );
       },
@@ -1430,7 +1398,7 @@ function TaskDetailSection({
         </p>
       ) : (
         !error && (
-          <div className="overflow-hidden rounded-lg border bg-white">
+          <div className="overflow-hidden rounded-sm border bg-white">
             <div
               className="grid border-b bg-muted/60 text-xs font-medium text-muted-foreground"
               style={{ gridTemplateColumns: gridTemplate, minWidth }}
@@ -1558,22 +1526,9 @@ function DefinitionTable({
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
 }) {
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-  const toggleExpanded = useCallback(
-    (taskId: string) =>
-      setExpandedKeys((previous) =>
-        previous.includes(taskId)
-          ? previous.filter((key) => key !== taskId)
-          : [...previous, taskId],
-      ),
-    [],
-  );
   const baseColumns = useMemo(
-    () =>
-      buildTaskColumns(tasks, view, {
-        isExpanded: (taskId) => expandedKeys.includes(taskId),
-        onToggle: toggleExpanded,
-      }),
-    [tasks, view, expandedKeys, toggleExpanded],
+    () => buildTaskColumns(tasks, view),
+    [tasks, view],
   );
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const columns = useMemo(
@@ -1609,6 +1564,10 @@ function DefinitionTable({
   const allExpanded =
     expandableTasks.length > 0 &&
     expandableTasks.every((task) => expandedKeys.includes(task.taskId));
+  const columnsWithExpand = useMemo(
+    () => [Table.EXPAND_COLUMN, ...columns] as TableColumnsType<BatchTask>,
+    [columns],
+  );
 
   return (
     <ConfigProvider locale={zhCN}>
@@ -1637,11 +1596,11 @@ function DefinitionTable({
         size="small"
         bordered
         tableLayout="fixed"
-        columns={columns}
+        columns={columnsWithExpand}
         components={TABLE_COMPONENTS}
         dataSource={tasks}
         expandable={{
-          showExpandColumn: false,
+          columnWidth: 44,
           expandedRowKeys: expandedKeys,
           expandedRowClassName: () => "batch-expanded-row",
           onExpandedRowsChange: (keys) =>
@@ -1707,6 +1666,7 @@ export default function BatchApprovalPage() {
   const [authorizing, setAuthorizing] = useState(false);
 
   const [definitionGroup, setDefinitionGroup] = useState("all");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selected, setSelected] = useState<SelectedMap>({});
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
   const [actionError, setActionError] = useState("");
@@ -2010,47 +1970,78 @@ export default function BatchApprovalPage() {
         <div className="flex flex-1 flex-col gap-4 md:flex-row">
           <aside
             aria-label="审批定义"
-            className="w-full shrink-0 space-y-1 md:w-60"
+            className={
+              sidebarCollapsed
+                ? "w-full shrink-0 md:w-10"
+                : "w-full shrink-0 space-y-1 md:w-60"
+            }
           >
-            <p className="px-2 text-xs font-medium text-muted-foreground">
-              按审批定义
-            </p>
-            <button
-              type="button"
-              aria-pressed={definitionGroup === "all"}
-              className={
-                definitionGroup === "all"
-                  ? "flex w-full items-center justify-between rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
-                  : "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
-              }
-              onClick={() => setDefinitionGroup("all")}
-            >
-              <span>全部待办</span>
-              <span className="tabular-nums">{tasks.length}</span>
-            </button>
-            {groups.map((group) => (
-              <button
-                key={group.key}
-                type="button"
-                aria-pressed={definitionGroup === group.key}
-                className={
-                  definitionGroup === group.key
-                    ? "flex w-full items-center justify-between gap-2 rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
-                    : "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
-                }
-                onClick={() => setDefinitionGroup(group.key)}
+            {sidebarCollapsed ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full px-0 md:w-10"
+                aria-label="展开审批定义侧栏"
+                title="展开审批定义侧栏"
+                onClick={() => setSidebarCollapsed(false)}
               >
-                <span className="min-w-0">
-                  <span className="block truncate">{group.name}</span>
-                  {group.code && (
-                    <span className="block truncate text-xs opacity-70">
-                      {group.code}
+                <ChevronRight className="size-4" />
+              </Button>
+            ) : (
+              <>
+                <div className="flex items-center justify-between px-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    按审批定义
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5"
+                    aria-label="收起审批定义侧栏"
+                    title="收起审批定义侧栏"
+                    onClick={() => setSidebarCollapsed(true)}
+                  >
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                </div>
+                <button
+                  type="button"
+                  aria-pressed={definitionGroup === "all"}
+                  className={
+                    definitionGroup === "all"
+                      ? "flex w-full items-center justify-between rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
+                      : "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
+                  }
+                  onClick={() => setDefinitionGroup("all")}
+                >
+                  <span>全部待办</span>
+                  <span className="tabular-nums">{tasks.length}</span>
+                </button>
+                {groups.map((group) => (
+                  <button
+                    key={group.key}
+                    type="button"
+                    aria-pressed={definitionGroup === group.key}
+                    className={
+                      definitionGroup === group.key
+                        ? "flex w-full items-center justify-between gap-2 rounded-md bg-primary/10 px-3 py-2 text-left text-sm text-primary"
+                        : "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted"
+                    }
+                    onClick={() => setDefinitionGroup(group.key)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate">{group.name}</span>
+                      {group.code && (
+                        <span className="block truncate text-xs opacity-70">
+                          {group.code}
+                        </span>
+                      )}
                     </span>
-                  )}
-                </span>
-                <span className="tabular-nums">{group.tasks.length}</span>
-              </button>
-            ))}
+                    <span className="tabular-nums">{group.tasks.length}</span>
+                  </button>
+                ))}
+              </>
+            )}
           </aside>
 
           <section className="min-w-0 flex-1 space-y-3">
