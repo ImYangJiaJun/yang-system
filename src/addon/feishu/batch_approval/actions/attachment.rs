@@ -84,7 +84,15 @@ pub(super) async fn handle(
         tokio::time::sleep(Duration::from_secs(600)).await;
         let _ = tokio::fs::remove_file(cleanup).await;
     });
-    Ok(ResponseBody::download(path, filename))
+    let inline = matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" | "pdf"
+    );
+    if inline {
+        Ok(ResponseBody::preview(path))
+    } else {
+        Ok(ResponseBody::download(path, filename))
+    }
 }
 
 /// 只允许飞书文件域，避免把这个端点变成任意 URL 的 SSRF 通道。
