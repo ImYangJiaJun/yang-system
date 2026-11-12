@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type HTMLAttributes,
-  type MouseEventHandler,
   type ReactNode,
   type SyntheticEvent,
 } from "react";
@@ -940,6 +939,10 @@ function taskNodes(task: BatchTask): string[] {
 function buildTaskColumns(
   tasks: BatchTask[],
   view?: BatchViewConfig,
+  expand?: {
+    isExpanded: (taskId: string) => boolean;
+    onToggle: (taskId: string) => void;
+  },
 ): TableColumnsType<BatchTask> {
   // 勾选、标题、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
   const fixedColumns: TableColumnsType<BatchTask> = [
@@ -954,16 +957,43 @@ function buildTaskColumns(
       onFilter: (value, task) => task.title === String(value),
       render: (_, task) => {
         const operability = taskOperability(task);
+        const expandable = task.formFields.some(
+          (field) => isDetailField(field) && field.id,
+        );
         return (
-          <div className="max-w-56">
-            <span className="block truncate font-medium" title={task.title}>
-              {task.title}
-            </span>
-            {!operability.operable && (
-              <span className="block text-xs text-muted-foreground">
-                {operability.reason}
-              </span>
+          <div className="flex items-start gap-1.5">
+            {expandable && expand && (
+              <button
+                type="button"
+                aria-label={
+                  expand.isExpanded(task.taskId) ? "收起明细" : "展开明细"
+                }
+                aria-expanded={expand.isExpanded(task.taskId)}
+                className="mt-px flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  expand.onToggle(task.taskId);
+                }}
+              >
+                <ChevronDown
+                  className={
+                    expand.isExpanded(task.taskId)
+                      ? "size-4 rotate-180 transition-transform"
+                      : "size-4 transition-transform"
+                  }
+                />
+              </button>
             )}
+            <div className="min-w-0 flex-1">
+              <span className="block truncate font-medium" title={task.title}>
+                {task.title}
+              </span>
+              {!operability.operable && (
+                <span className="block text-xs text-muted-foreground">
+                  {operability.reason}
+                </span>
+              )}
+            </div>
           </div>
         );
       },
@@ -1279,42 +1309,7 @@ function ResizableHeaderCell({
   );
 }
 
-/// 展开明细的入口放在勾选列右侧，只在真的有明细的任务上出现。
-function TaskExpandIcon({
-  type,
-  expanded,
-  expandable,
-  onClick,
-}: {
-  type: "row" | "all";
-  expanded: boolean;
-  expandable: boolean;
-  onClick: MouseEventHandler<HTMLElement>;
-}) {
-  if (type !== "row" || !expandable) return null;
-  return (
-    <button
-      type="button"
-      aria-label={expanded ? "收起明细" : "展开明细"}
-      aria-expanded={expanded}
-      className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-      onClick={onClick}
-    >
-      <ChevronDown
-        className={
-          expanded
-            ? "size-4 rotate-180 transition-transform"
-            : "size-4 transition-transform"
-        }
-      />
-    </button>
-  );
-}
-
-const TABLE_COMPONENTS = {
-  header: { cell: ResizableHeaderCell },
-  ExpandIcon: TaskExpandIcon,
-};
+const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
 
 const DETAIL_PAGE_SIZE = 50;
 const DETAIL_ROW_HEIGHT = 34;
@@ -1562,9 +1557,23 @@ function DefinitionTable({
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
 }) {
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const toggleExpanded = useCallback(
+    (taskId: string) =>
+      setExpandedKeys((previous) =>
+        previous.includes(taskId)
+          ? previous.filter((key) => key !== taskId)
+          : [...previous, taskId],
+      ),
+    [],
+  );
   const baseColumns = useMemo(
-    () => buildTaskColumns(tasks, view),
-    [tasks, view],
+    () =>
+      buildTaskColumns(tasks, view, {
+        isExpanded: (taskId) => expandedKeys.includes(taskId),
+        onToggle: toggleExpanded,
+      }),
+    [tasks, view, expandedKeys, toggleExpanded],
   );
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const columns = useMemo(
@@ -1590,15 +1599,10 @@ function DefinitionTable({
       }),
     [baseColumns, columnWidths],
   );
-  const columnsWithExpand = useMemo(
-    () => [Table.EXPAND_COLUMN, ...columns] as TableColumnsType<BatchTask>,
-    [columns],
-  );
   const selectedRowKeys = tasks
     .filter((task) => selected[task.taskId])
     .map((task) => task.taskId);
 
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const expandableTasks = tasks.filter((task) =>
     task.formFields.some((field) => isDetailField(field) && field.id),
   );
@@ -1633,11 +1637,11 @@ function DefinitionTable({
         size="small"
         bordered
         tableLayout="fixed"
-        columns={columnsWithExpand}
+        columns={columns}
         components={TABLE_COMPONENTS}
         dataSource={tasks}
         expandable={{
-          columnWidth: 44,
+          showExpandColumn: false,
           expandedRowKeys: expandedKeys,
           expandedRowClassName: () => "batch-expanded-row",
           onExpandedRowsChange: (keys) =>
