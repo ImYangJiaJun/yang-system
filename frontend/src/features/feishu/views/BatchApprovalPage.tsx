@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type HTMLAttributes,
+  type SyntheticEvent,
+} from "react";
 import { Link, useNavigate } from "react-router";
-import { Table, type TableColumnsType } from "antd";
+import { ConfigProvider, Table, type TableColumnsType } from "antd";
+import zhCN from "antd/locale/zh_CN";
 import { Download, Eye, Inbox, RefreshCw } from "lucide-react";
+import { Resizable, type ResizeCallbackData } from "react-resizable";
 
 import { useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
@@ -310,15 +319,48 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
   );
 }
 
+function isDescriptionField(field: BatchTaskFormField): boolean {
+  const fieldType = (field.fieldType ?? "").toLowerCase();
+  return ["text", "description", "explanation", "hint"].includes(fieldType);
+}
+
+function dateText(value: string): string {
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? value : formatProductDateTime(timestamp);
+}
+
+function fieldDisplayText(field: BatchTaskFormField): string {
+  const files = attachmentsOf(field);
+  if (files.length > 0) return files.map((file) => file.name).join("、");
+
+  const fieldType = (field.fieldType ?? "").toLowerCase();
+  if (fieldType === "date" && typeof field.value === "string") {
+    return dateText(field.value);
+  }
+  if (fieldType === "dateinterval" && field.value) {
+    const record =
+      typeof field.value === "object" && !Array.isArray(field.value)
+        ? (field.value as Record<string, unknown>)
+        : null;
+    const start = record?.start ?? record?.start_time;
+    const end = record?.end ?? record?.end_time;
+    if (typeof start === "string" && typeof end === "string") {
+      return `${dateText(start)} 至 ${dateText(end)}`;
+    }
+  }
+  if (fieldType === "fieldlist" && Array.isArray(field.value)) {
+    return `明细 ${field.value.length} 行`;
+  }
+  if (fieldType === "address" && typeof field.value === "string") {
+    return field.value.split("/").join(" / ");
+  }
+  return fieldValueText(field.value);
+}
+
 function formFieldText(task: BatchTask, name: string): string {
   return task.formFields
-    .filter((field) => field.name === name)
-    .map((field) => {
-      const files = attachmentsOf(field);
-      return files.length > 0
-        ? files.map((file) => file.name).join("、")
-        : fieldValueText(field.value);
-    })
+    .filter((field) => field.name === name && !isDescriptionField(field))
+    .map(fieldDisplayText)
     .filter(Boolean)
     .join("；");
 }
@@ -343,10 +385,9 @@ function fieldNames(tasks: BatchTask[]): string[] {
   const names: string[] = [];
   for (const task of tasks) {
     for (const field of task.formFields) {
-      if (!seen.has(field.name)) {
-        seen.add(field.name);
-        names.push(field.name);
-      }
+      if (isDescriptionField(field) || seen.has(field.name)) continue;
+      seen.add(field.name);
+      names.push(field.name);
     }
   }
   return names;
@@ -411,7 +452,11 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
             {ordered.map((node) => {
               const mine = node === task.myNodeName;
               return (
-                <StatusBadge key={node} tone={mine ? "info" : "neutral"}>
+                <StatusBadge
+                  key={node}
+                  tone={mine ? "info" : "neutral"}
+                  title={node}
+                >
                   {node}
                   {mine ? "（我的节点）" : ""}
                 </StatusBadge>
@@ -445,8 +490,13 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
       onFilter: (value, task) => task.definitionName === String(value),
       render: (_, task) => (
         <div className="max-w-52">
-          <span className="block truncate">{task.definitionName}</span>
-          <span className="block truncate text-xs text-muted-foreground">
+          <span className="block truncate" title={task.definitionName}>
+            {task.definitionName}
+          </span>
+          <span
+            className="block truncate text-xs text-muted-foreground"
+            title={task.definitionCode || "—"}
+          >
             {task.definitionCode || "—"}
           </span>
         </div>
@@ -479,7 +529,11 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
         ),
       filters: uniqueFilters(tasks.map((task) => task.initiatorName ?? "—")),
       onFilter: (value, task) => (task.initiatorName ?? "—") === String(value),
-      render: (_, task) => task.initiatorName ?? "—",
+      render: (_, task) => (
+        <span title={task.initiatorName ?? "—"}>
+          {task.initiatorName ?? "—"}
+        </span>
+      ),
     },
     {
       title: "摘要",
@@ -491,11 +545,14 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
       filterSearch: true,
       onFilter: (value, task) =>
         (task.summaries.join("；") || "—") === String(value),
-      render: (_, task) => (
-        <span className="block max-w-72 truncate text-xs">
-          {task.summaries.join("；") || "—"}
-        </span>
-      ),
+      render: (_, task) => {
+        const summary = task.summaries.join("；") || "—";
+        return (
+          <span className="block max-w-72 truncate text-xs" title={summary}>
+            {summary}
+          </span>
+        );
+      },
     },
     {
       title: "提交时间",
@@ -506,7 +563,9 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
       filters: uniqueFilters(tasks.map((task) => dateKey(task.createdAt))),
       onFilter: (value, task) => dateKey(task.createdAt) === String(value),
       render: (_, task) => (
-        <span className="tabular-nums">{timeText(task.createdAt)}</span>
+        <span className="tabular-nums" title={timeText(task.createdAt)}>
+          {timeText(task.createdAt)}
+        </span>
       ),
     },
     {
@@ -546,9 +605,10 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
         if (files.length > 0) {
           return <AttachmentCell files={files} />;
         }
+        const text = formFieldText(task, name) || "—";
         return (
-          <span className="block max-w-48 truncate text-xs">
-            {formFieldText(task, name) || "—"}
+          <span className="block max-w-48 truncate text-xs" title={text}>
+            {text}
           </span>
         );
       },
@@ -557,6 +617,38 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
 
   return columns;
 }
+
+type ResizableHeaderCellProps = HTMLAttributes<HTMLTableCellElement> & {
+  width?: number;
+  onResize?: (event: SyntheticEvent, data: ResizeCallbackData) => void;
+};
+
+function ResizableHeaderCell({
+  width,
+  onResize,
+  ...rest
+}: ResizableHeaderCellProps) {
+  if (width === undefined) return <th {...rest} />;
+  return (
+    <Resizable
+      width={width}
+      height={0}
+      onResize={onResize}
+      draggableOpts={{ enableUserSelectHack: false }}
+      handle={
+        <span
+          className="absolute top-0 right-0 z-10 h-full w-2 cursor-col-resize select-none"
+          title="拖动调整列宽"
+          onClick={(event) => event.stopPropagation()}
+        />
+      }
+    >
+      <th {...rest} style={{ ...rest.style, position: "relative" }} />
+    </Resizable>
+  );
+}
+
+const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
 
 function DefinitionTable({
   tasks,
@@ -567,41 +659,69 @@ function DefinitionTable({
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
 }) {
-  const columns = useMemo(() => buildTaskColumns(tasks), [tasks]);
+  const baseColumns = useMemo(() => buildTaskColumns(tasks), [tasks]);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const columns = useMemo(
+    () =>
+      baseColumns.map((column, index) => {
+        const key = String(column.key ?? index);
+        const width =
+          columnWidths[key] ??
+          (typeof column.width === "number" ? column.width : undefined);
+        return {
+          ...column,
+          width,
+          onHeaderCell: () => ({
+            width,
+            onResize: (_event: SyntheticEvent, data: ResizeCallbackData) => {
+              setColumnWidths((previous) => ({
+                ...previous,
+                [key]: Math.max(100, Math.round(data.size.width)),
+              }));
+            },
+          }),
+        };
+      }),
+    [baseColumns, columnWidths],
+  );
   const selectedRowKeys = tasks
     .filter((task) => selected[task.taskId])
     .map((task) => task.taskId);
 
   return (
-    <Table<BatchTask>
-      rowKey="taskId"
-      size="small"
-      bordered
-      columns={columns}
-      dataSource={tasks}
-      scroll={{ x: "max-content" }}
-      pagination={{
-        pageSize: 20,
-        showSizeChanger: true,
-        hideOnSinglePage: true,
-      }}
-      rowSelection={{
-        selectedRowKeys,
-        preserveSelectedRowKeys: true,
-        getCheckboxProps: (task) => ({
-          disabled: !taskOperability(task).operable,
-          "aria-label": `选择 ${task.title}`,
-        }),
-        onChange: (keys) => {
-          const selectedKeys = new Set(keys.map(String));
-          onSelect(
-            tasks,
-            tasks.filter((task) => selectedKeys.has(task.taskId)),
-          );
-        },
-      }}
-      locale={{ emptyText: "没有符合筛选条件的待办" }}
-    />
+    <ConfigProvider locale={zhCN}>
+      <Table<BatchTask>
+        rowKey="taskId"
+        size="small"
+        bordered
+        tableLayout="fixed"
+        columns={columns}
+        components={TABLE_COMPONENTS}
+        dataSource={tasks}
+        scroll={{ x: "max-content" }}
+        pagination={{
+          pageSize: 20,
+          showSizeChanger: true,
+          hideOnSinglePage: true,
+        }}
+        rowSelection={{
+          selectedRowKeys,
+          preserveSelectedRowKeys: true,
+          getCheckboxProps: (task) => ({
+            disabled: !taskOperability(task).operable,
+            "aria-label": `选择 ${task.title}`,
+          }),
+          onChange: (keys) => {
+            const selectedKeys = new Set(keys.map(String));
+            onSelect(
+              tasks,
+              tasks.filter((task) => selectedKeys.has(task.taskId)),
+            );
+          },
+        }}
+        locale={{ emptyText: "没有符合筛选条件的待办" }}
+      />
+    </ConfigProvider>
   );
 }
 

@@ -242,16 +242,19 @@ mod tests {
     #[test]
     fn form_fields_parse_json_string_and_field_value() {
         let detail = json!({
-            "form": "[{\"name\":\"金额\",\"value\":{\"text\":\"100\"}},{\"label\":\"部门\",\"field_value\":\"研发\"}]"
+            "form": "[{\"name\":\"金额\",\"value\":{\"text\":\"100\"}},{\"label\":\"部门\",\"field_value\":\"研发\"},{\"name\":\"附件\",\"type\":\"attachmentV2\",\"ext\":\"'发票.pdf'\",\"value\":[\"https://files.example.com/a.pdf\"]}]"
         });
         let fields = form_fields(&detail);
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 3);
         assert_eq!(fields[0]["name"], "金额");
         assert_eq!(fields[0]["value"]["text"], "100");
         assert_eq!(fields[1]["name"], "部门");
         assert_eq!(fields[1]["value"], "研发");
         assert_eq!(fields[0]["field_type"], "");
         assert_eq!(fields[0]["ext"], serde_json::Value::Null);
+        assert_eq!(fields[2]["field_type"], "attachmentV2");
+        assert_eq!(fields[2]["ext"], "'发票.pdf'");
+        assert_eq!(fields[2]["value"][0], "https://files.example.com/a.pdf");
     }
 
     #[test]

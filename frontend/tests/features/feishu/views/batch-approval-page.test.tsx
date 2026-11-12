@@ -41,7 +41,9 @@ async function filterColumn(
   );
   const active = confirms[confirms.length - 1] ?? dropdown;
   await user.click(
-    within(active as HTMLElement).getByRole("button", { name: /OK|确定/ }),
+    within(active as HTMLElement).getByRole("button", {
+      name: /OK|确\s*定/,
+    }),
   );
 }
 
@@ -373,6 +375,12 @@ describe("BatchApprovalPage", () => {
           field_type: "attachmentV2",
           ext: "'明细.xlsx'",
         },
+        {
+          name: "说明",
+          value: "请上传发票原件",
+          field_type: "text",
+          ext: null,
+        },
       ],
     };
     stubBatchApi({
@@ -386,6 +394,9 @@ describe("BatchApprovalPage", () => {
     expect(await screen.findByText("发票.pdf")).toBeInTheDocument();
     expect(screen.getByText("凭证.png")).toBeInTheDocument();
     expect(screen.getByText("明细.xlsx")).toBeInTheDocument();
+    expect(screen.queryByText("说明")).not.toBeInTheDocument();
+    expect(screen.queryByText("请上传发票原件")).not.toBeInTheDocument();
+    expect(screen.getAllByTitle("拖动调整列宽").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("button", { name: "预览 发票.pdf" }),
     ).toBeInTheDocument();
