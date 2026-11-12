@@ -46,9 +46,9 @@ export default function SelectIdentityPage() {
       <header className="flex items-center justify-between border-b border-border px-6 py-3">
         <span className="flex items-center gap-2 text-sm font-semibold">
           <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
-            Y
+            易
           </span>
-          YANG System
+          易行
         </span>
         <Button
           variant="ghost"

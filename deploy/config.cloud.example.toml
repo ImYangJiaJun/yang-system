@@ -45,6 +45,7 @@
 # =============================================================================
 
 [app]
+name = "易行"
 # 测试态可用 "test"：它会解掉下面 [email.password_reset].link_base_url 的 https 强制，
 # 让「TLS 边缘还没落地」不再挡住启动（飞书审批的「关联外部选项」官方支持 HTTP，
 # 所以先用 http 联调飞书是可行的）。
@@ -101,7 +102,7 @@ relay = "smtp.example.com"
 username = "replace-with-smtp-username"
 password = "replace-with-smtp-password"
 from_address = "no-reply@example.com"
-from_name = "YANG System"
+from_name = "易行"
 
 # 注册、换绑、登录 MFA 备用、免密登录四类邮箱验证码使用**相互独立**的密钥域：
 # 绝不复用彼此，也不复用 token/step-up/security.totp 的密钥，否则验证码可跨场景重放。

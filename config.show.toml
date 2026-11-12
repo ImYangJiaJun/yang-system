@@ -10,7 +10,7 @@
 [app]
 # 应用名，用于日志与内部标识。不能为空。
 # 默认："yang-system"
-name = "yang-system"
+name = "易行"
 
 # 部署环境：development | test | production。
 # production 强制 observability.metrics_enabled=true，且密码重置链接必须 https。
@@ -219,7 +219,7 @@ from_address = "no-reply@example.com"
 
 # 发件人显示名，1..=100 字符。
 # 必填，无默认值。
-from_name = "YANG System"
+from_name = "易行"
 
 # SMTP 连接与投递超时。
 # 默认：10，允许 1..=30

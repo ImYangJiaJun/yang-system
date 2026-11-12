@@ -4,6 +4,7 @@
 # 环境变量、secret 文件与全部默认值的完整契约见 docs/contracts/CONFIGURATION.md。
 
 [app]
+name = "易行"
 environment = "development"
 
 [authorization]
@@ -48,7 +49,7 @@ relay = "smtp.example.com"
 username = "replace-with-smtp-username"
 password = "replace-with-smtp-password"
 from_address = "no-reply@example.com"
-from_name = "YANG System"
+from_name = "易行"
 
 # 注册、换绑、登录 MFA 备用、免密登录四类邮箱验证码使用相互独立的密钥域：绝不复用彼此，
 # 也不复用 token/step-up/security.totp 的密钥，否则验证码可跨场景重放。

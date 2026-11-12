@@ -251,11 +251,11 @@ export default function AppLayout() {
       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
         <img
           src={dark ? logoDarkUrl : logoLightUrl}
-          alt="YANG System 标识"
+          alt="易行 标识"
           className="size-10 shrink-0"
         />
         <span className="text-sm font-semibold tracking-tight">
-          YANG System 控制台
+          易行
         </span>
       </div>
       <div className="border-b border-border p-2">

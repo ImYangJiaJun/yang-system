@@ -2036,9 +2036,9 @@ export default function BatchApprovalPage() {
       <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/95 px-6 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
-            Y
+            易
           </span>
-          YANG System
+          易行
           <span className="font-normal text-muted-foreground">· 批量审批</span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-sm">

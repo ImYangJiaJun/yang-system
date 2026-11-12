@@ -257,7 +257,7 @@ export default function LoginPage() {
         <div className="max-w-sm space-y-4 px-8 text-center">
           <img
             src={logoLightUrl}
-            alt="YANG System 标识"
+            alt="易行 标识"
             className="mx-auto size-28 dark:hidden"
           />
           <img
@@ -266,7 +266,7 @@ export default function LoginPage() {
             aria-hidden="true"
             className="mx-auto hidden size-28 dark:block"
           />
-          <h1 className="text-3xl font-bold tracking-tight">YANG System</h1>
+          <h1 className="text-3xl font-bold tracking-tight">易行</h1>
           <p className="text-foreground/70">
             统一管理个人账号、平台账号与企业组织。
           </p>
@@ -278,7 +278,7 @@ export default function LoginPage() {
           <div className="mb-6 space-y-1">
             <h2 className="text-xl font-semibold">用户登录</h2>
             <p className="text-sm text-muted-foreground">
-              使用 YANG 账号进入系统
+              使用 易行 账号进入系统
             </p>
           </div>
 
@@ -486,7 +486,7 @@ export default function LoginPage() {
           </form>
 
           <p className="mt-6 text-center text-xs text-muted-foreground">
-            YANG 生态 · 契约驱动企业应用
+            易行 · 让流程易行
           </p>
         </div>
       </aside>

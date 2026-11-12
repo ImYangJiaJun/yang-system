@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo_dark.png" />
-  <img src="docs/logo_light.png" alt="YANG System 标识" width="160" />
+  <img src="docs/logo_light.png" alt="易行 标识" width="160" />
 </picture>
 
 # yang-system

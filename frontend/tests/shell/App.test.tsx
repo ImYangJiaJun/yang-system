@@ -218,7 +218,7 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "用户登录" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "YANG System" }),
+      screen.getByRole("heading", { name: "易行" }),
     ).toBeInTheDocument();
   });
 });

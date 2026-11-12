@@ -1,7 +1,7 @@
 {
   "name": "yang-system-frontend",
   "version": "0.1.0",
-  "description": "YANG System 管理控制台（React 版，破坏性重构基座）",
+  "description": "易行（Envision Flow）管理控制台（React 版，破坏性重构基座）",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.1",
