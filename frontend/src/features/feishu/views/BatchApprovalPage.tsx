@@ -12,7 +12,6 @@ import { Link, useNavigate } from "react-router";
 import {
   ConfigProvider,
   Table,
-  Tag,
   Tooltip,
   type TableColumnsType,
 } from "antd";
@@ -49,6 +48,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { formatProductDateTime } from "@/shared/lib/product-locale";
+import { cn } from "@/shared/lib/utils";
 import { useToast } from "@/shared/lib/toast";
 
 import {
@@ -79,7 +79,6 @@ import {
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
 import { BatchViewSettingsDrawer } from "../components/BatchViewSettingsDrawer";
-import { StatusBadge } from "../components/StatusBadge";
 
 function timeText(value: number | null): string {
   return value === null ? "—" : formatProductDateTime(value);
@@ -128,6 +127,29 @@ function statusTone(label: string): "info" | "positive" | "danger" | "neutral" {
     return "danger";
   }
   return "neutral";
+}
+
+const STATUS_DOT_CLASS: Record<ReturnType<typeof statusTone>, string> = {
+  info: "bg-tone-info",
+  positive: "bg-tone-positive",
+  danger: "bg-destructive",
+  neutral: "bg-muted-foreground/60",
+};
+
+/// 状态用小圆点 + 文字，比整块徽标更接近审批台的阅读密度。
+function StatusDot({ label }: { label: string }) {
+  return (
+    <span data-slot="status-dot" className="inline-flex items-center gap-1.5 text-xs">
+      <span
+        aria-hidden="true"
+        className={cn(
+          "size-1.5 rounded-full",
+          STATUS_DOT_CLASS[statusTone(label)],
+        )}
+      />
+      {label}
+    </span>
+  );
 }
 
 type SelectedMap = Record<string, BatchTask>;
@@ -891,23 +913,27 @@ type ColumnKind = "instance" | "form" | "computed";
 
 const COLUMN_KIND_META: Record<
   ColumnKind,
-  { label: string; color: string; hint: string }
+  { label: string; hint: string }
 > = {
   instance: {
     label: "实例",
-    color: "default",
     hint: "审批实例自带的数据",
   },
   form: {
     label: "表单",
-    color: "blue",
     hint: "审批表单里的控件值",
   },
   computed: {
     label: "计算",
-    color: "purple",
     hint: "按你在字段设置里配置的规则计算得出",
   },
+};
+
+/// 类型标记用轻量文字底色，避免表头被彩色 Tag 压得比正文还重。
+const COLUMN_KIND_CLASS: Record<ColumnKind, string> = {
+  instance: "bg-muted text-muted-foreground",
+  form: "bg-tone-info/10 text-tone-info",
+  computed: "bg-primary/10 text-primary",
 };
 
 /// 表头统一附带类型标记，一眼区分实例数据与个人配置的计算字段。
@@ -920,13 +946,14 @@ function columnTitle(label: string, kind: ColumnKind): ReactNode {
         {label}
       </span>
       <Tooltip title={meta.hint}>
-        <Tag
-          color={meta.color}
-          variant="filled"
-          style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: "16px" }}
+        <span
+          className={cn(
+            "rounded px-1 text-[10px] leading-4 font-normal",
+            COLUMN_KIND_CLASS[kind],
+          )}
         >
           {meta.label}
-        </Tag>
+        </span>
       </Tooltip>
     </span>
   );
@@ -1016,21 +1043,25 @@ function buildTaskColumns(
             ]
           : nodes;
         return (
-          <div className="flex flex-wrap gap-1">
+          <span className="flex flex-wrap gap-x-2 gap-y-0.5 text-[13px]">
             {ordered.map((node) => {
               const mine = node === task.myNodeName;
               return (
-                <StatusBadge
+                <span
                   key={node}
-                  tone={mine ? "info" : "neutral"}
                   title={node}
+                  className={cn("truncate", mine && "font-medium text-tone-info")}
                 >
                   {node}
-                  {mine ? "（我的节点）" : ""}
-                </StatusBadge>
+                  {mine && (
+                    <span className="ml-0.5 text-xs font-normal text-muted-foreground">
+                      （我的）
+                    </span>
+                  )}
+                </span>
               );
             })}
-          </div>
+          </span>
         );
       },
     },
@@ -1044,7 +1075,7 @@ function buildTaskColumns(
       onFilter: (value, task) => taskStatusLabel(task) === String(value),
       render: (_, task) => {
         const label = taskStatusLabel(task);
-        return <StatusBadge tone={statusTone(label)}>{label}</StatusBadge>;
+        return <StatusDot label={label} />;
       },
     },
   ];
@@ -1162,9 +1193,16 @@ function buildTaskColumns(
           ? task.supportApiOperate
           : !task.supportApiOperate,
       render: (_, task) => (
-        <StatusBadge tone={task.supportApiOperate ? "positive" : "warning"}>
+        <span
+          className={cn(
+            "text-xs",
+            task.supportApiOperate
+              ? "text-tone-positive"
+              : "text-muted-foreground",
+          )}
+        >
           {task.supportApiOperate ? "可批量处理" : "需在飞书处理"}
-        </StatusBadge>
+        </span>
       ),
     },
   ];
@@ -1444,7 +1482,7 @@ function TaskDetailSection({
               {visibleColumns.map((column) => (
                 <div
                   key={column.id}
-                  className="truncate border-l px-2.5 py-2"
+                  className="truncate px-2.5 py-2"
                   title={column.name}
                 >
                   {column.name}
@@ -1500,7 +1538,7 @@ function TaskDetailSection({
                         return (
                           <div
                             key={column.id}
-                            className="truncate border-l px-2.5"
+                            className="truncate px-2.5"
                             title={text}
                           >
                             {text}
@@ -1616,11 +1654,24 @@ function DefinitionTable({
   return (
     <ConfigProvider locale={zhCN}>
       <style>{`
-        .batch-expanded-row > td { background: var(--muted) !important; padding: 0 !important; }
-        .batch-expanded-row:hover > td { background: var(--muted) !important; }
+        .batch-expanded-row > td { background: color-mix(in oklch, var(--muted) 35%, var(--card)) !important; padding: 0 !important; }
+        .batch-expanded-row:hover > td { background: color-mix(in oklch, var(--muted) 35%, var(--card)) !important; }
+        .batch-table .ant-table { font-size: 13px !important; background: transparent; }
+        .batch-table .ant-table-thead > tr > th {
+          padding: 8px 10px !important;
+          background: var(--muted) !important;
+          color: var(--muted-foreground) !important;
+          font-weight: 500 !important;
+          border-bottom: 1px solid var(--border) !important;
+        }
+        .batch-table .ant-table-tbody > tr > td { padding: 8px 10px !important; }
+        .batch-table .ant-table-tbody > tr:hover > td {
+          background: color-mix(in oklch, var(--muted) 40%, var(--card)) !important;
+        }
+        .batch-table .ant-table-pagination { margin: 10px 14px !important; }
       `}</style>
       {expandableTasks.length > 0 && (
-        <div className="flex justify-end">
+        <div className="flex justify-end px-3 pt-2">
           <Button
             type="button"
             variant="ghost"
@@ -1637,8 +1688,8 @@ function DefinitionTable({
       )}
       <Table<BatchTask>
         rowKey="taskId"
+        className="batch-table"
         size="small"
-        bordered
         tableLayout="fixed"
         columns={columnsWithExpand}
         components={TABLE_COMPONENTS}
@@ -2225,9 +2276,17 @@ export default function BatchApprovalPage() {
                   </button>
                 )}
               </div>
+              <span className="hidden h-4 w-px bg-border sm:block" />
               <span className="text-sm text-muted-foreground">
-                已选 {selectedTasks.length} 条 · 可处理{" "}
-                {operableVisibleTasks.length} 条 · 共 {visibleTaskCount} 条
+                已选{" "}
+                <b className="font-semibold text-foreground">
+                  {selectedTasks.length}
+                </b>{" "}
+                条 · 可处理{" "}
+                <b className="font-semibold text-foreground">
+                  {operableVisibleTasks.length}
+                </b>{" "}
+                条 · 共 {visibleTaskCount} 条
                 {hiddenSelectedCount > 0 && (
                   <span className="ml-1 text-tone-warning">
                     （另有 {hiddenSelectedCount} 条已选项不在当前筛选内）
@@ -2334,11 +2393,14 @@ export default function BatchApprovalPage() {
                 )}
               </div>
             ) : (
-              <div className="space-y-6">
+              <div className="space-y-5">
                 {visibleGroups.map((group) => (
-                  <div key={group.key} className="space-y-2">
-                    <div className="flex flex-wrap items-baseline gap-2">
-                      <h2 className="text-base font-semibold">{group.name}</h2>
+                  <div
+                    key={group.key}
+                    className="overflow-hidden rounded-lg border border-border bg-card"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-3">
+                      <h2 className="text-[15px] font-semibold">{group.name}</h2>
                       <span className="text-xs text-muted-foreground">
                         {group.code || "—"} · {group.tasks.length} 条 ·{" "}
                         {

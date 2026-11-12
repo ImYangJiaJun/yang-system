@@ -497,8 +497,9 @@ describe("BatchApprovalPage", () => {
     expect(screen.getByText("100")).toBeInTheDocument();
     expect(screen.getAllByText("参考人民币金额").length).toBeGreaterThan(0);
     expect(screen.getAllByText("8794.79").length).toBeGreaterThan(0);
-    expect(screen.getByText("部门审批（我的节点）")).toBeInTheDocument();
-    expect(screen.getByText("财务审批")).toBeInTheDocument();
+    expect(screen.getByText("部门审批")).toBeInTheDocument();
+    expect(screen.getAllByText("（我的）").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("财务审批").length).toBeGreaterThan(0);
     // 表头用类型标记区分实例数据、表单控件和个人计算字段。
     expect(screen.getAllByText("计算").length).toBeGreaterThan(0);
     expect(screen.getAllByText("表单").length).toBeGreaterThan(0);
@@ -965,7 +966,7 @@ describe("BatchApprovalPage", () => {
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     const statusBadges = () =>
-      Array.from(document.querySelectorAll('[data-slot="status-badge"]'));
+      Array.from(document.querySelectorAll('[data-slot="status-dot"]'));
     await waitFor(() => {
       expect(
         statusBadges().some((badge) => badge.textContent === "审批中"),
