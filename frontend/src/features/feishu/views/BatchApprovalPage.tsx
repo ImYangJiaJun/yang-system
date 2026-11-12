@@ -21,13 +21,13 @@ import {
 import { Resizable, type ResizeCallbackData } from "react-resizable";
 import * as XLSX from "xlsx";
 import {
-  GlobalWorkerOptions,
+  PDFWorker,
   getDocument,
   type PDFDocumentLoadingTask,
   type PDFDocumentProxy,
   type RenderTask,
 } from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
 import { apiBase, useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
@@ -60,8 +60,6 @@ import {
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
 import { StatusBadge } from "../components/StatusBadge";
-
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 function timeText(value: number | null): string {
   return value === null ? "—" : formatProductDateTime(value);
@@ -386,6 +384,7 @@ function PdfPreview({ blob }: { blob: Blob }) {
   useEffect(() => {
     let cancelled = false;
     let loadingTask: PDFDocumentLoadingTask | null = null;
+    let worker: PDFWorker | null = null;
     setPdf(null);
     setPageNumber(1);
     setZoom(1);
@@ -393,7 +392,11 @@ function PdfPreview({ blob }: { blob: Blob }) {
     void blob
       .arrayBuffer()
       .then((buffer) => {
-        loadingTask = getDocument({ data: new Uint8Array(buffer) });
+        worker = PDFWorker.create({ port: new PdfWorker() });
+        loadingTask = getDocument({
+          data: new Uint8Array(buffer),
+          worker,
+        });
         return loadingTask.promise;
       })
       .then((loaded) => {
@@ -409,6 +412,7 @@ function PdfPreview({ blob }: { blob: Blob }) {
     return () => {
       cancelled = true;
       void loadingTask?.destroy();
+      void worker?.destroy();
     };
   }, [blob]);
 

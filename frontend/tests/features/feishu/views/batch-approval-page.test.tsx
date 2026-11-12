@@ -6,6 +6,13 @@ import * as XLSX from "xlsx";
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
+vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?worker", () => ({
+  default: class {
+    postMessage() {}
+    terminate() {}
+  },
+}));
+
 vi.mock("pdfjs-dist", () => {
   const page = {
     getViewport: () => ({ width: 100, height: 100 }),
@@ -13,7 +20,9 @@ vi.mock("pdfjs-dist", () => {
   };
   const document = { numPages: 5, getPage: vi.fn(async () => page) };
   return {
-    GlobalWorkerOptions: {},
+    PDFWorker: {
+      create: vi.fn(() => ({ destroy: vi.fn() })),
+    },
     getDocument: vi.fn(() => ({
       promise: Promise.resolve(document),
       destroy: vi.fn(),
