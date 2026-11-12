@@ -832,6 +832,50 @@ pub(crate) async fn get_record_shared_url(
         .map(str::to_owned))
 }
 
+/// 一条素材的临时下载链接。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TmpDownloadUrl {
+    pub(crate) file_token: String,
+    pub(crate) tmp_download_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TmpDownloadUrlsData {
+    #[serde(default)]
+    tmp_download_urls: Vec<TmpDownloadUrl>,
+}
+
+/// 批量换取素材的临时下载链接（`file_token → tmp_download_url`）。
+///
+/// 多维表格附件单元格里的 `url` 是 `/medias/:file_token/download`，必须带
+/// `Authorization`；审批评论的 `files[].url` 由飞书评论端直接取，不带我们的
+/// tenant token，直接塞进去会显示裂图。这里返回的链接带 `authcode`，免鉴权，
+/// 约 24 小时有效，评论发出后即用。
+///
+/// `file_tokens` 在 query 里**重复出现**（`file_tokens=A&file_tokens=B`）；
+/// 用逗号拼成一个值会被静默当成一个不存在的 token，返回空列表。
+pub(crate) async fn batch_get_tmp_download_urls(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    file_tokens: &[String],
+) -> Result<BTreeMap<String, String>, OutboundFailure> {
+    if file_tokens.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let url = format!("{FEISHU_OPEN_BASE}/open-apis/drive/v1/medias/batch_get_tmp_download_url");
+    let query = file_tokens
+        .iter()
+        .map(|token| ("file_tokens".to_string(), token.clone()))
+        .collect();
+    let data: TmpDownloadUrlsData = fetch_page(transport, sleeper, tokens, &url, query).await?;
+    Ok(data
+        .tmp_download_urls
+        .into_iter()
+        .map(|item| (item.file_token, item.tmp_download_url))
+        .collect())
+}
+
 /// 带 JSON body 的出站请求 + 信封解码。
 ///
 /// 与 `fetch_page` 共用「token 失效 → 清缓存强制刷新 → 重试本页」的补救，
@@ -2475,6 +2519,47 @@ mod tests {
             table_id: "tblRowScan".into(),
             view_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tmp_download_urls_repeat_file_tokens_and_return_a_map() {
+        let transport = Arc::new(ScanTransport::new(vec![serde_json::json!({
+            "code": 0,
+            "data": {
+                "tmp_download_urls": [
+                    {"file_token": "tok-a", "tmp_download_url": "https://tmp/a"},
+                    {"file_token": "tok-b", "tmp_download_url": "https://tmp/b"}
+                ]
+            }
+        })
+        .to_string()]));
+        let tokens = scan_tokens(transport.clone());
+
+        let urls = batch_get_tmp_download_urls(
+            transport.as_ref(),
+            &NoSleep,
+            &tokens,
+            &["tok-a".to_string(), "tok-b".to_string()],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(urls.get("tok-a").map(String::as_str), Some("https://tmp/a"));
+        assert_eq!(urls.get("tok-b").map(String::as_str), Some("https://tmp/b"));
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, OutboundMethod::Get);
+        assert!(requests[0]
+            .url
+            .ends_with("/open-apis/drive/v1/medias/batch_get_tmp_download_url"));
+        assert_eq!(
+            requests[0].query,
+            vec![
+                ("file_tokens".to_string(), "tok-a".to_string()),
+                ("file_tokens".to_string(), "tok-b".to_string()),
+            ],
+            "必须重复 query 参数；逗号拼成一个值会被静默当成不存在的 token"
+        );
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@
 //! `next_attempt_at` 兼作租约（+120 秒），进程崩溃后超时可被重新认领；
 //! 重新认领仍会先查评论标记，不会双发。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -921,7 +921,7 @@ async fn process_one(
 
     // 2) 先读记录并判定条件。支付字段没到位时**不应**去反查实例映射：导出
     //    worker 刚建记录、台账尚未写成 written 的并发窗口会被误判成 failed。
-    let fields = match load_record_fields(runner, rule, &row.record_id).await {
+    let mut fields = match load_record_fields(runner, rule, &row.record_id).await {
         Ok(fields) => fields,
         Err(failure) => {
             return handle_outbound_failure(runner, rule, row, failure, "读取目标记录").await;
@@ -1021,6 +1021,11 @@ async fn process_one(
         if let Err(error) = update_run(runner, row.id, lease).await {
             tracing::warn!(error = %error, run_id = row.id, "写 commenting 租约失败");
         }
+        // 指纹在换临时链接之前算：`authcode` 每次都不同，换完再算会让指纹漂移。
+        let fingerprint = payment_fingerprint(&rule.config, &fields);
+        if let Err(failure) = hydrate_attachment_urls(runner, &mut fields).await {
+            return handle_outbound_failure(runner, rule, row, failure, "解析附件下载链接").await;
+        }
         let rendered = render_comment_with_origin(
             &rule.config,
             &row.record_id,
@@ -1029,7 +1034,6 @@ async fn process_one(
             rule.base_origin.as_deref(),
             &fields,
         );
-        let fingerprint = payment_fingerprint(&rule.config, &fields);
         match create_instance_comment(
             runner.transport(),
             &runner.tokens,
@@ -1182,6 +1186,80 @@ async fn find_instance_code(
                 .filter(|value| !value.is_empty())
         })
         .next())
+}
+
+/// 把附件单元格里的 `url` 换成免鉴权的临时下载链接。
+///
+/// 审批评论的 `files[].url` 由飞书评论端直接读取，不带我们的 tenant token；
+/// 多维表格返回的 `/medias/:file_token/download` 需要 `Authorization`，直接塞进
+/// 评论会显示裂图。这里在发送前统一换成带 `authcode` 的临时链接。
+async fn hydrate_attachment_urls(
+    runner: &RoundRunner,
+    fields: &mut BTreeMap<String, serde_json::Value>,
+) -> Result<(), OutboundFailure> {
+    let mut file_tokens = BTreeSet::new();
+    for value in fields.values() {
+        collect_file_tokens(value, &mut file_tokens);
+    }
+    if file_tokens.is_empty() {
+        return Ok(());
+    }
+    let file_tokens: Vec<String> = file_tokens.into_iter().collect();
+    let urls = bitable::batch_get_tmp_download_urls(
+        runner.transport(),
+        &TokioSleeper,
+        &runner.tokens,
+        &file_tokens,
+    )
+    .await?;
+    if urls.is_empty() {
+        tracing::warn!(
+            file_tokens = file_tokens.len(),
+            "飞书没有返回附件临时下载链接，评论将退回原始 URL"
+        );
+        return Ok(());
+    }
+    for value in fields.values_mut() {
+        apply_tmp_urls(value, &urls);
+    }
+    Ok(())
+}
+
+fn collect_file_tokens(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    let serde_json::Value::Array(items) = value else {
+        return;
+    };
+    for item in items {
+        let Some(token) = item
+            .get("file_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty())
+        else {
+            continue;
+        };
+        out.insert(token.to_string());
+    }
+}
+
+fn apply_tmp_urls(value: &mut serde_json::Value, urls: &BTreeMap<String, String>) {
+    let serde_json::Value::Array(items) = value else {
+        return;
+    };
+    for item in items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(token) = object
+            .get("file_token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if let Some(url) = urls.get(&token) {
+            object.insert("url".to_string(), serde_json::Value::String(url.clone()));
+        }
+    }
 }
 
 /// 读目标记录并按配置的 field_id 建索引。
@@ -1476,6 +1554,47 @@ mod tests {
             config: config(),
             author_open_id: Some("ou_ops".to_string()),
         }
+    }
+
+    #[test]
+    fn attachment_urls_are_replaced_by_file_token() {
+        let mut fields = BTreeMap::from([
+            (
+                "fldAttach".to_string(),
+                serde_json::json!([
+                    {
+                        "file_token": "tok-a",
+                        "url": "https://open.feishu.cn/open-apis/drive/v1/medias/tok-a/download",
+                        "name": "a.png"
+                    },
+                    {
+                        "file_token": "tok-b",
+                        "url": "https://open.feishu.cn/open-apis/drive/v1/medias/tok-b/download",
+                        "name": "b.pdf"
+                    }
+                ]),
+            ),
+            ("fldText".to_string(), serde_json::json!("【支付回填】rec1")),
+        ]);
+
+        let mut file_tokens = BTreeSet::new();
+        for value in fields.values() {
+            collect_file_tokens(value, &mut file_tokens);
+        }
+        assert_eq!(file_tokens.len(), 2);
+
+        let urls = BTreeMap::from([("tok-a".to_string(), "https://tmp/a".to_string())]);
+        let Some(value) = fields.get_mut("fldAttach") else {
+            panic!("测试字段必须存在");
+        };
+        apply_tmp_urls(value, &urls);
+
+        assert_eq!(fields["fldAttach"][0]["url"], "https://tmp/a");
+        assert_eq!(
+            fields["fldAttach"][1]["url"],
+            "https://open.feishu.cn/open-apis/drive/v1/medias/tok-b/download",
+            "没有临时链接的附件保持原值"
+        );
     }
 
     #[test]
