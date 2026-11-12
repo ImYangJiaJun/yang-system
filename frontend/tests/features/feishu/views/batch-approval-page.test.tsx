@@ -6,6 +6,21 @@ import * as XLSX from "xlsx";
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
+vi.mock("pdfjs-dist", () => {
+  const page = {
+    getViewport: () => ({ width: 100, height: 100 }),
+    render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
+  };
+  const document = { numPages: 5, getPage: vi.fn(async () => page) };
+  return {
+    GlobalWorkerOptions: {},
+    getDocument: vi.fn(() => ({
+      promise: Promise.resolve(document),
+      destroy: vi.fn(),
+    })),
+  };
+});
+
 // Ant Design 的表格在 jsdom 中首屏渲染较慢（rc-table + CSS-in-JS），单测给足时间。
 vi.setConfig({ testTimeout: 15_000 });
 
@@ -444,14 +459,55 @@ describe("BatchApprovalPage", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "预览 发票.pdf" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByTitle("发票.pdf")).toBeInTheDocument();
-    const frame = await within(dialog).findByTitle("发票.pdf");
-    await waitFor(() => {
-      expect(frame.getAttribute("src")).toMatch(/^blob:/);
-    });
+    expect(within(dialog).getByText("发票.pdf")).toBeInTheDocument();
+    expect(
+      await within(dialog).findByRole("button", { name: "下一页" }),
+    ).toBeInTheDocument();
+    expect(dialog.querySelector("iframe")).toBeNull();
     expect(
       within(dialog).getByRole("link", { name: "下载附件" }),
     ).toHaveAttribute("download", "发票.pdf");
+  });
+
+  it("一条审批含多个附件时可左右切换预览", async () => {
+    const attachmentTask = {
+      ...TASKS[0],
+      form_fields: [
+        {
+          name: "附件",
+          value: [
+            "https://files.example.com/第一份.pdf",
+            "https://files.example.com/第二份.pdf",
+          ],
+          field_type: "attachmentV2",
+          ext: "'第一份.pdf','第二份.pdf'",
+        },
+      ],
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [attachmentTask], truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "预览 第一份.pdf" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("1 / 2")).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "下一个附件" }),
+    );
+    expect(within(dialog).getByText("第二份.pdf")).toBeInTheDocument();
+    expect(within(dialog).getByText("2 / 2")).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "下一个附件" }),
+    );
+    expect(within(dialog).getByText("第一份.pdf")).toBeInTheDocument();
+    expect(within(dialog).getByText("1 / 2")).toBeInTheDocument();
   });
 
   it("Excel 附件在弹窗内解析为表格预览", async () => {

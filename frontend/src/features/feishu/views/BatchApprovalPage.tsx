@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type HTMLAttributes,
   type SyntheticEvent,
@@ -9,9 +10,24 @@ import {
 import { Link, useNavigate } from "react-router";
 import { ConfigProvider, Table, type TableColumnsType } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { Download, Eye, Inbox, RefreshCw } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Eye,
+  Inbox,
+  RefreshCw,
+} from "lucide-react";
 import { Resizable, type ResizeCallbackData } from "react-resizable";
 import * as XLSX from "xlsx";
+import {
+  GlobalWorkerOptions,
+  getDocument,
+  type PDFDocumentLoadingTask,
+  type PDFDocumentProxy,
+  type RenderTask,
+} from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { apiBase, useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
@@ -44,6 +60,8 @@ import {
 } from "../components/BatchActionDialog";
 import { BatchJobDialog } from "../components/BatchJobDialog";
 import { StatusBadge } from "../components/StatusBadge";
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 function timeText(value: number | null): string {
   return value === null ? "—" : formatProductDateTime(value);
@@ -358,14 +376,159 @@ function SpreadsheetPreview({ blob }: { blob: Blob }) {
   );
 }
 
+function PdfPreview({ blob }: { blob: Blob }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [zoom, setZoom] = useState(1);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let loadingTask: PDFDocumentLoadingTask | null = null;
+    setPdf(null);
+    setPageNumber(1);
+    setZoom(1);
+    setError(null);
+    void blob
+      .arrayBuffer()
+      .then((buffer) => {
+        loadingTask = getDocument({ data: new Uint8Array(buffer) });
+        return loadingTask.promise;
+      })
+      .then((loaded) => {
+        if (cancelled) {
+          void loadingTask?.destroy();
+          return;
+        }
+        setPdf(loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setError("PDF 加载失败，请下载后查看");
+      });
+    return () => {
+      cancelled = true;
+      void loadingTask?.destroy();
+    };
+  }, [blob]);
+
+  useEffect(() => {
+    if (!pdf) return;
+    let cancelled = false;
+    let task: RenderTask | null = null;
+    void (async () => {
+      const page = await pdf.getPage(pageNumber);
+      if (cancelled) return;
+      const viewport = page.getViewport({ scale: zoom });
+      const canvas = canvasRef.current;
+      const context = canvas?.getContext("2d");
+      if (!canvas || !context) return;
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      task = page.render({ canvas, canvasContext: context, viewport });
+      await task.promise;
+    })().catch((reason: unknown) => {
+      if (
+        !cancelled &&
+        !(
+          reason instanceof Error &&
+          reason.name === "RenderingCancelledException"
+        )
+      ) {
+        setError("PDF 渲染失败，请下载后查看");
+      }
+    });
+    return () => {
+      cancelled = true;
+      task?.cancel();
+    };
+  }, [pdf, pageNumber, zoom]);
+
+  if (error) {
+    return (
+      <p role="alert" className="text-destructive text-sm">
+        {error}
+      </p>
+    );
+  }
+  if (!pdf) {
+    return <Skeleton className="h-full min-h-64 w-full" />;
+  }
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-1 text-xs">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={pageNumber <= 1}
+          onClick={() => setPageNumber((value) => Math.max(1, value - 1))}
+        >
+          上一页
+        </Button>
+        <span className="w-16 text-center tabular-nums">
+          {pageNumber} / {pdf.numPages}
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={pageNumber >= pdf.numPages}
+          onClick={() =>
+            setPageNumber((value) => Math.min(pdf.numPages, value + 1))
+          }
+        >
+          下一页
+        </Button>
+        <span className="mx-1 h-4 w-px bg-border" />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}
+        >
+          缩小
+        </Button>
+        <span className="w-16 text-center tabular-nums">
+          {Math.round(zoom * 100)}%
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setZoom((value) => Math.min(2.5, value + 0.25))}
+        >
+          放大
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setZoom(1)}
+        >
+          适应窗口
+        </Button>
+      </div>
+      <div className="bg-muted/30 flex min-h-0 flex-1 items-start justify-center overflow-auto rounded border p-2">
+        <canvas ref={canvasRef} className="shadow-sm" />
+      </div>
+    </div>
+  );
+}
+
 function AttachmentPreview({
-  file,
+  files,
+  index,
+  onChange,
   onClose,
 }: {
-  file: AttachmentFile;
+  files: AttachmentFile[];
+  index: number;
+  onChange: (index: number) => void;
   onClose: () => void;
 }) {
   const { token } = useSessionCredentials();
+  const file = files[index] ?? files[0];
   const [blob, setBlob] = useState<Blob | null>(null);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -377,6 +540,7 @@ function AttachmentPreview({
     setBlob(null);
     setObjectUrl(null);
     setError(null);
+    setZoom(1);
     void fetchAttachmentBlob(file, token)
       .then((next) => {
         if (cancelled) return;
@@ -393,6 +557,10 @@ function AttachmentPreview({
     };
   }, [file, token]);
 
+  const move = (delta: number) => {
+    onChange((index + delta + files.length) % files.length);
+  };
+
   return (
     <Dialog
       open
@@ -400,11 +568,16 @@ function AttachmentPreview({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="flex h-[85vh] max-h-[85vh] flex-col gap-2 sm:max-w-6xl">
+      <DialogContent className="relative flex h-[85vh] max-h-[85vh] flex-col gap-2 sm:max-w-6xl">
         <div className="flex items-center gap-3 pr-8">
           <DialogTitle className="min-w-0 flex-1 truncate">
             {file.name}
           </DialogTitle>
+          {files.length > 1 && (
+            <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+              {index + 1} / {files.length}
+            </span>
+          )}
           {objectUrl && (
             <a
               href={objectUrl}
@@ -462,17 +635,37 @@ function AttachmentPreview({
             </div>
           </>
         ) : file.kind === "pdf" ? (
-          <iframe
-            src={objectUrl}
-            title={file.name}
-            className="min-h-0 w-full flex-1 rounded border"
-          />
+          <PdfPreview blob={blob} />
         ) : file.kind === "office" ? (
           <SpreadsheetPreview blob={blob} />
         ) : (
           <p className="text-muted-foreground text-sm">
             该格式不支持在线预览。
           </p>
+        )}
+        {files.length > 1 && (
+          <>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="上一个附件"
+              className="absolute top-1/2 left-3 z-10 -translate-y-1/2 rounded-full bg-black/35 text-white hover:bg-black/55 hover:text-white"
+              onClick={() => move(-1)}
+            >
+              <ChevronLeft className="size-5" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="下一个附件"
+              className="absolute top-1/2 right-3 z-10 -translate-y-1/2 rounded-full bg-black/35 text-white hover:bg-black/55 hover:text-white"
+              onClick={() => move(1)}
+            >
+              <ChevronRight className="size-5" />
+            </Button>
+          </>
         )}
       </DialogContent>
     </Dialog>
@@ -482,7 +675,10 @@ function AttachmentPreview({
 function AttachmentCell({ files }: { files: AttachmentFile[] }) {
   const { token } = useSessionCredentials();
   const { error: toastError } = useToast();
-  const [preview, setPreview] = useState<AttachmentFile | null>(null);
+  const [preview, setPreview] = useState<{
+    files: AttachmentFile[];
+    index: number;
+  } | null>(null);
   return (
     <div className="flex max-w-64 flex-col gap-1">
       {files.map((file, index) => (
@@ -502,7 +698,7 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
               size="sm"
               className="h-5 px-0 text-xs"
               aria-label={`预览 ${file.name}`}
-              onClick={() => setPreview(file)}
+              onClick={() => setPreview({ files, index })}
             >
               <Eye className="size-3" />
               预览
@@ -526,7 +722,12 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
         </div>
       ))}
       {preview && (
-        <AttachmentPreview file={preview} onClose={() => setPreview(null)} />
+        <AttachmentPreview
+          files={preview.files}
+          index={preview.index}
+          onChange={(next) => setPreview({ files: preview.files, index: next })}
+          onClose={() => setPreview(null)}
+        />
       )}
     </div>
   );
