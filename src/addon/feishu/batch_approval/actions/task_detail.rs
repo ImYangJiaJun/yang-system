@@ -64,7 +64,7 @@ pub(super) async fn handle(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailAccess {
+pub(super) enum DetailAccess {
     Allowed,
     NotParticipant,
     TaskNotInInstance,
@@ -75,7 +75,7 @@ enum DetailAccess {
 /// 详情可能因飞书返回字段差异没有 `tasks`；此时仍按操作记录/发起人判断参与关系，
 /// 不把「字段缺失」误判成越权。`tasks` 存在时必须能找到同一个 `task_id`，否则这个
 /// task 与 `instance_code` 不是一对，不能让前端把它当成该实例的待办。
-fn detail_access(detail: &Value, task_id: &str, open_id: &str) -> DetailAccess {
+pub(super) fn detail_access(detail: &Value, task_id: &str, open_id: &str) -> DetailAccess {
     let tasks = detail_tasks(detail);
     if let Some(tasks) = tasks {
         if !tasks

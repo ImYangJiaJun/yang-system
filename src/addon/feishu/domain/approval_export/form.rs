@@ -508,6 +508,14 @@ impl FixedNumber {
         i64::try_from(self.units).ok()
     }
 
+    /// 由计数构造整数，用于「明细字段平均值」这类聚合的分母。
+    pub(crate) fn from_count(count: usize) -> Option<Self> {
+        Some(Self {
+            units: i128::try_from(count).ok()?,
+            scale: 0,
+        })
+    }
+
     /// 单次二元加减乘除。除法按目标精度四舍五入（远离零），除零返回 `None`。
     pub(crate) fn calculate(self, operator: &str, other: Self, precision: u32) -> Option<Self> {
         let result = match operator {

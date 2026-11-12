@@ -3,6 +3,7 @@
 mod attachment;
 pub(crate) mod cancel_job;
 mod create_job;
+mod detail_rows;
 mod field_catalog;
 mod get_job;
 mod list_tasks;
@@ -22,6 +23,7 @@ use crate::addon::feishu::domain::context::FeishuContext;
 pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     let module = list_tasks::register(module, Arc::clone(&context));
     let module = task_detail::register(module, Arc::clone(&context));
+    let module = detail_rows::register(module, Arc::clone(&context));
     let module = user_search::register(module, Arc::clone(&context));
     let module = create_job::register(module, Arc::clone(&context));
     let module = get_job::register(module, Arc::clone(&context));

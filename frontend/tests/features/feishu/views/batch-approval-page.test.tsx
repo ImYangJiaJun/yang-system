@@ -145,6 +145,7 @@ type StubOptions = {
   viewConfig?: unknown;
   catalog?: unknown[];
   onSaveView?: (body: unknown) => void;
+  detailRows?: (taskId: string, params: URLSearchParams) => unknown;
 };
 
 function stubBatchApi(options: StubOptions = {}): Call[] {
@@ -203,6 +204,24 @@ function stubBatchApi(options: StubOptions = {}): Call[] {
             data: { tasks: TASKS, truncated: false },
           })
         );
+      }
+      const rowsMatch = url.pathname.match(
+        /^\/api\/v1\/feishu\/batch-approval\/tasks\/([^/]+)\/rows$/,
+      );
+      if (rowsMatch) {
+        return jsonResponse({
+          code: 0,
+          data: options.detailRows
+            ? options.detailRows(rowsMatch[1], url.searchParams)
+            : {
+                columns: [],
+                rows: [],
+                total: 0,
+                unfiltered_total: 0,
+                offset: 0,
+                limit: 50,
+              },
+        });
       }
       if (url.pathname.startsWith("/api/v1/feishu/batch-approval/tasks/")) {
         return jsonResponse({
@@ -480,6 +499,19 @@ describe("BatchApprovalPage", () => {
         { id: "amount", name: "金额", type: "number" },
         { id: "dept", name: "部门", type: "select" },
         { id: "rate", name: "汇率", type: "text" },
+        {
+          id: "items",
+          name: "费用明细",
+          type: "fieldList",
+          children: ["itemName", "qty"],
+        },
+        {
+          id: "itemName",
+          name: "物品",
+          type: "input",
+          parent_id: "items",
+        },
+        { id: "qty", name: "数量", type: "number", parent_id: "items" },
       ],
       viewConfig: view,
       onSaveView: (body) => {
@@ -504,6 +536,16 @@ describe("BatchApprovalPage", () => {
     // 配置面板同样标注每列的类型，便于区分实例数据与个人计算字段。
     expect(within(dialog).getAllByText("实例").length).toBeGreaterThan(0);
     expect(within(dialog).getAllByText("表单").length).toBeGreaterThan(0);
+
+    // 明细内的列并入同一个字段设置面板，按明细分组。
+    expect(
+      within(dialog).getByText("明细内的列 · 费用明细"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("checkbox", {
+        name: "显示 费用明细 / 物品",
+      }),
+    ).toBeChecked();
 
     const dept = within(dialog).getByRole("checkbox", { name: "显示 部门" });
     expect(dept).not.toBeChecked();
@@ -533,7 +575,81 @@ describe("BatchApprovalPage", () => {
       saved as { columns: Array<{ key: string; visible: boolean }> }
     ).columns;
     expect(columns).toContainEqual({ key: "form:dept", visible: true });
+    expect(columns).toContainEqual({
+      key: "detail:items:itemName",
+      visible: true,
+    });
     expect(columns.some((column) => column.key === "computed:c1")).toBe(false);
+  });
+
+  it("明细控件先显示行数与首行预览，展开后加载全部明细行", async () => {
+    const detailTask = {
+      ...TASKS[0],
+      form_fields: [
+        { id: "amount", name: "金额", value: { text: "100" } },
+        {
+          id: "items",
+          name: "费用明细",
+          field_type: "fieldList",
+          value: null,
+          row_count: 3,
+          preview: ["笔记本", "4500"],
+        },
+      ],
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [detailTask], truncated: false },
+      }),
+      detailRows: (taskId, params) => {
+        expect(taskId).toBe("t1");
+        expect(params.get("field_id")).toBe("items");
+        return {
+          field_id: "items",
+          name: "费用明细",
+          columns: [
+            { id: "name", name: "物品", type: "input" },
+            { id: "price", name: "单价", type: "amount" },
+          ],
+          rows: [
+            [
+              { id: "name", type: "input", value: "笔记本" },
+              { id: "price", type: "amount", value: 4500 },
+            ],
+            [
+              { id: "name", type: "input", value: "鼠标" },
+              { id: "price", type: "amount", value: 120 },
+            ],
+            [
+              { id: "name", type: "input", value: "键盘" },
+              { id: "price", type: "amount", value: 300 },
+            ],
+          ],
+          total: 3,
+          unfiltered_total: 3,
+          offset: 0,
+          limit: 50,
+        };
+      },
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    await screen.findByText("报销单 A");
+    expect(
+      screen.getByText("明细 3 行：笔记本 · 4500"),
+    ).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "全部展开" }));
+    expect(await screen.findByText("物品")).toBeInTheDocument();
+    expect(screen.getByText("笔记本")).toBeInTheDocument();
+    expect(screen.getByText("鼠标")).toBeInTheDocument();
+    expect(screen.getByText("键盘")).toBeInTheDocument();
+    expect(screen.getByText("已加载 3 / 3 行")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "全部收起" }),
+    ).toBeInTheDocument();
   });
 
   it("附件字段展示文件名，图片和 PDF 可预览，Excel 可下载", async () => {

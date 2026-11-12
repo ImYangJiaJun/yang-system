@@ -47,6 +47,7 @@ import {
   BATCH_ACTION_LABELS,
   createBatchJob,
   describeBatchError,
+  fetchBatchTaskRows,
   fetchBatchTasks,
   fetchCurrentUsername,
   groupBatchTasks,
@@ -59,6 +60,8 @@ import {
   type BatchApprovalAction,
   type BatchJobItem,
   type BatchTask,
+  type BatchTaskDetailCell,
+  type BatchTaskDetailColumn,
   type BatchTaskFormField,
   type BatchViewConfig,
 } from "../batch-approval-api";
@@ -751,6 +754,11 @@ function isDescriptionField(field: BatchTaskFormField): boolean {
   return ["text", "description", "explanation", "hint"].includes(fieldType);
 }
 
+function isDetailField(field: BatchTaskFormField): boolean {
+  const fieldType = (field.fieldType ?? "").toLowerCase();
+  return fieldType === "fieldlist" || fieldType === "field_list";
+}
+
 function dateText(value: string): string {
   const timestamp = new Date(value).getTime();
   return Number.isNaN(timestamp) ? value : formatProductDateTime(timestamp);
@@ -775,8 +783,11 @@ function fieldDisplayText(field: BatchTaskFormField): string {
       return `${dateText(start)} 至 ${dateText(end)}`;
     }
   }
-  if (fieldType === "fieldlist" && Array.isArray(field.value)) {
-    return `明细 ${field.value.length} 行`;
+  if (fieldType === "fieldlist" || fieldType === "field_list") {
+    const count =
+      field.rowCount ?? (Array.isArray(field.value) ? field.value.length : 0);
+    const preview = field.preview.length > 0 ? `：${field.preview.join(" · ")}` : "";
+    return `明细 ${count} 行${preview}`;
   }
   if (fieldType === "address" && typeof field.value === "string") {
     return field.value.split("/").join(" / ");
@@ -1235,14 +1246,227 @@ function ResizableHeaderCell({
 
 const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
 
+const DETAIL_PAGE_SIZE = 50;
+const DETAIL_ROW_HEIGHT = 34;
+const DETAIL_VIEWPORT_HEIGHT = 320;
+
+/// 明细列顺序/可见性来自字段设置里的 `detail:<明细控件>:<子控件>` 配置；
+/// 没有配置时按控件目录顺序全部展示。
+function detailVisibleColumns(
+  view: BatchViewConfig | undefined,
+  fieldId: string,
+  columns: BatchTaskDetailColumn[],
+): BatchTaskDetailColumn[] {
+  const prefix = `detail:${fieldId}:`;
+  const configured = (view?.columns ?? []).filter((column) =>
+    column.key.startsWith(prefix),
+  );
+  if (configured.length === 0) return columns;
+  const byId = new Map(columns.map((column) => [column.id, column]));
+  return configured
+    .filter((column) => column.visible)
+    .map((column) => byId.get(column.key.slice(prefix.length)))
+    .filter((column): column is BatchTaskDetailColumn => column !== undefined);
+}
+
+/// 单条任务的明细控件：按需分页加载 + 固定行高虚拟滚动，接近底部自动续读。
+function TaskDetailSection({
+  task,
+  field,
+  view,
+  accessToken,
+}: {
+  task: BatchTask;
+  field: BatchTaskFormField;
+  view?: BatchViewConfig;
+  accessToken: string | undefined;
+}) {
+  const fieldId = field.id ?? "";
+  const [rows, setRows] = useState<BatchTaskDetailCell[][]>([]);
+  const [columns, setColumns] = useState<BatchTaskDetailColumn[]>([]);
+  const [total, setTotal] = useState(field.rowCount ?? 0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [scrollTop, setScrollTop] = useState(0);
+  const loadingRef = useRef(false);
+  const loadedRef = useRef(0);
+  const doneRef = useRef(false);
+
+  const loadMore = useCallback(async () => {
+    if (!fieldId || loadingRef.current || doneRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    try {
+      const page = await fetchBatchTaskRows(
+        task.taskId,
+        task.instanceCode,
+        fieldId,
+        { offset: loadedRef.current, limit: DETAIL_PAGE_SIZE },
+        accessToken,
+      );
+      setColumns((current) => (current.length > 0 ? current : page.columns));
+      setTotal(page.unfilteredTotal);
+      loadedRef.current += page.rows.length;
+      if (page.rows.length > 0) {
+        setRows((current) => [...current, ...page.rows]);
+      }
+      if (page.rows.length === 0 || loadedRef.current >= page.unfilteredTotal) {
+        doneRef.current = true;
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "读取明细失败");
+      doneRef.current = true;
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
+    }
+  }, [accessToken, fieldId, task.instanceCode, task.taskId]);
+
+  useEffect(() => {
+    void loadMore();
+  }, [loadMore]);
+
+  const visibleColumns = useMemo(
+    () => detailVisibleColumns(view, fieldId, columns),
+    [columns, fieldId, view],
+  );
+  const start = Math.max(0, Math.floor(scrollTop / DETAIL_ROW_HEIGHT) - 2);
+  const end = Math.min(
+    rows.length,
+    start + Math.ceil(DETAIL_VIEWPORT_HEIGHT / DETAIL_ROW_HEIGHT) + 4,
+  );
+  const width = Math.max(visibleColumns.length, 1) * 120;
+
+  return (
+    <div className="mt-2 border-t pt-2" data-slot="task-detail">
+      <div className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span>
+          明细 · {field.name}（{visibleColumns.length} 列）
+        </span>
+        <span>
+          已加载 {rows.length} / {total} 行
+        </span>
+      </div>
+      {error ? (
+        <p className="text-xs text-destructive">{error}</p>
+      ) : visibleColumns.length === 0 && !loading ? (
+        <p className="text-xs text-muted-foreground">
+          明细列都已隐藏，可在「字段设置」里勾选要显示的明细列。
+        </p>
+      ) : (
+        <div
+          className="overflow-auto rounded border"
+          style={{ height: DETAIL_VIEWPORT_HEIGHT }}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            setScrollTop(element.scrollTop);
+            if (
+              element.scrollHeight - element.scrollTop - element.clientHeight <
+              120
+            ) {
+              void loadMore();
+            }
+          }}
+        >
+          <div style={{ minWidth: width }}>
+            <div className="sticky top-0 z-10 flex bg-muted text-xs font-medium">
+              {visibleColumns.map((column) => (
+                <div
+                  key={column.id}
+                  className="w-[120px] shrink-0 truncate border-r px-2 py-1.5"
+                  title={column.name}
+                >
+                  {column.name}
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                height: rows.length * DETAIL_ROW_HEIGHT,
+                position: "relative",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  top: start * DETAIL_ROW_HEIGHT,
+                  left: 0,
+                  right: 0,
+                }}
+              >
+                {rows.slice(start, end).map((row, index) => (
+                  <div
+                    key={start + index}
+                    className="flex border-b text-xs"
+                    style={{ height: DETAIL_ROW_HEIGHT }}
+                  >
+                    {visibleColumns.map((column) => {
+                      const cell = row.find((item) => item.id === column.id);
+                      const text = fieldValueText(cell?.value);
+                      return (
+                        <div
+                          key={column.id}
+                          className="w-[120px] shrink-0 truncate border-r px-2 py-1.5"
+                          title={text}
+                        >
+                          {text}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {loading && (
+        <p className="mt-1 text-xs text-muted-foreground">加载中…</p>
+      )}
+    </div>
+  );
+}
+
+function TaskDetailPanels({
+  task,
+  view,
+  accessToken,
+}: {
+  task: BatchTask;
+  view?: BatchViewConfig;
+  accessToken: string | undefined;
+}) {
+  const details = task.formFields.filter(
+    (field) => isDetailField(field) && field.id,
+  );
+  if (details.length === 0) {
+    return <p className="text-xs text-muted-foreground">暂无明细</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {details.map((field) => (
+        <TaskDetailSection
+          key={field.id}
+          task={task}
+          field={field}
+          view={view}
+          accessToken={accessToken}
+        />
+      ))}
+    </div>
+  );
+}
+
 function DefinitionTable({
   tasks,
   view,
+  accessToken,
   selected,
   onSelect,
 }: {
   tasks: BatchTask[];
   view?: BatchViewConfig;
+  accessToken: string | undefined;
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
 }) {
@@ -1278,8 +1502,32 @@ function DefinitionTable({
     .filter((task) => selected[task.taskId])
     .map((task) => task.taskId);
 
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const expandableTasks = tasks.filter((task) =>
+    task.formFields.some((field) => isDetailField(field) && field.id),
+  );
+  const allExpanded =
+    expandableTasks.length > 0 &&
+    expandableTasks.every((task) => expandedKeys.includes(task.taskId));
+
   return (
     <ConfigProvider locale={zhCN}>
+      {expandableTasks.length > 0 && (
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              setExpandedKeys(
+                allExpanded ? [] : expandableTasks.map((task) => task.taskId),
+              )
+            }
+          >
+            {allExpanded ? "全部收起" : "全部展开"}
+          </Button>
+        </div>
+      )}
       <Table<BatchTask>
         rowKey="taskId"
         size="small"
@@ -1288,6 +1536,20 @@ function DefinitionTable({
         columns={columns}
         components={TABLE_COMPONENTS}
         dataSource={tasks}
+        expandable={{
+          expandedRowKeys: expandedKeys,
+          onExpandedRowsChange: (keys) =>
+            setExpandedKeys(keys.map((key) => String(key))),
+          rowExpandable: (task) =>
+            task.formFields.some((field) => isDetailField(field) && field.id),
+          expandedRowRender: (task) => (
+            <TaskDetailPanels
+              task={task}
+              view={view}
+              accessToken={accessToken}
+            />
+          ),
+        }}
         scroll={{ x: "max-content" }}
         pagination={{
           pageSize: 20,
@@ -1787,6 +2049,7 @@ export default function BatchApprovalPage() {
                     <DefinitionTable
                       tasks={group.tasks}
                       view={views[group.code]}
+                      accessToken={token}
                       selected={selected}
                       onSelect={(tableTasks, nextSelection) =>
                         replaceTableSelection(tableTasks, nextSelection)

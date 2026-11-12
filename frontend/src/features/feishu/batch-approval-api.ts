@@ -164,7 +164,13 @@ export type BatchComputedFieldValue = {
   precision: number;
 };
 
-export type BatchComputedOperator = "add" | "subtract" | "multiply" | "divide";
+export type BatchComputedOperator =
+  | "add"
+  | "subtract"
+  | "multiply"
+  | "divide"
+  /// 单操作数（例如明细某列的合计）。
+  | "none";
 
 export const BATCH_COMPUTED_OPERATOR_LABELS: Record<
   BatchComputedOperator,
@@ -174,17 +180,46 @@ export const BATCH_COMPUTED_OPERATOR_LABELS: Record<
   subtract: "减",
   multiply: "乘",
   divide: "除",
+  none: "（单值）",
 };
+
+export const BATCH_COMPUTED_AGGREGATE_LABELS: Record<
+  BatchComputedAggregate,
+  string
+> = {
+  sum: "求和",
+  max: "最大值",
+  min: "最小值",
+  range: "极差（最大−最小）",
+  average: "平均值",
+};
+
+export type BatchComputedAggregate = "sum" | "max" | "min" | "range" | "average";
+
+/// 计算字段的操作数：顶层表单控件，或明细控件里某一列的行级聚合。
+export type BatchComputedOperand =
+  | {
+      kind: "field";
+      fieldId: string;
+      fieldName: string | null;
+    }
+  | {
+      kind: "detail";
+      detailFieldId: string;
+      detailFieldName: string | null;
+      columnId: string;
+      columnName: string | null;
+      aggregate: BatchComputedAggregate;
+    };
 
 /// 用户级视图配置里的一条计算字段规则（`id` 由前端生成，用户维度保存）。
 export type BatchViewComputedRule = {
   id: string;
   name: string;
-  leftFieldId: string;
-  leftFieldName: string | null;
+  left: BatchComputedOperand;
+  /// 单操作数规则（`operator === "none"`）没有右操作数。
+  right: BatchComputedOperand | null;
   operator: BatchComputedOperator;
-  rightFieldId: string;
-  rightFieldName: string | null;
   precision: number;
   enabled: boolean;
 };
@@ -201,12 +236,15 @@ export type BatchViewConfig = {
 };
 
 /// 审批定义里可供计算与展示的控件。
+/// 明细控件（fieldList）的 `children` 是其子控件 ID，用于明细列配置与聚合。
 export type BatchFieldCatalogEntry = {
   id: string;
   name: string;
   qualifiedName: string | null;
   type: string | null;
   required: boolean;
+  parentId: string | null;
+  children: string[];
 };
 
 export type BatchTaskGroup = {
@@ -225,6 +263,33 @@ export type BatchTaskFormField = {
   fieldType: string | null;
   /// 飞书附件控件的原文件名列表等扩展信息。
   ext: unknown;
+  /// 明细控件（fieldList）的总行数；列表接口不返回整份明细。
+  rowCount: number | null;
+  /// 明细首行的前几个非空单元格文本，仅用于列表折叠预览。
+  preview: string[];
+};
+
+export type BatchTaskDetailColumn = {
+  id: string;
+  name: string;
+  type: string | null;
+};
+
+export type BatchTaskDetailCell = {
+  id: string | null;
+  value: unknown;
+  type: string | null;
+};
+
+export type BatchTaskDetailRows = {
+  fieldId: string;
+  name: string;
+  columns: BatchTaskDetailColumn[];
+  rows: BatchTaskDetailCell[][];
+  total: number;
+  unfilteredTotal: number;
+  offset: number;
+  limit: number;
 };
 
 export type BatchTaskTimelineEntry = {
@@ -575,6 +640,12 @@ function parseDetailForm(value: unknown): BatchTaskFormField[] {
             : raw,
       fieldType: firstText(record, "field_type", "type"),
       ext: record && "ext" in record ? record.ext : null,
+      rowCount: numberField(record?.row_count ?? record?.rowCount),
+      preview: Array.isArray(record?.preview)
+        ? record.preview
+            .map((item) => textOf(item))
+            .filter((item): item is string => item !== null)
+        : [],
     };
   });
 }
@@ -920,31 +991,88 @@ function parseViewColumn(raw: unknown): BatchViewColumn | null {
   return { key, visible: record?.visible !== false };
 }
 
+const AGGREGATES = new Set(["sum", "max", "min", "range", "average"]);
+
+function parseViewOperand(
+  raw: unknown,
+  legacy?: {
+    fieldId: string | null;
+    fieldName: string | null;
+  },
+): BatchComputedOperand | null {
+  const record = recordOf(raw);
+  const kind = firstText(record, "kind");
+  if (kind === "field") {
+    const fieldId = firstText(record, "fieldId", "field_id");
+    if (!fieldId) return null;
+    return {
+      kind: "field",
+      fieldId,
+      fieldName: firstText(record, "fieldName", "field_name"),
+    };
+  }
+  if (kind === "detail") {
+    const detailFieldId = firstText(record, "detailFieldId", "detail_field_id");
+    const columnId = firstText(record, "columnId", "column_id");
+    const aggregate = firstText(record, "aggregate");
+    if (!detailFieldId || !columnId || !aggregate || !AGGREGATES.has(aggregate)) {
+      return null;
+    }
+    return {
+      kind: "detail",
+      detailFieldId,
+      detailFieldName: firstText(record, "detailFieldName", "detail_field_name"),
+      columnId,
+      columnName: firstText(record, "columnName", "column_name"),
+      aggregate: aggregate as BatchComputedAggregate,
+    };
+  }
+  // 旧配置只有扁平的 left_field_id/right_field_id。
+  if (legacy?.fieldId) {
+    return {
+      kind: "field",
+      fieldId: legacy.fieldId,
+      fieldName: legacy.fieldName,
+    };
+  }
+  return null;
+}
+
 function parseViewComputedRule(raw: unknown): BatchViewComputedRule | null {
   const record = recordOf(raw);
   const id = firstText(record, "id");
   const name = firstText(record, "name");
+  const operator = firstText(record, "operator");
+  if (!id || !name || !operator) return null;
   const leftFieldId = firstText(record, "leftFieldId", "left_field_id");
   const rightFieldId = firstText(record, "rightFieldId", "right_field_id");
-  const operator = firstText(record, "operator");
-  if (
-    !id ||
-    !name ||
-    !leftFieldId ||
-    !rightFieldId ||
-    !operator ||
-    !(operator in BATCH_COMPUTED_OPERATOR_LABELS)
-  ) {
-    return null;
+  const left = parseViewOperand(record?.left, {
+    fieldId: leftFieldId,
+    fieldName: firstText(record, "leftFieldName", "left_field_name"),
+  });
+  const right = parseViewOperand(record?.right, {
+    fieldId: rightFieldId,
+    fieldName: firstText(record, "rightFieldName", "right_field_name"),
+  });
+  if (!left) return null;
+  if (operator === "none") {
+    return {
+      id,
+      name,
+      left,
+      right: null,
+      operator: "none",
+      precision: numberField(record?.precision) ?? 2,
+      enabled: record?.enabled !== false,
+    };
   }
+  if (!right || !(operator in BATCH_COMPUTED_OPERATOR_LABELS)) return null;
   return {
     id,
     name,
-    leftFieldId,
-    leftFieldName: firstText(record, "leftFieldName", "left_field_name"),
+    left,
+    right,
     operator: operator as BatchComputedOperator,
-    rightFieldId,
-    rightFieldName: firstText(record, "rightFieldName", "right_field_name"),
     precision: numberField(record?.precision) ?? 2,
     enabled: record?.enabled !== false,
   };
@@ -982,6 +1110,26 @@ export function parseBatchViews(
   return views;
 }
 
+function operandBody(operand: BatchComputedOperand): Record<string, unknown> {
+  if (operand.kind === "field") {
+    return {
+      kind: "field",
+      field_id: operand.fieldId,
+      ...(operand.fieldName ? { field_name: operand.fieldName } : {}),
+    };
+  }
+  return {
+    kind: "detail",
+    detail_field_id: operand.detailFieldId,
+    ...(operand.detailFieldName
+      ? { detail_field_name: operand.detailFieldName }
+      : {}),
+    column_id: operand.columnId,
+    ...(operand.columnName ? { column_name: operand.columnName } : {}),
+    aggregate: operand.aggregate,
+  };
+}
+
 function viewRequestBody(
   approvalCode: string,
   view: BatchViewConfig,
@@ -991,11 +1139,9 @@ function viewRequestBody(
     computed_fields: view.computedFields.map((rule) => ({
       id: rule.id,
       name: rule.name,
-      left_field_id: rule.leftFieldId,
-      left_field_name: rule.leftFieldName,
+      left: operandBody(rule.left),
       operator: rule.operator,
-      right_field_id: rule.rightFieldId,
-      right_field_name: rule.rightFieldName,
+      ...(rule.right ? { right: operandBody(rule.right) } : {}),
       precision: rule.precision,
       enabled: rule.enabled,
     })),
@@ -1025,12 +1171,19 @@ export async function fetchBatchFieldCatalog(
       const id = firstText(record, "id");
       const name = firstText(record, "name");
       if (!id || !name) return null;
+      const children = Array.isArray(record?.children)
+        ? record.children
+            .map((child) => textOf(child))
+            .filter((child): child is string => child !== null)
+        : [];
       return {
         id,
         name,
         qualifiedName: firstText(record, "qualifiedName", "qualified_name"),
         type: firstText(record, "type"),
         required: record?.required === true,
+        parentId: firstText(record, "parentId", "parent_id"),
+        children,
       } satisfies BatchFieldCatalogEntry;
     })
     .filter((row): row is BatchFieldCatalogEntry => row !== null);
@@ -1078,4 +1231,68 @@ export async function resetBatchViewConfig(
     accessToken,
     signal,
   );
+}
+
+function parseDetailColumn(raw: unknown): BatchTaskDetailColumn | null {
+  const record = recordOf(raw);
+  const id = firstText(record, "id");
+  if (!id) return null;
+  return {
+    id,
+    name: firstText(record, "name") ?? id,
+    type: firstText(record, "type"),
+  };
+}
+
+function parseDetailCell(raw: unknown): BatchTaskDetailCell {
+  const record = recordOf(raw);
+  return {
+    id: firstText(record, "id"),
+    value: record && "value" in record ? record.value : raw,
+    type: firstText(record, "type"),
+  };
+}
+
+export async function fetchBatchTaskRows(
+  taskId: string,
+  instanceCode: string,
+  fieldId: string,
+  page: { offset: number; limit: number; search?: string },
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<BatchTaskDetailRows> {
+  const params = new URLSearchParams({
+    instance_code: instanceCode,
+    field_id: fieldId,
+    offset: String(page.offset),
+    limit: String(page.limit),
+  });
+  if (page.search?.trim()) params.set("search", page.search.trim());
+  const data = await request(
+    `/api/v1/feishu/batch-approval/tasks/${encodeURIComponent(taskId)}/rows?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+    signal,
+  );
+  const container = recordOf(data);
+  const columns = Array.isArray(container?.columns)
+    ? container.columns
+        .map(parseDetailColumn)
+        .filter((item): item is BatchTaskDetailColumn => item !== null)
+    : [];
+  const rows = Array.isArray(container?.rows)
+    ? container.rows
+        .filter((row): row is unknown[] => Array.isArray(row))
+        .map((row) => row.map(parseDetailCell))
+    : [];
+  return {
+    fieldId: firstText(container, "field_id", "fieldId") ?? fieldId,
+    name: firstText(container, "name") ?? fieldId,
+    columns,
+    rows,
+    total: numberField(container?.total) ?? rows.length,
+    unfilteredTotal: numberField(container?.unfiltered_total) ?? rows.length,
+    offset: numberField(container?.offset) ?? page.offset,
+    limit: numberField(container?.limit) ?? page.limit,
+  };
 }

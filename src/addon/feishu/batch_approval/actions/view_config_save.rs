@@ -53,8 +53,8 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     let user_id = crate::addon::feishu::sso::require_current_user(&ctx)?;
     let (code, view) = parse_view_input(input)?;
-    let widget_ids = field_catalog::widget_ids(&ctx, &context, &code).await?;
-    view.validate_widgets(&widget_ids)?;
+    let catalog = field_catalog::load_catalog(&ctx, &context, &code).await?;
+    view.validate_widgets(&catalog)?;
     view::upsert(&ctx, &context, user_id, &code, &view).await?;
 
     let event = audit::succeeded_event(

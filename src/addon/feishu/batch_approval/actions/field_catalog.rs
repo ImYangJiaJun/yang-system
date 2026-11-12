@@ -1,15 +1,13 @@
 //! 审批定义控件目录：供个人视图选择显示字段和计算字段的操作数。
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use serde_json::Value;
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::BaseError;
 
+use super::super::domain::widget_catalog::{self, WidgetCatalog};
 use crate::addon::feishu::domain::approval::get_approval_definition;
-use crate::addon::feishu::domain::approval_match::preview_widgets;
 use crate::addon::feishu::domain::approval_provision::parse_form;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
@@ -50,15 +48,15 @@ pub(super) async fn handle(
             "不能为空".to_string(),
         ));
     }
-    let widgets = load_widgets(&ctx, &context, code).await?;
-    ApiResponse::success(serde_json::json!({ "widgets": widgets }), "ok")
+    let widgets = load_catalog(&ctx, &context, code).await?;
+    ApiResponse::success(serde_json::json!({ "widgets": widgets.to_json() }), "ok")
 }
 
-async fn load_widgets(
+pub(super) async fn load_catalog(
     ctx: &ActionContext,
     context: &FeishuContext,
     approval_code: &str,
-) -> Result<Vec<Value>, BaseError> {
+) -> Result<WidgetCatalog, BaseError> {
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
         return Err(BaseError::ParamInvalid(
             "feishu".to_string(),
@@ -82,30 +80,5 @@ async fn load_widgets(
     })?;
     let widgets = parse_form(form)
         .map_err(|error| BaseError::ParamInvalid("approval_code".to_string(), error.to_string()))?;
-    Ok(preview_widgets(&widgets)
-        .into_iter()
-        .map(|(widget, qualified_name)| {
-            serde_json::json!({
-                "id": widget.id,
-                "name": widget.name,
-                "qualified_name": qualified_name,
-                "type": widget.r#type,
-                "required": widget.required,
-            })
-        })
-        .collect())
-}
-
-/// 只取当前审批定义允许被视图引用的控件 ID。
-pub(super) async fn widget_ids(
-    ctx: &ActionContext,
-    context: &FeishuContext,
-    approval_code: &str,
-) -> Result<HashSet<String>, BaseError> {
-    let widgets = load_widgets(ctx, context, approval_code).await?;
-    Ok(widgets
-        .iter()
-        .filter_map(|widget| widget.get("id").and_then(Value::as_str))
-        .map(ToString::to_string)
-        .collect())
+    Ok(widget_catalog::build(&widgets))
 }

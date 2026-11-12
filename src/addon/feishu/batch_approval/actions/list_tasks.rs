@@ -172,14 +172,7 @@ fn view_map(
 }
 
 fn form_fields(detail: &Value) -> Vec<Value> {
-    let rows = match detail.get("form") {
-        Some(Value::Array(rows)) => rows.clone(),
-        Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
-            .ok()
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let rows = form_rows(detail);
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
@@ -196,6 +189,18 @@ fn form_fields(detail: &Value) -> Vec<Value> {
             let field_type = row.get("type").and_then(Value::as_str).unwrap_or("");
             let ext = row.get("ext").cloned().unwrap_or(Value::Null);
             let field_id = row.get("id").and_then(Value::as_str).unwrap_or("");
+            if is_detail_type(field_type) {
+                let rows = detail_rows(&value);
+                return serde_json::json!({
+                    "id": field_id,
+                    "name": name,
+                    "value": Value::Null,
+                    "field_type": field_type,
+                    "ext": ext,
+                    "row_count": rows.len(),
+                    "preview": preview_cells(&rows),
+                });
+            }
             serde_json::json!({
                 "id": field_id,
                 "name": name,
@@ -205,6 +210,69 @@ fn form_fields(detail: &Value) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn form_rows(detail: &Value) -> Vec<Value> {
+    match detail.get("form") {
+        Some(Value::Array(rows)) => rows.clone(),
+        Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_detail_type(field_type: &str) -> bool {
+    field_type.eq_ignore_ascii_case("fieldList") || field_type.eq_ignore_ascii_case("field_list")
+}
+
+/// 明细的 `value` 是行数组，每行又是单元格数组；也兼容被序列化成字符串的形态。
+fn detail_rows(value: &Value) -> Vec<Value> {
+    match value {
+        Value::Array(rows) => rows.clone(),
+        Value::String(raw) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// 第一行前 3 个非空单元格的文本，仅用于列表里的折叠预览。
+fn preview_cells(rows: &[Value]) -> Vec<String> {
+    rows.first()
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|cell| text_of(cell.get("value").unwrap_or(cell)))
+                .filter(|text| !text.is_empty())
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn text_of(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.trim().to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(boolean) => boolean.to_string(),
+        Value::Object(map) => map
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(text_of)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("、"),
+    }
 }
 
 fn task_list(detail: &Value) -> &[Value] {
@@ -305,6 +373,35 @@ mod tests {
         assert_eq!(fields[2]["field_type"], "attachmentV2");
         assert_eq!(fields[2]["ext"], "'发票.pdf'");
         assert_eq!(fields[2]["value"][0], "https://files.example.com/a.pdf");
+    }
+
+    #[test]
+    fn form_fields_condense_detail_rows() {
+        let detail = json!({
+            "form": [
+                {
+                    "id": "items",
+                    "name": "费用明细",
+                    "type": "fieldList",
+                    "value": [
+                        [
+                            {"id": "name", "type": "input", "value": "笔记本"},
+                            {"id": "qty", "type": "number", "value": 2},
+                            {"id": "note", "type": "input", "value": ""},
+                            {"id": "price", "type": "amount", "value": {"text": "4500"}}
+                        ],
+                        [{"id": "name", "type": "input", "value": "鼠标"}]
+                    ]
+                },
+                {"id": "total", "name": "合计", "type": "amount", "value": 9000}
+            ]
+        });
+        let fields = form_fields(&detail);
+        assert_eq!(fields[0]["value"], serde_json::Value::Null);
+        assert_eq!(fields[0]["row_count"], 2);
+        assert_eq!(fields[0]["preview"], json!(["笔记本", "2", "4500"]));
+        assert_eq!(fields[1]["value"], 9000);
+        assert!(fields[1].get("row_count").is_none());
     }
 
     #[test]

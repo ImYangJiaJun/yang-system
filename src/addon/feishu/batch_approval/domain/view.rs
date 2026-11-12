@@ -10,7 +10,8 @@ use yang_base::action::ActionContext;
 use yang_base::table::Record;
 use yang_base::BaseError;
 
-use super::computed::{ComputedRule, Operator};
+use super::computed::{Aggregate, ComputedRule, Operand, Operator};
+use super::widget_catalog::WidgetCatalog;
 use crate::addon::feishu::domain::batch_user_view_table::{
     VIEW_APPROVAL_CODE, VIEW_COLUMNS_JSON, VIEW_COMPUTED_FIELDS_JSON, VIEW_USER_ID,
 };
@@ -31,7 +32,8 @@ const BASE_COLUMNS: [&str; 6] = [
     "apiOperate",
 ];
 
-/// 一列的显示配置。`key` 形如 `form:<widget_id>` 或 `computed:<rule_id>`。
+/// 一列的显示配置。`key` 形如 `form:<widget_id>`、`computed:<rule_id>` 或
+/// `detail:<detail_field_id>:<column_id>`（明细内的列）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ColumnConfig {
     pub(crate) key: String,
@@ -87,24 +89,37 @@ impl BatchUserView {
     }
 
     /// 保存前检查引用的控件确实属于该审批定义，并拒绝计算列引用不存在的规则。
-    pub(crate) fn validate_widgets(&self, widget_ids: &HashSet<String>) -> Result<(), BaseError> {
+    pub(crate) fn validate_widgets(&self, catalog: &WidgetCatalog) -> Result<(), BaseError> {
         for rule in &self.computed_fields {
-            for (field, id) in [
-                ("left_field_id", &rule.left_field_id),
-                ("right_field_id", &rule.right_field_id),
-            ] {
-                if !widget_ids.contains(id) {
-                    return Err(invalid(
-                        "computed_fields",
-                        format!("{field} 指向的控件 {id} 不属于该审批定义"),
-                    ));
-                }
+            let left = rule.left_operand().ok_or_else(|| {
+                invalid(
+                    "computed_fields",
+                    format!("规则「{}」缺少左操作数", rule.name),
+                )
+            })?;
+            validate_operand_target(&left, catalog)?;
+            if let Some(right) = rule.right_operand() {
+                validate_operand_target(&right, catalog)?;
             }
         }
         for column in &self.columns {
             if let Some(id) = column.key.strip_prefix("form:") {
-                if !widget_ids.contains(id) {
+                if !catalog.contains(id) {
                     return Err(invalid("columns", format!("列 {id} 不属于该审批定义")));
+                }
+            }
+            if let Some((detail_id, column_id)) = detail_key(&column.key) {
+                if !catalog.is_detail(detail_id) {
+                    return Err(invalid(
+                        "columns",
+                        format!("明细控件 {detail_id} 不属于该审批定义或不是明细"),
+                    ));
+                }
+                if !catalog.children(detail_id).iter().any(|id| id == column_id) {
+                    return Err(invalid(
+                        "columns",
+                        format!("字段 {column_id} 不是明细 {detail_id} 的子控件"),
+                    ));
                 }
             }
         }
@@ -147,6 +162,7 @@ fn parse_rules(value: &Value) -> Result<Vec<ComputedRule>, BaseError> {
     for row in rows {
         let rule: ComputedRule = serde_json::from_value(row.clone())
             .map_err(|error| invalid("computed_fields", format!("规则格式错误：{error}")))?;
+        let rule = rule.normalized();
         validate_rule(&rule)?;
         if !ids.insert(rule.id.clone()) {
             return Err(invalid("computed_fields", "规则 id 不能重复"));
@@ -183,17 +199,37 @@ fn parse_columns(value: &Value) -> Result<Vec<ColumnConfig>, BaseError> {
 fn validate_rule(rule: &ComputedRule) -> Result<(), BaseError> {
     validate_text("computed_fields.id", &rule.id, MAX_ID)?;
     validate_text("computed_fields.name", &rule.name, MAX_NAME)?;
-    validate_text("computed_fields.left_field_id", &rule.left_field_id, MAX_ID)?;
-    validate_text(
-        "computed_fields.right_field_id",
-        &rule.right_field_id,
-        MAX_ID,
-    )?;
-    if Operator::parse(&rule.operator).is_none() {
-        return Err(invalid(
-            "computed_fields.operator",
-            "只支持 add/subtract/multiply/divide",
-        ));
+    let left = rule.left_operand().ok_or_else(|| {
+        invalid(
+            "computed_fields",
+            format!("规则「{}」缺少左操作数", rule.name),
+        )
+    })?;
+    validate_operand(&left)?;
+    match rule.right_operand() {
+        Some(right) => {
+            if rule.is_unary() {
+                return Err(invalid(
+                    "computed_fields.operator",
+                    "单操作数规则不能再配置右操作数",
+                ));
+            }
+            if Operator::parse(&rule.operator).is_none() {
+                return Err(invalid(
+                    "computed_fields.operator",
+                    "只支持 add/subtract/multiply/divide/none",
+                ));
+            }
+            validate_operand(&right)?;
+        }
+        None => {
+            if !rule.is_unary() {
+                return Err(invalid(
+                    "computed_fields.operator",
+                    "双操作数规则缺少右操作数",
+                ));
+            }
+        }
     }
     if rule.precision > 6 {
         return Err(invalid(
@@ -201,12 +237,86 @@ fn validate_rule(rule: &ComputedRule) -> Result<(), BaseError> {
             "小数位必须在 0 到 6 之间",
         ));
     }
-    for (field, name) in [
-        ("left_field_name", rule.left_field_name.as_deref()),
-        ("right_field_name", rule.right_field_name.as_deref()),
-    ] {
-        if let Some(name) = name {
-            validate_text(field, name, MAX_ID)?;
+    Ok(())
+}
+
+fn validate_operand(operand: &Operand) -> Result<(), BaseError> {
+    match operand {
+        Operand::Field {
+            field_id,
+            field_name,
+        } => {
+            validate_text("computed_fields.field_id", field_id, MAX_ID)?;
+            if let Some(name) = field_name {
+                validate_text("computed_fields.field_name", name, MAX_ID)?;
+            }
+        }
+        Operand::Detail {
+            detail_field_id,
+            detail_field_name,
+            column_id,
+            column_name,
+            aggregate,
+        } => {
+            validate_text("computed_fields.detail_field_id", detail_field_id, MAX_ID)?;
+            validate_text("computed_fields.column_id", column_id, MAX_ID)?;
+            if Aggregate::parse(aggregate).is_none() {
+                return Err(invalid(
+                    "computed_fields.aggregate",
+                    "只支持 sum/max/min/range/average",
+                ));
+            }
+            for (field, name) in [
+                ("detail_field_name", detail_field_name.as_deref()),
+                ("column_name", column_name.as_deref()),
+            ] {
+                if let Some(name) = name {
+                    validate_text(field, name, MAX_ID)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 控件引用必须落在定义里：普通操作数只能选叶子控件，明细操作数必须选明细的子控件。
+fn validate_operand_target(operand: &Operand, catalog: &WidgetCatalog) -> Result<(), BaseError> {
+    match operand {
+        Operand::Field { field_id, .. } => {
+            if !catalog.contains(field_id) {
+                return Err(invalid(
+                    "computed_fields",
+                    format!("控件 {field_id} 不属于该审批定义"),
+                ));
+            }
+            if catalog.is_detail(field_id) || !catalog.children(field_id).is_empty() {
+                return Err(invalid(
+                    "computed_fields",
+                    format!("控件 {field_id} 是分组/明细控件，不能直接参与计算"),
+                ));
+            }
+        }
+        Operand::Detail {
+            detail_field_id,
+            column_id,
+            ..
+        } => {
+            if !catalog.is_detail(detail_field_id) {
+                return Err(invalid(
+                    "computed_fields",
+                    format!("明细控件 {detail_field_id} 不属于该审批定义或不是明细"),
+                ));
+            }
+            if !catalog
+                .children(detail_field_id)
+                .iter()
+                .any(|id| id == column_id)
+            {
+                return Err(invalid(
+                    "computed_fields",
+                    format!("字段 {column_id} 不是明细 {detail_field_id} 的子控件"),
+                ));
+            }
         }
     }
     Ok(())
@@ -219,6 +329,13 @@ fn validate_key(key: &str) -> Result<(), BaseError> {
     if let Some(id) = key.strip_prefix("computed:") {
         return validate_text("columns.key", id, MAX_ID);
     }
+    if let Some(rest) = key.strip_prefix("detail:") {
+        let (detail_id, column_id) = rest
+            .split_once(':')
+            .ok_or_else(|| invalid("columns.key", "明细列必须形如 detail:<明细控件>:<子控件>"))?;
+        validate_text("columns.key.detail", detail_id, MAX_ID)?;
+        return validate_text("columns.key.column", column_id, MAX_ID);
+    }
     if let Some(name) = key.strip_prefix("base:") {
         if BASE_COLUMNS.contains(&name) {
             return Ok(());
@@ -227,8 +344,12 @@ fn validate_key(key: &str) -> Result<(), BaseError> {
     }
     Err(invalid(
         "columns.key",
-        "只允许 form:<widget_id>、computed:<rule_id> 或 base:<name>",
+        "只允许 form:<widget_id>、computed:<rule_id>、detail:<detail_id>:<column_id> 或 base:<name>",
     ))
+}
+
+fn detail_key(key: &str) -> Option<(&str, &str)> {
+    key.strip_prefix("detail:")?.split_once(':')
 }
 
 fn validate_text(field: &str, value: &str, max: usize) -> Result<(), BaseError> {
@@ -488,6 +609,40 @@ mod tests {
     }
 
     #[test]
+    fn accepts_detail_column_keys_and_validates_children() {
+        let catalog = super::super::widget_catalog::for_test(&[
+            ("items", "fieldList", &["price", "qty"] as &[&str]),
+            ("price", "amount", &[] as &[&str]),
+            ("qty", "number", &[] as &[&str]),
+        ]);
+        let view = BatchUserView::parse(
+            &json!([]),
+            &json!([{"key":"detail:items:price","visible":true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert!(view.validate_widgets(&catalog).is_ok());
+
+        let wrong_column = BatchUserView::parse(
+            &json!([]),
+            &json!([{"key":"detail:items:missing","visible":true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert!(wrong_column.validate_widgets(&catalog).is_err());
+
+        let not_detail = BatchUserView::parse(
+            &json!([]),
+            &json!([{"key":"detail:price:qty","visible":true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert!(not_detail.validate_widgets(&catalog).is_err());
+
+        assert!(
+            BatchUserView::parse(&json!([]), &json!([{"key":"detail:items","visible":true}]))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn normalizes_and_deduplicates_codes() {
         let codes = normalize_codes(" A, B,A ,, ").unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(codes, vec!["A".to_string(), "B".to_string()]);
@@ -508,10 +663,68 @@ mod tests {
             ]),
         )
         .unwrap_or_else(|error| panic!("应解析成功: {error}"));
-        let widgets = ["amount", "rate"]
-            .into_iter()
-            .map(ToString::to_string)
-            .collect();
-        assert!(view.validate_widgets(&widgets).is_err());
+        let catalog = super::super::widget_catalog::for_test(&[
+            ("amount", "amount", &[] as &[&str]),
+            ("rate", "number", &[] as &[&str]),
+        ]);
+        assert!(view.validate_widgets(&catalog).is_err());
+    }
+
+    #[test]
+    fn accepts_detail_aggregate_operands() {
+        let view = BatchUserView::parse(
+            &json!([{
+                "id": "c1",
+                "name": "明细金额合计",
+                "left": {
+                    "kind": "detail",
+                    "detail_field_id": "items",
+                    "column_id": "price",
+                    "aggregate": "sum"
+                },
+                "operator": "none",
+                "precision": 2,
+                "enabled": true
+            }]),
+            &json!([{"key": "computed:c1", "visible": true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        let catalog = super::super::widget_catalog::for_test(&[
+            ("items", "fieldList", &["price", "qty"] as &[&str]),
+            ("price", "amount", &[] as &[&str]),
+            ("qty", "number", &[] as &[&str]),
+        ]);
+        assert!(view.validate_widgets(&catalog).is_ok());
+
+        let wrong_column = BatchUserView::parse(
+            &json!([{
+                "id": "c1",
+                "name": "明细金额合计",
+                "left": {
+                    "kind": "detail",
+                    "detail_field_id": "items",
+                    "column_id": "missing",
+                    "aggregate": "sum"
+                },
+                "operator": "none",
+                "precision": 2
+            }]),
+            &json!([{"key": "computed:c1", "visible": true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert!(wrong_column.validate_widgets(&catalog).is_err());
+
+        let detail_as_field = BatchUserView::parse(
+            &json!([{
+                "id": "c1",
+                "name": "错误引用",
+                "left": {"kind": "field", "field_id": "items"},
+                "operator": "none",
+                "precision": 2
+            }]),
+            &json!([{"key": "computed:c1", "visible": true}]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert!(detail_as_field.validate_widgets(&catalog).is_err());
     }
 }
