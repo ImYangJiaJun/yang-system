@@ -41,15 +41,7 @@ pub(super) async fn handle(
     let _user_id = require_current_user(&ctx)?;
     validate_attachment_url(&input.url)?;
     let filename = safe_filename(&input.name);
-    let extension = Path::new(&filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 8
-                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
-        .unwrap_or("bin");
+    let extension = attachment_extension(&filename, &input.url);
     let response = ctx
         .tools()
         .http()?
@@ -93,6 +85,30 @@ pub(super) async fn handle(
     } else {
         Ok(ResponseBody::download(path, filename))
     }
+}
+
+/// 优先用附件名扩展名；附件名没有扩展名时回退到地址路径，保证 PDF/图片能用正确 MIME 内联。
+fn attachment_extension(name: &str, url: &str) -> String {
+    if let Some(extension) =
+        valid_extension(Path::new(name).extension().and_then(|value| value.to_str()))
+    {
+        return extension.to_string();
+    }
+    let path = url.split(['?', '#']).next().unwrap_or_default();
+    if let Some(extension) =
+        valid_extension(Path::new(path).extension().and_then(|value| value.to_str()))
+    {
+        return extension.to_string();
+    }
+    "bin".to_string()
+}
+
+fn valid_extension(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| {
+        !value.is_empty()
+            && value.len() <= 8
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 /// 只允许飞书文件域，避免把这个端点变成任意 URL 的 SSRF 通道。
@@ -165,5 +181,21 @@ mod tests {
     fn filename_never_contains_path_separators() {
         assert_eq!(safe_filename("../a\\b.png"), "..ab.png");
         assert_eq!(safe_filename("  "), "attachment");
+    }
+
+    #[test]
+    fn extension_falls_back_to_the_url_path() {
+        assert_eq!(
+            attachment_extension("扫描件", "https://open.feishu.cn/file/a.pdf?x=1"),
+            "pdf"
+        );
+        assert_eq!(
+            attachment_extension("凭证.png", "https://open.feishu.cn/a"),
+            "png"
+        );
+        assert_eq!(
+            attachment_extension("无扩展名", "https://open.feishu.cn/a"),
+            "bin"
+        );
     }
 }
