@@ -637,7 +637,11 @@ describe("BatchApprovalPage", () => {
 
     await screen.findByText("报销单 A");
     expect(
-      screen.getByText("明细 3 行：笔记本 · 4500"),
+      document.querySelector('[data-slot="detail-count"]'),
+    ).toHaveTextContent("3 行");
+    expect(screen.getByText("首行：笔记本 · 4500")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "展开明细" }),
     ).toBeInTheDocument();
 
     const user = userEvent.setup();
@@ -646,7 +650,7 @@ describe("BatchApprovalPage", () => {
     expect(screen.getByText("笔记本")).toBeInTheDocument();
     expect(screen.getByText("鼠标")).toBeInTheDocument();
     expect(screen.getByText("键盘")).toBeInTheDocument();
-    expect(screen.getByText("已加载 3 / 3 行")).toBeInTheDocument();
+    expect(screen.getByText("共 3 行 · 已加载 3 行")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "全部收起" }),
     ).toBeInTheDocument();

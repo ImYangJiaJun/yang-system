@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type HTMLAttributes,
+  type MouseEventHandler,
   type ReactNode,
   type SyntheticEvent,
 } from "react";
@@ -18,6 +19,7 @@ import {
 } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -795,6 +797,19 @@ function fieldDisplayText(field: BatchTaskFormField): string {
   return fieldValueText(field.value);
 }
 
+/// 明细列在单元格里只显示行数与首行预览，展开后由 TaskDetailSection 加载全部行。
+function detailFieldOf(
+  task: BatchTask,
+  field: { id: string | null; name: string },
+): BatchTaskFormField | undefined {
+  return task.formFields.find(
+    (row) =>
+      !isDescriptionField(row) &&
+      isDetailField(row) &&
+      (field.id ? row.id === field.id : row.name === field.name),
+  );
+}
+
 function formFieldText(
   task: BatchTask,
   field: { id: string | null; name: string },
@@ -1135,6 +1150,26 @@ function buildTaskColumns(
       onFilter: (value, task) =>
         (formFieldText(task, field) || "—") === String(value),
       render: (_, task) => {
+        const detail = detailFieldOf(task, field);
+        if (detail) {
+          const count =
+            detail.rowCount ??
+            (Array.isArray(detail.value) ? detail.value.length : 0);
+          const preview = detail.preview.join(" · ");
+          return (
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-xs" data-slot="detail-count">
+                <b className="font-semibold">{count}</b> 行
+              </span>
+              <span
+                className="truncate text-[11px] text-muted-foreground"
+                title={preview ? `首行：${preview}` : undefined}
+              >
+                首行：{preview || "—"}
+              </span>
+            </div>
+          );
+        }
         const files = task.formFields
           .filter(
             (row) =>
@@ -1244,11 +1279,48 @@ function ResizableHeaderCell({
   );
 }
 
-const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
+/// 展开明细的入口放在勾选列右侧，只在真的有明细的任务上出现。
+function TaskExpandIcon({
+  type,
+  expanded,
+  expandable,
+  onClick,
+}: {
+  type: "row" | "all";
+  expanded: boolean;
+  expandable: boolean;
+  onClick: MouseEventHandler<HTMLElement>;
+}) {
+  if (type !== "row" || !expandable) return null;
+  return (
+    <button
+      type="button"
+      aria-label={expanded ? "收起明细" : "展开明细"}
+      aria-expanded={expanded}
+      className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      onClick={onClick}
+    >
+      <ChevronDown
+        className={
+          expanded
+            ? "size-4 rotate-180 transition-transform"
+            : "size-4 transition-transform"
+        }
+      />
+    </button>
+  );
+}
+
+const TABLE_COMPONENTS = {
+  header: { cell: ResizableHeaderCell },
+  ExpandIcon: TaskExpandIcon,
+};
 
 const DETAIL_PAGE_SIZE = 50;
 const DETAIL_ROW_HEIGHT = 34;
-const DETAIL_VIEWPORT_HEIGHT = 320;
+/// 明细只有一两行时不要撑出固定高度，最多 300px。
+const DETAIL_MAX_HEIGHT = 300;
+const DETAIL_MIN_HEIGHT = 72;
 
 /// 明细列顺序/可见性来自字段设置里的 `detail:<明细控件>:<子控件>` 配置；
 /// 没有配置时按控件目录顺序全部展示。
@@ -1330,50 +1402,49 @@ function TaskDetailSection({
     () => detailVisibleColumns(view, fieldId, columns),
     [columns, fieldId, view],
   );
+  const viewportHeight =
+    rows.length === 0
+      ? DETAIL_MIN_HEIGHT
+      : Math.min(
+          Math.max(rows.length * DETAIL_ROW_HEIGHT, DETAIL_ROW_HEIGHT),
+          DETAIL_MAX_HEIGHT,
+        );
   const start = Math.max(0, Math.floor(scrollTop / DETAIL_ROW_HEIGHT) - 2);
   const end = Math.min(
     rows.length,
-    start + Math.ceil(DETAIL_VIEWPORT_HEIGHT / DETAIL_ROW_HEIGHT) + 4,
+    start + Math.ceil(viewportHeight / DETAIL_ROW_HEIGHT) + 4,
   );
-  const width = Math.max(visibleColumns.length, 1) * 120;
+  const gridTemplate = `44px repeat(${Math.max(visibleColumns.length, 1)}, minmax(0, 1fr))`;
+  const minWidth = 44 + Math.max(visibleColumns.length, 1) * 120;
 
   return (
-    <div className="mt-2 border-t pt-2" data-slot="task-detail">
-      <div className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span>
-          明细 · {field.name}（{visibleColumns.length} 列）
+    <div data-slot="task-detail">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-[13px] font-semibold">明细 · {field.name}</span>
+        <span className="text-xs text-muted-foreground">
+          共 {total} 行 · 已加载 {rows.length} 行
         </span>
-        <span>
-          已加载 {rows.length} / {total} 行
-        </span>
+        {loading && (
+          <span className="text-xs text-muted-foreground">加载中…</span>
+        )}
+        {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
-      {error ? (
-        <p className="text-xs text-destructive">{error}</p>
-      ) : visibleColumns.length === 0 && !loading ? (
+      {!error && visibleColumns.length === 0 && !loading ? (
         <p className="text-xs text-muted-foreground">
           明细列都已隐藏，可在「字段设置」里勾选要显示的明细列。
         </p>
       ) : (
-        <div
-          className="overflow-auto rounded border"
-          style={{ height: DETAIL_VIEWPORT_HEIGHT }}
-          onScroll={(event) => {
-            const element = event.currentTarget;
-            setScrollTop(element.scrollTop);
-            if (
-              element.scrollHeight - element.scrollTop - element.clientHeight <
-              120
-            ) {
-              void loadMore();
-            }
-          }}
-        >
-          <div style={{ minWidth: width }}>
-            <div className="sticky top-0 z-10 flex bg-muted text-xs font-medium">
+        !error && (
+          <div className="overflow-hidden rounded-lg border bg-white">
+            <div
+              className="grid border-b bg-muted/60 text-xs font-medium text-muted-foreground"
+              style={{ gridTemplateColumns: gridTemplate, minWidth }}
+            >
+              <div className="px-2.5 py-2 text-center">#</div>
               {visibleColumns.map((column) => (
                 <div
                   key={column.id}
-                  className="w-[120px] shrink-0 truncate border-r px-2 py-1.5"
+                  className="truncate border-l px-2.5 py-2"
                   title={column.name}
                 >
                   {column.name}
@@ -1381,47 +1452,68 @@ function TaskDetailSection({
               ))}
             </div>
             <div
-              style={{
-                height: rows.length * DETAIL_ROW_HEIGHT,
-                position: "relative",
+              className="overflow-auto"
+              style={{ height: viewportHeight }}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                setScrollTop(element.scrollTop);
+                if (
+                  element.scrollHeight -
+                    element.scrollTop -
+                    element.clientHeight <
+                  120
+                ) {
+                  void loadMore();
+                }
               }}
             >
               <div
                 style={{
-                  position: "absolute",
-                  top: start * DETAIL_ROW_HEIGHT,
-                  left: 0,
-                  right: 0,
+                  height: rows.length * DETAIL_ROW_HEIGHT,
+                  minWidth,
+                  position: "relative",
                 }}
               >
-                {rows.slice(start, end).map((row, index) => (
-                  <div
-                    key={start + index}
-                    className="flex border-b text-xs"
-                    style={{ height: DETAIL_ROW_HEIGHT }}
-                  >
-                    {visibleColumns.map((column) => {
-                      const cell = row.find((item) => item.id === column.id);
-                      const text = fieldValueText(cell?.value);
-                      return (
-                        <div
-                          key={column.id}
-                          className="w-[120px] shrink-0 truncate border-r px-2 py-1.5"
-                          title={text}
-                        >
-                          {text}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
+                <div
+                  style={{
+                    position: "absolute",
+                    top: start * DETAIL_ROW_HEIGHT,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {rows.slice(start, end).map((row, index) => (
+                    <div
+                      key={start + index}
+                      className="grid items-center border-b text-[13px] last:border-b-0 hover:bg-[#f7fbff]"
+                      style={{
+                        height: DETAIL_ROW_HEIGHT,
+                        gridTemplateColumns: gridTemplate,
+                      }}
+                    >
+                      <div className="truncate px-2.5 text-center text-xs tabular-nums text-muted-foreground">
+                        {start + index + 1}
+                      </div>
+                      {visibleColumns.map((column) => {
+                        const cell = row.find((item) => item.id === column.id);
+                        const text = fieldValueText(cell?.value);
+                        return (
+                          <div
+                            key={column.id}
+                            className="truncate border-l px-2.5"
+                            title={text}
+                          >
+                            {text}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
-      {loading && (
-        <p className="mt-1 text-xs text-muted-foreground">加载中…</p>
+        )
       )}
     </div>
   );
@@ -1443,7 +1535,7 @@ function TaskDetailPanels({
     return <p className="text-xs text-muted-foreground">暂无明细</p>;
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-4 px-3.5 py-3">
       {details.map((field) => (
         <TaskDetailSection
           key={field.id}
@@ -1498,6 +1590,10 @@ function DefinitionTable({
       }),
     [baseColumns, columnWidths],
   );
+  const columnsWithExpand = useMemo(
+    () => [Table.EXPAND_COLUMN, ...columns] as TableColumnsType<BatchTask>,
+    [columns],
+  );
   const selectedRowKeys = tasks
     .filter((task) => selected[task.taskId])
     .map((task) => task.taskId);
@@ -1512,6 +1608,10 @@ function DefinitionTable({
 
   return (
     <ConfigProvider locale={zhCN}>
+      <style>{`
+        .batch-expanded-row > td { background: #fafcff !important; padding: 0 !important; }
+        .batch-expanded-row:hover > td { background: #fafcff !important; }
+      `}</style>
       {expandableTasks.length > 0 && (
         <div className="flex justify-end">
           <Button
@@ -1533,11 +1633,13 @@ function DefinitionTable({
         size="small"
         bordered
         tableLayout="fixed"
-        columns={columns}
+        columns={columnsWithExpand}
         components={TABLE_COMPONENTS}
         dataSource={tasks}
         expandable={{
+          columnWidth: 44,
           expandedRowKeys: expandedKeys,
+          expandedRowClassName: () => "batch-expanded-row",
           onExpandedRowsChange: (keys) =>
             setExpandedKeys(keys.map((key) => String(key))),
           rowExpandable: (task) =>
