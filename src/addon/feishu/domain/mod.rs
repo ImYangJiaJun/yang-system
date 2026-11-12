@@ -15,6 +15,7 @@ pub(crate) mod approval_provision;
 pub(crate) mod approval_rate_limit;
 pub(crate) mod approval_row_edit;
 pub(crate) mod approval_uuid;
+pub(crate) mod batch_computed_field_table;
 pub(crate) mod batch_job_item_table;
 pub(crate) mod batch_job_table;
 pub(crate) mod bitable;

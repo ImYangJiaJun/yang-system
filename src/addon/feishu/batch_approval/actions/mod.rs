@@ -2,6 +2,7 @@
 
 mod attachment;
 pub(crate) mod cancel_job;
+mod computed_fields;
 mod create_job;
 mod get_job;
 mod list_tasks;
@@ -21,6 +22,7 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = create_job::register(module, Arc::clone(&context));
     let module = get_job::register(module, Arc::clone(&context));
     let module = attachment::register(module, Arc::clone(&context));
+    let module = computed_fields::register(module, Arc::clone(&context));
     cancel_job::register(module, context)
 }
 

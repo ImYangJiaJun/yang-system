@@ -152,7 +152,49 @@ export type BatchTask = {
   currentNodeNames: string[];
   /// 当前用户在这条任务上负责的节点。
   myNodeName: string | null;
+  /// 后端按审批定义配置计算出的只读字段。
+  computedFields: BatchComputedFieldValue[];
 };
+
+export type BatchComputedFieldValue = {
+  key: string;
+  name: string;
+  value: number | null;
+  display: string | null;
+  precision: number;
+};
+
+export type BatchComputedOperator = "add" | "subtract" | "multiply" | "divide";
+
+export const BATCH_COMPUTED_OPERATOR_LABELS: Record<
+  BatchComputedOperator,
+  string
+> = {
+  add: "加",
+  subtract: "减",
+  multiply: "乘",
+  divide: "除",
+};
+
+export type BatchComputedFieldConfig = {
+  id: number;
+  approvalCode: string;
+  name: string;
+  leftFieldId: string;
+  leftFieldName: string | null;
+  operator: BatchComputedOperator;
+  rightFieldId: string;
+  rightFieldName: string | null;
+  precision: number;
+  enabled: boolean;
+  sortOrder: number;
+  updatedAt: number | null;
+};
+
+export type BatchComputedFieldInput = Omit<
+  BatchComputedFieldConfig,
+  "id" | "updatedAt"
+>;
 
 export type BatchTaskGroup = {
   key: string;
@@ -382,7 +424,27 @@ function parseTask(raw: unknown): BatchTask | null {
     formFields: parseDetailForm(record?.form_fields),
     currentNodeNames: stringArrayOf(record?.current_node_names),
     myNodeName: firstText(record, "my_node_name"),
+    computedFields: parseComputedFields(record?.computed_fields),
   };
+}
+
+function parseComputedFields(value: unknown): BatchComputedFieldValue[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((raw) => {
+      const record = recordOf(raw);
+      const key = firstText(record, "key");
+      const name = firstText(record, "name");
+      if (!key || !name) return null;
+      return {
+        key,
+        name,
+        value: numberField(record?.value),
+        display: firstText(record, "display"),
+        precision: numberField(record?.precision) ?? 2,
+      };
+    })
+    .filter((field): field is BatchComputedFieldValue => field !== null);
 }
 
 /// 拉取当前用户的全部待办。服务端聚合分页；超过上限时 `truncated=true`。
@@ -822,4 +884,119 @@ export function describeBatchError(cause: unknown): string {
     return "该操作需要二次身份验证，请重新登录后再试。";
   }
   return cause instanceof Error ? cause.message : "操作失败，请稍后重试";
+}
+
+/* ---------------------------- 计算字段配置 ---------------------------- */
+
+function parseComputedConfig(raw: unknown): BatchComputedFieldConfig | null {
+  const record = recordOf(raw);
+  const id = numberField(record?.id);
+  const approvalCode = firstText(record, "approvalCode", "approval_code");
+  const name = firstText(record, "name");
+  const leftFieldId = firstText(record, "leftFieldId", "left_field_id");
+  const rightFieldId = firstText(record, "rightFieldId", "right_field_id");
+  const operator = firstText(record, "operator");
+  if (
+    id === null ||
+    !approvalCode ||
+    !name ||
+    !leftFieldId ||
+    !rightFieldId ||
+    !operator ||
+    !(operator in BATCH_COMPUTED_OPERATOR_LABELS)
+  ) {
+    return null;
+  }
+  return {
+    id,
+    approvalCode,
+    name,
+    leftFieldId,
+    leftFieldName: firstText(record, "leftFieldName", "left_field_name"),
+    operator: operator as BatchComputedOperator,
+    rightFieldId,
+    rightFieldName: firstText(record, "rightFieldName", "right_field_name"),
+    precision: numberField(record?.precision) ?? 2,
+    enabled: record?.enabled !== false,
+    sortOrder: numberField(record?.sortOrder ?? record?.sort_order) ?? 0,
+    updatedAt: timestampOf(record?.updatedAt ?? record?.updated_at),
+  };
+}
+
+export async function fetchBatchComputedFields(
+  accessToken: string | undefined,
+  approvalCode?: string,
+  signal?: AbortSignal,
+): Promise<BatchComputedFieldConfig[]> {
+  const query = approvalCode?.trim()
+    ? `?approval_code=${encodeURIComponent(approvalCode.trim())}`
+    : "";
+  const data = await request(
+    `/api/v1/feishu/batch-approval/computed-fields${query}`,
+    { method: "GET" },
+    accessToken,
+    signal,
+  );
+  const rows = recordOf(data)?.fields;
+  return Array.isArray(rows)
+    ? rows
+        .map(parseComputedConfig)
+        .filter((row): row is BatchComputedFieldConfig => row !== null)
+    : [];
+}
+
+function computedInputBody(input: BatchComputedFieldInput) {
+  return {
+    approval_code: input.approvalCode,
+    name: input.name,
+    left_field_id: input.leftFieldId,
+    left_field_name: input.leftFieldName,
+    operator: input.operator,
+    right_field_id: input.rightFieldId,
+    right_field_name: input.rightFieldName,
+    precision: input.precision,
+    enabled: input.enabled,
+    sort_order: input.sortOrder,
+  };
+}
+
+export async function createBatchComputedField(
+  input: BatchComputedFieldInput,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<number> {
+  const data = await request(
+    "/api/v1/feishu/batch-approval/computed-fields",
+    { method: "POST", body: computedInputBody(input) },
+    accessToken,
+    signal,
+  );
+  return numberField(recordOf(data)?.id) ?? 0;
+}
+
+export async function updateBatchComputedField(
+  id: number,
+  input: BatchComputedFieldInput,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(
+    "/api/v1/feishu/batch-approval/computed-fields/update",
+    { method: "POST", body: { id, ...computedInputBody(input) } },
+    accessToken,
+    signal,
+  );
+}
+
+export async function deleteBatchComputedField(
+  id: number,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(
+    "/api/v1/feishu/batch-approval/computed-fields/delete",
+    { method: "POST", body: { id } },
+    accessToken,
+    signal,
+  );
 }

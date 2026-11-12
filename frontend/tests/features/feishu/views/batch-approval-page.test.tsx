@@ -95,6 +95,15 @@ const TASKS = [
       { name: "金额", value: { text: "100" } },
       { name: "部门", value: "研发" },
     ],
+    computed_fields: [
+      {
+        key: "computed_7",
+        name: "参考人民币金额",
+        value: 8794.79,
+        display: "8794.79",
+        precision: 2,
+      },
+    ],
     current_node_names: ["部门审批", "财务审批"],
     my_node_name: "部门审批",
   },
@@ -394,6 +403,8 @@ describe("BatchApprovalPage", () => {
     expect(screen.getAllByText("金额").length).toBeGreaterThan(0);
     expect(screen.getAllByText("部门").length).toBeGreaterThan(0);
     expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getAllByText("参考人民币金额").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("8794.79").length).toBeGreaterThan(0);
     expect(screen.getByText("部门审批（我的节点）")).toBeInTheDocument();
     expect(screen.getByText("财务审批")).toBeInTheDocument();
 

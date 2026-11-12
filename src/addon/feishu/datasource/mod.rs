@@ -208,6 +208,13 @@ mod tests {
             ),
             Repository::new(
                 definition(
+                    crate::addon::feishu::domain::batch_computed_field_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
                     crate::addon::feishu::portal::table::table_spec()
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),

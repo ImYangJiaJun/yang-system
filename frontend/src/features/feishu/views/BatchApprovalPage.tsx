@@ -1033,7 +1033,63 @@ function buildTaskColumns(tasks: BatchTask[]): TableColumnsType<BatchTask> {
     });
   }
 
+  for (const field of computedFieldNames(tasks)) {
+    columns.push({
+      title: field.name,
+      key: `computed:${field.key}`,
+      width: 160,
+      align: "right",
+      sorter: (left, right) =>
+        computedFieldValue(left, field.key) -
+        computedFieldValue(right, field.key),
+      filters: uniqueFilters(
+        tasks.map((task) => computedFieldText(task, field.key) || "—"),
+      ),
+      filterSearch: true,
+      onFilter: (value, task) =>
+        (computedFieldText(task, field.key) || "—") === String(value),
+      render: (_, task) => {
+        const text = computedFieldText(task, field.key) || "—";
+        return (
+          <span
+            className="block tabular-nums"
+            title={text}
+            data-slot="computed-field"
+          >
+            {text}
+          </span>
+        );
+      },
+    });
+  }
+
   return columns;
+}
+
+function computedFieldNames(
+  tasks: BatchTask[],
+): Array<{ key: string; name: string }> {
+  const seen = new Set<string>();
+  const fields: Array<{ key: string; name: string }> = [];
+  for (const task of tasks) {
+    for (const field of task.computedFields) {
+      if (seen.has(field.key)) continue;
+      seen.add(field.key);
+      fields.push({ key: field.key, name: field.name });
+    }
+  }
+  return fields;
+}
+
+function computedFieldValue(task: BatchTask, key: string): number {
+  return task.computedFields.find((field) => field.key === key)?.value ?? -1;
+}
+
+function computedFieldText(task: BatchTask, key: string): string {
+  return (
+    task.computedFields.find((field) => field.key === key)?.display?.trim() ??
+    ""
+  );
 }
 
 type ResizableHeaderCellProps = HTMLAttributes<HTMLTableCellElement> & {
