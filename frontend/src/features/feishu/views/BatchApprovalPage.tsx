@@ -1347,9 +1347,11 @@ export default function BatchApprovalPage() {
 
   const reauthorize = async () => {
     if (authorizing) return;
+    const password = window.prompt("请输入当前账号密码以确认身份");
+    if (!password) return;
     setAuthorizing(true);
     try {
-      const url = await requestFeishuAuthorizationUrl(token);
+      const url = await requestFeishuAuthorizationUrl(token, password);
       window.location.assign(url);
     } catch (cause) {
       toast.error(describeBatchError(cause));

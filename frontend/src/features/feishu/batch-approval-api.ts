@@ -783,11 +783,12 @@ export async function fetchCurrentUsername(
 /// 重新授权飞书：返回授权页 URL。批量页在凭证过期/未绑定时使用。
 export async function requestFeishuAuthorizationUrl(
   accessToken: string | undefined,
+  password: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const data = await request(
     "/api/v1/users/me/identities/feishu/authorize",
-    { method: "POST", body: {} },
+    { method: "POST", body: { confirm: "true", password } },
     accessToken,
     signal,
   );
