@@ -158,23 +158,29 @@ export function BatchJobDialog({
   };
 
   const terminal = job !== null && TERMINAL_JOB_STATUSES.has(job.status);
+  const running =
+    jobId !== null && (job === null || !TERMINAL_JOB_STATUSES.has(job.status));
   const failedItems =
     job?.items.filter((item) => item.status === "failed") ?? [];
   const finished = job ? job.succeeded + job.failed + job.unknown : 0;
   const total = job?.total ?? 0;
   const progress = total > 0 ? Math.min(100, (finished / total) * 100) : 0;
+  const processing = running ? Math.max(0, total - finished) : 0;
 
   return (
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && !cancelling && !retrying) onClose();
+        if (!nextOpen) {
+          if (cancelling || retrying || running) return;
+          onClose();
+        }
       }}
     >
       <DialogContent
         aria-label="批量任务进度"
         className="sm:max-w-2xl"
-        showCloseButton={!cancelling && !retrying}
+        showCloseButton={!running && !cancelling && !retrying}
       >
         <DialogHeader>
           <DialogTitle>{actionLabel}进度</DialogTitle>
@@ -206,6 +212,7 @@ export function BatchJobDialog({
                 <span>
                   共 {job.total} 条：成功 {job.succeeded} · 失败 {job.failed} ·
                   未知 {job.unknown}
+                  {processing > 0 && <> · 处理中 {processing}</>}
                 </span>
               </div>
               <div
@@ -217,7 +224,13 @@ export function BatchJobDialog({
                 aria-label="批量任务进度"
               >
                 <div
-                  className="h-full bg-primary transition-all"
+                  className={
+                    job.failed > 0
+                      ? "h-full bg-destructive transition-all"
+                      : job.unknown > 0
+                        ? "h-full bg-tone-warning transition-all"
+                        : "h-full bg-primary transition-all"
+                  }
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -278,6 +291,11 @@ export function BatchJobDialog({
         </div>
 
         <DialogFooter>
+          {running && (
+            <p className="mr-auto self-center text-xs text-muted-foreground">
+              任务执行中，请等待完成或先取消；关闭会丢失逐条结果。
+            </p>
+          )}
           {!terminal && job !== null && (
             <Button
               type="button"
@@ -303,7 +321,7 @@ export function BatchJobDialog({
           <Button
             type="button"
             variant="ghost"
-            disabled={cancelling || retrying}
+            disabled={running || cancelling || retrying}
             onClick={onClose}
           >
             关闭

@@ -344,6 +344,33 @@ describe("BatchApprovalPage", () => {
     expect(screen.getByText("全部待办")).toBeInTheDocument();
   });
 
+  it("全局搜索按标题、单号或发起人过滤待办", async () => {
+    stubBatchApi();
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "搜索待办" }), "王五");
+    expect(await screen.findByText("请假单 B")).toBeInTheDocument();
+    expect(screen.queryByText("报销单 A")).not.toBeInTheDocument();
+    expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "清空搜索" }));
+    expect(await screen.findByText("报销单 A")).toBeInTheDocument();
+  });
+
+  it("全选可处理只勾选允许 API 操作的任务", async () => {
+    stubBatchApi();
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "全选可处理" }));
+    expect(screen.getByLabelText("选择 报销单 A")).toBeChecked();
+    expect(screen.getByLabelText("选择 请假单 B")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "同意" })).toBeEnabled();
+  });
+
   it("勾选任务 → 同意确认 → 创建 job 并轮询逐条结果", async () => {
     const calls = stubBatchApi({
       jobResponses: {
@@ -373,7 +400,8 @@ describe("BatchApprovalPage", () => {
     await user.click(screen.getByRole("button", { name: "同意" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/即将对/)).toHaveTextContent("1");
+    expect(within(dialog).getByText(/将执行「同意」的/)).toBeInTheDocument();
+    expect(within(dialog).getByText("报销单 A")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "确认同意" }));
 
     const createCall = calls.find(

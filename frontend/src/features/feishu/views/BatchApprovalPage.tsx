@@ -38,7 +38,15 @@ import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
 import { apiBase, useSessionController, useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
-import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/shared/ui/dialog";
+import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { formatProductDateTime } from "@/shared/lib/product-locale";
 import { useToast } from "@/shared/lib/toast";
@@ -83,6 +91,25 @@ function dateKey(value: number | null): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function waitingText(createdAt: number | null): {
+  text: string;
+  className: string;
+} | null {
+  if (createdAt === null) return null;
+  const hours = Math.floor(Math.max(0, Date.now() - createdAt) / 3_600_000);
+  if (hours < 24) {
+    return {
+      text: hours < 1 ? "刚提交" : `已等待 ${hours} 小时`,
+      className: "text-muted-foreground",
+    };
+  }
+  const days = Math.floor(hours / 24);
+  return {
+    text: `已等待 ${days} 天`,
+    className: days >= 3 ? "text-destructive" : "text-tone-warning",
+  };
 }
 
 function statusTone(label: string): "info" | "positive" | "danger" | "neutral" {
@@ -953,7 +980,7 @@ function buildTaskColumns(
       render: (_, task) => {
         const operability = taskOperability(task);
         return (
-          <div className="max-w-56">
+          <div className="max-w-full">
             <span className="block truncate font-medium" title={task.title}>
               {task.title}
             </span>
@@ -1033,7 +1060,7 @@ function buildTaskColumns(
       filterSearch: true,
       onFilter: (value, task) => task.definitionName === String(value),
       render: (_, task) => (
-        <div className="max-w-52">
+        <div className="max-w-full">
           <span className="block truncate" title={task.definitionName}>
             {task.definitionName}
           </span>
@@ -1092,7 +1119,7 @@ function buildTaskColumns(
       render: (_, task) => {
         const summary = task.summaries.join("；") || "—";
         return (
-          <span className="block max-w-72 truncate text-xs" title={summary}>
+          <span className="block max-w-full truncate text-xs" title={summary}>
             {summary}
           </span>
         );
@@ -1103,22 +1130,32 @@ function buildTaskColumns(
       key: "createdAt",
       width: 180,
       sorter: (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
-      defaultSortOrder: "descend",
+      defaultSortOrder: "ascend",
       filters: uniqueFilters(tasks.map((task) => dateKey(task.createdAt))),
       onFilter: (value, task) => dateKey(task.createdAt) === String(value),
-      render: (_, task) => (
-        <span className="tabular-nums" title={timeText(task.createdAt)}>
-          {timeText(task.createdAt)}
-        </span>
-      ),
+      render: (_, task) => {
+        const waiting = waitingText(task.createdAt);
+        return (
+          <div className="leading-tight">
+            <span className="block tabular-nums" title={timeText(task.createdAt)}>
+              {timeText(task.createdAt)}
+            </span>
+            {waiting && (
+              <span className={`block text-xs ${waiting.className}`}>
+                {waiting.text}
+              </span>
+            )}
+          </div>
+        );
+      },
     },
     {
-      title: columnTitle("API 操作", "instance"),
+      title: columnTitle("可批量处理", "instance"),
       key: "apiOperate",
-      width: 110,
+      width: 130,
       filters: [
-        { text: "支持", value: "supported" },
-        { text: "不支持", value: "unsupported" },
+        { text: "可批量处理", value: "supported" },
+        { text: "需在飞书处理", value: "unsupported" },
       ],
       onFilter: (value, task) =>
         value === "supported"
@@ -1126,7 +1163,7 @@ function buildTaskColumns(
           : !task.supportApiOperate,
       render: (_, task) => (
         <StatusBadge tone={task.supportApiOperate ? "positive" : "warning"}>
-          {task.supportApiOperate ? "支持" : "不支持"}
+          {task.supportApiOperate ? "可批量处理" : "需在飞书处理"}
         </StatusBadge>
       ),
     },
@@ -1180,7 +1217,7 @@ function buildTaskColumns(
         }
         const text = formFieldText(task, field) || "—";
         return (
-          <span className="block max-w-48 truncate text-xs" title={text}>
+          <span className="block max-w-full truncate text-xs" title={text}>
             {text}
           </span>
         );
@@ -1398,7 +1435,7 @@ function TaskDetailSection({
         </p>
       ) : (
         !error && (
-          <div className="overflow-hidden rounded-sm border bg-white">
+          <div className="overflow-hidden rounded-sm border bg-card">
             <div
               className="grid border-b bg-muted/60 text-xs font-medium text-muted-foreground"
               style={{ gridTemplateColumns: gridTemplate, minWidth }}
@@ -1448,7 +1485,7 @@ function TaskDetailSection({
                   {rows.slice(start, end).map((row, index) => (
                     <div
                       key={start + index}
-                      className="grid items-center border-b text-[13px] last:border-b-0 hover:bg-[#f7fbff]"
+                      className="grid items-center border-b text-[13px] last:border-b-0 hover:bg-muted/40"
                       style={{
                         height: DETAIL_ROW_HEIGHT,
                         gridTemplateColumns: gridTemplate,
@@ -1514,16 +1551,20 @@ function TaskDetailPanels({
 
 function DefinitionTable({
   tasks,
+  definitionKey,
   view,
   accessToken,
   selected,
   onSelect,
+  onFilteredTasksChange,
 }: {
   tasks: BatchTask[];
+  definitionKey: string;
   view?: BatchViewConfig;
   accessToken: string | undefined;
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
+  onFilteredTasksChange: (definitionKey: string, taskIds: string[]) => void;
 }) {
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const baseColumns = useMemo(
@@ -1565,15 +1606,18 @@ function DefinitionTable({
     expandableTasks.length > 0 &&
     expandableTasks.every((task) => expandedKeys.includes(task.taskId));
   const columnsWithExpand = useMemo(
-    () => [Table.EXPAND_COLUMN, ...columns] as TableColumnsType<BatchTask>,
-    [columns],
+    () =>
+      expandableTasks.length > 0
+        ? ([Table.EXPAND_COLUMN, ...columns] as TableColumnsType<BatchTask>)
+        : columns,
+    [columns, expandableTasks.length],
   );
 
   return (
     <ConfigProvider locale={zhCN}>
       <style>{`
-        .batch-expanded-row > td { background: #fafcff !important; padding: 0 !important; }
-        .batch-expanded-row:hover > td { background: #fafcff !important; }
+        .batch-expanded-row > td { background: var(--muted) !important; padding: 0 !important; }
+        .batch-expanded-row:hover > td { background: var(--muted) !important; }
       `}</style>
       {expandableTasks.length > 0 && (
         <div className="flex justify-end">
@@ -1599,6 +1643,12 @@ function DefinitionTable({
         columns={columnsWithExpand}
         components={TABLE_COMPONENTS}
         dataSource={tasks}
+        onChange={(_pagination, _filters, _sorter, extra) =>
+          onFilteredTasksChange(
+            definitionKey,
+            extra.currentDataSource.map((task) => task.taskId),
+          )
+        }
         expandable={{
           columnWidth: 44,
           expandedRowKeys: expandedKeys,
@@ -1618,8 +1668,10 @@ function DefinitionTable({
         scroll={{ x: "max-content" }}
         pagination={{
           pageSize: 20,
+          pageSizeOptions: [20, 50, 100],
           showSizeChanger: true,
           hideOnSinglePage: true,
+          showTotal: (total) => `共 ${total} 条`,
         }}
         rowSelection={{
           selectedRowKeys,
@@ -1664,8 +1716,16 @@ export default function BatchApprovalPage() {
   const [username, setUsername] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState("");
+  const [reauthError, setReauthError] = useState("");
 
   const [definitionGroup, setDefinitionGroup] = useState("all");
+  const [keyword, setKeyword] = useState("");
+  const [tableFilteredIds, setTableFilteredIds] = useState<
+    Record<string, string[]>
+  >({});
+  const [tableVersion, setTableVersion] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selected, setSelected] = useState<SelectedMap>({});
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
@@ -1687,6 +1747,9 @@ export default function BatchApprovalPage() {
         setTasks(result.tasks);
         setTruncated(result.truncated);
         setViews(result.views);
+        // 数据刷新后清空列筛选状态，避免筛选条件与新数据不一致。
+        setTableFilteredIds({});
+        setTableVersion((version) => version + 1);
         // 刷新后只保留仍然存在且可操作的选择，避免把已处理任务再次提交。
         setSelected((prev) => {
           const next: SelectedMap = {};
@@ -1703,8 +1766,9 @@ export default function BatchApprovalPage() {
         setTruncated(false);
         if (isFeishuReauthError(cause)) {
           setReauthRequired(true);
+        } else if (isFeishuScopeError(cause)) {
+          setScopeError(true);
         } else {
-          if (isFeishuScopeError(cause)) setScopeError(true);
           setLoadError(describeBatchError(cause));
         }
       } finally {
@@ -1728,21 +1792,105 @@ export default function BatchApprovalPage() {
   }, [loadTasks, token]);
 
   const groups = useMemo(() => groupBatchTasks(tasks), [tasks]);
+  const normalizedKeyword = keyword.trim().toLowerCase();
+  const filteredGroups = useMemo(() => {
+    if (!normalizedKeyword) return groups;
+    return groups
+      .map((group) => ({
+        ...group,
+        tasks: group.tasks.filter((task) =>
+          [
+            task.title,
+            task.instanceCode,
+            task.initiatorName ?? "",
+            task.definitionName,
+            task.summaries.join(" "),
+            task.currentNodeNames.join(" "),
+          ]
+            .join("\n")
+            .toLowerCase()
+            .includes(normalizedKeyword),
+        ),
+      }))
+      .filter((group) => group.tasks.length > 0);
+  }, [groups, normalizedKeyword]);
   const visibleGroups = useMemo(
     () =>
       definitionGroup === "all"
-        ? groups
-        : groups.filter((group) => group.key === definitionGroup),
-    [definitionGroup, groups],
+        ? filteredGroups
+        : filteredGroups.filter((group) => group.key === definitionGroup),
+    [definitionGroup, filteredGroups],
   );
   const visibleTaskCount = useMemo(
     () => visibleGroups.reduce((total, group) => total + group.tasks.length, 0),
     [visibleGroups],
   );
-  const selectedTasks = useMemo(() => Object.values(selected), [selected]);
+  const tableFilteredSets = useMemo(() => {
+    const sets = new Map<string, Set<string>>();
+    for (const [key, ids] of Object.entries(tableFilteredIds)) {
+      sets.set(key, new Set(ids));
+    }
+    return sets;
+  }, [tableFilteredIds]);
+  const taskVisibleInTable = useCallback(
+    (groupKey: string, taskId: string) => {
+      const allowed = tableFilteredSets.get(groupKey);
+      return allowed === undefined || allowed.has(taskId);
+    },
+    [tableFilteredSets],
+  );
+  const operableVisibleTasks = useMemo(
+    () =>
+      visibleGroups
+        .flatMap((group) =>
+          group.tasks.filter((task) => taskVisibleInTable(group.key, task.taskId)),
+        )
+        .filter((task) => taskOperability(task).operable),
+    [visibleGroups, taskVisibleInTable],
+  );
+  const filteredTotals = useMemo(
+    () =>
+      new Map(
+        groups.map((group) => [
+          group.key,
+          filteredGroups.find((candidate) => candidate.key === group.key)
+            ?.tasks.length ?? 0,
+        ]),
+      ),
+    [filteredGroups, groups],
+  );
+  const filteredTotalCount = useMemo(
+    () => filteredGroups.reduce((total, group) => total + group.tasks.length, 0),
+    [filteredGroups],
+  );
+  const visibleTaskIds = useMemo(
+    () =>
+      new Set(
+        visibleGroups.flatMap((group) =>
+          group.tasks
+            .filter((task) => taskVisibleInTable(group.key, task.taskId))
+            .map((task) => task.taskId),
+        ),
+      ),
+    [visibleGroups, taskVisibleInTable],
+  );
+  const selectedTasks = useMemo(
+    () => Object.values(selected).filter((task) => visibleTaskIds.has(task.taskId)),
+    [selected, visibleTaskIds],
+  );
+  const hiddenSelectedCount = Object.keys(selected).length - selectedTasks.length;
 
   const resetFilters = () => {
     setDefinitionGroup("all");
+    setKeyword("");
+  };
+
+  const selectAllOperable = () => {
+    setSelected((previous) => {
+      const next = { ...previous };
+      for (const task of operableVisibleTasks) next[task.taskId] = task;
+      return next;
+    });
   };
 
   const replaceTableSelection = (
@@ -1848,16 +1996,26 @@ export default function BatchApprovalPage() {
     void loadTasks();
   };
 
-  const reauthorize = async () => {
+  const reauthorize = () => {
     if (authorizing) return;
-    const password = window.prompt("请输入当前账号密码以确认身份");
-    if (!password) return;
+    setReauthPassword("");
+    setReauthError("");
+    setReauthOpen(true);
+  };
+
+  const submitReauthorize = async () => {
+    if (authorizing) return;
+    if (!reauthPassword) {
+      setReauthError("请输入当前账号密码");
+      return;
+    }
     setAuthorizing(true);
+    setReauthError("");
     try {
-      const url = await requestFeishuAuthorizationUrl(token, password);
+      const url = await requestFeishuAuthorizationUrl(token, reauthPassword);
       window.location.assign(url);
     } catch (cause) {
-      toast.error(describeBatchError(cause));
+      setReauthError(describeBatchError(cause));
       setAuthorizing(false);
     }
   };
@@ -1906,7 +2064,7 @@ export default function BatchApprovalPage() {
           <div>
             <h1 className="text-xl font-semibold">批量审批</h1>
             <p className="text-sm text-muted-foreground">
-              处理你自己的飞书待办。写操作由后台逐条执行，不自动重试。
+              处理你自己的飞书待办，默认最早提交的排在前面。写操作由后台逐条执行，不自动重试。
             </p>
           </div>
           <Button
@@ -2015,7 +2173,7 @@ export default function BatchApprovalPage() {
                   onClick={() => setDefinitionGroup("all")}
                 >
                   <span>全部待办</span>
-                  <span className="tabular-nums">{tasks.length}</span>
+                  <span className="tabular-nums">{filteredTotalCount}</span>
                 </button>
                 {groups.map((group) => (
                   <button
@@ -2037,7 +2195,9 @@ export default function BatchApprovalPage() {
                         </span>
                       )}
                     </span>
-                    <span className="tabular-nums">{group.tasks.length}</span>
+                    <span className="tabular-nums">
+                      {filteredTotals.get(group.key) ?? 0}
+                    </span>
                   </button>
                 ))}
               </>
@@ -2045,10 +2205,48 @@ export default function BatchApprovalPage() {
           </aside>
 
           <section className="min-w-0 flex-1 space-y-3">
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 md:sticky md:top-14 md:z-20 md:bg-card/95 md:backdrop-blur">
+              <div className="relative w-full sm:w-64">
+                <Input
+                  value={keyword}
+                  onChange={(event) => setKeyword(event.target.value)}
+                  placeholder="搜索标题、单号、发起人、摘要"
+                  aria-label="搜索待办"
+                  className="h-8 bg-background pr-7 text-sm"
+                />
+                {keyword && (
+                  <button
+                    type="button"
+                    aria-label="清空搜索"
+                    className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                    onClick={() => setKeyword("")}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
               <span className="text-sm text-muted-foreground">
-                已选 {selectedTasks.length} 条 · 共 {visibleTaskCount} 条
+                已选 {selectedTasks.length} 条 · 可处理{" "}
+                {operableVisibleTasks.length} 条 · 共 {visibleTaskCount} 条
+                {hiddenSelectedCount > 0 && (
+                  <span className="ml-1 text-tone-warning">
+                    （另有 {hiddenSelectedCount} 条已选项不在当前筛选内）
+                  </span>
+                )}
               </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={
+                  operableVisibleTasks.length === 0 ||
+                  operableVisibleTasks.every(
+                    (task) => selected[task.taskId],
+                  )
+                }
+                onClick={selectAllOperable}
+              >
+                全选可处理
+              </Button>
               <Button
                 variant="ghost"
                 size="sm"
@@ -2118,10 +2316,22 @@ export default function BatchApprovalPage() {
               )
             ) : visibleGroups.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border py-16 text-center">
-                <p className="font-medium">该审批定义暂无待办</p>
-                <Button variant="outline" size="sm" onClick={resetFilters}>
-                  查看全部待办
-                </Button>
+                <p className="font-medium">
+                  {keyword.trim() ? "没有匹配的待办" : "该审批定义暂无待办"}
+                </p>
+                {keyword.trim() ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setKeyword("")}
+                  >
+                    清空搜索
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={resetFilters}>
+                    查看全部待办
+                  </Button>
+                )}
               </div>
             ) : (
               <div className="space-y-6">
@@ -2130,7 +2340,13 @@ export default function BatchApprovalPage() {
                     <div className="flex flex-wrap items-baseline gap-2">
                       <h2 className="text-base font-semibold">{group.name}</h2>
                       <span className="text-xs text-muted-foreground">
-                        {group.code || "—"} · {group.tasks.length} 条
+                        {group.code || "—"} · {group.tasks.length} 条 ·{" "}
+                        {
+                          group.tasks.filter(
+                            (task) => taskOperability(task).operable,
+                          ).length
+                        }{" "}
+                        条可处理
                       </span>
                       {group.code && (
                         <Button
@@ -2144,12 +2360,27 @@ export default function BatchApprovalPage() {
                       )}
                     </div>
                     <DefinitionTable
+                      key={`${group.key}:${tableVersion}`}
                       tasks={group.tasks}
+                      definitionKey={group.key}
                       view={views[group.code]}
                       accessToken={token}
                       selected={selected}
                       onSelect={(tableTasks, nextSelection) =>
                         replaceTableSelection(tableTasks, nextSelection)
+                      }
+                      onFilteredTasksChange={(key, ids) =>
+                        setTableFilteredIds((previous) => {
+                          const current = previous[key];
+                          if (
+                            current &&
+                            current.length === ids.length &&
+                            current.every((id, index) => id === ids[index])
+                          ) {
+                            return previous;
+                          }
+                          return { ...previous, [key]: ids };
+                        })
                       }
                     />
                   </div>
@@ -2173,10 +2404,67 @@ export default function BatchApprovalPage() {
           void loadTasks();
         }}
       />
+      <Dialog
+        open={reauthOpen}
+        onOpenChange={(next) => {
+          if (!next && !authorizing) setReauthOpen(false);
+        }}
+      >
+        <DialogContent
+          aria-label="重新授权飞书"
+          className="sm:max-w-sm"
+          showCloseButton={!authorizing}
+        >
+          <DialogHeader>
+            <DialogTitle>重新授权飞书</DialogTitle>
+            <DialogDescription>
+              飞书登录状态已过期。请输入当前账号密码确认身份，随后跳转飞书重新授权。
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitReauthorize();
+            }}
+          >
+            <Input
+              autoFocus
+              type="password"
+              aria-label="当前账号密码"
+              placeholder="当前账号密码"
+              autoComplete="current-password"
+              value={reauthPassword}
+              disabled={authorizing}
+              onChange={(event) => setReauthPassword(event.target.value)}
+            />
+            {reauthError && (
+              <p role="alert" className="text-sm text-destructive">
+                {reauthError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={authorizing}
+                onClick={() => setReauthOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={authorizing}>
+                {authorizing ? "跳转中…" : "确认并重新授权"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <BatchActionDialog
         open={action !== null}
         action={action}
         count={selectedTasks.length}
+        tasks={selectedTasks}
         accessToken={token}
         submitting={submittingAction}
         errorMessage={actionError}

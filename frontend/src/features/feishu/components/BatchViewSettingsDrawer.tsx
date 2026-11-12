@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, GripVertical, Plus, Trash2 } from "lucide-react";
 
 import { useToast } from "@/shared/lib/toast";
 import { Button } from "@/shared/ui/button";
@@ -51,7 +51,7 @@ const BASE_COLUMNS: Array<{ key: string; label: string }> = [
   { key: "base:initiator", label: "发起人" },
   { key: "base:summary", label: "摘要" },
   { key: "base:createdAt", label: "提交时间" },
-  { key: "base:apiOperate", label: "API 操作" },
+  { key: "base:apiOperate", label: "可批量处理" },
 ];
 
 /// 技术定位字段默认不展示，需要时勾选即可。
@@ -217,9 +217,7 @@ function syncComputedColumns(
     )
     .map((column) => {
       const name = enabled.get(column.key);
-      return name === undefined
-        ? column
-        : { ...column, label: name, visible: true };
+      return name === undefined ? column : { ...column, label: name };
     });
   const existing = new Set(kept.map((column) => column.key));
   for (const [key, name] of enabled) {
@@ -736,6 +734,28 @@ export function BatchViewSettingsDrawer({
                   />
                   <span className="min-w-0 flex-1 truncate text-sm">
                     {column.label}
+                  </span>
+                  <span className="flex shrink-0 items-center">
+                    <button
+                      type="button"
+                      aria-label={`上移 ${column.label}`}
+                      title="上移"
+                      disabled={index === 0}
+                      onClick={() => moveColumnTo(index, index - 1)}
+                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                    >
+                      <ChevronUp className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`下移 ${column.label}`}
+                      title="下移"
+                      disabled={index === columns.length - 1}
+                      onClick={() => moveColumnTo(index, index + 1)}
+                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                    >
+                      <ChevronDown className="size-3.5" />
+                    </button>
                   </span>
                   <span
                     className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${

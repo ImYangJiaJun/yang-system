@@ -23,6 +23,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import {
   BATCH_ACTION_LABELS,
   type BatchApprovalAction,
+  type BatchTask,
   type FeishuUser,
 } from "../batch-approval-api";
 import { FeishuUserPicker } from "./FeishuUserPicker";
@@ -40,7 +41,8 @@ const ACTION_DESCRIPTION: Record<BatchApprovalAction, string> = {
   pass: "同意后审批流进入下一节点；请确认所选任务确实可以放行。",
   refuse: "拒绝后审批流终止，必须填写拒绝理由。",
   forward: "把当前任务转交给另一位飞书用户，原审批人不再持有该任务。",
-  rollback: "把审批退回到发起人或上一节点；具体目标由服务端按实例解析。",
+  rollback:
+    "按你选择的「退回目标」执行：发起人=终止当前流程回到提单人；上一节点=退回给上一位审批人。",
   add_sign: "为当前任务增加审批人。加签位置与审批方式的含义以飞书租户为准。",
 };
 
@@ -50,6 +52,7 @@ export function BatchActionDialog({
   open,
   action,
   count,
+  tasks,
   accessToken,
   submitting,
   errorMessage,
@@ -59,6 +62,7 @@ export function BatchActionDialog({
   open: boolean;
   action: BatchApprovalAction | null;
   count: number;
+  tasks: BatchTask[];
   accessToken: string | undefined;
   submitting: boolean;
   errorMessage: string;
@@ -137,10 +141,37 @@ export function BatchActionDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
-            即将对 <strong>{count}</strong> 条待办执行「{label}
-            」。提交后由后台逐条 执行，结果在进度对话框内查看。
-          </p>
+          <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-sm">
+            <p>
+              将执行「{label}」的 <strong>{count}</strong> 条待办：
+            </p>
+            <ul className="mt-1.5 max-h-40 space-y-1 overflow-auto pr-1">
+              {tasks.slice(0, 6).map((task) => (
+                <li
+                  key={task.taskId}
+                  className="flex items-baseline gap-2 text-xs"
+                >
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    title={task.title}
+                  >
+                    {task.title}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {task.definitionName}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {count > 6 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                …等 {count} 条
+              </p>
+            )}
+            <p className="mt-2 text-xs text-muted-foreground">
+              提交后由后台逐条执行，结果在进度对话框内查看。
+            </p>
+          </div>
 
           {(action === "forward" || action === "add_sign") && (
             <FeishuUserPicker
