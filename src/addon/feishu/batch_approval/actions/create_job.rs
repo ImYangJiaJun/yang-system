@@ -107,7 +107,7 @@ pub(super) async fn handle(
         "add_sign" => add_sign_targets.clone(),
         _ => Vec::new(),
     };
-    validate_target_users(&ctx, settings, &token, &target_ids).await?;
+    validate_target_users(&ctx, settings, &target_ids).await?;
     let list = api::list_pending_tasks(&ctx, settings, &token)
         .await
         .map_err(|error| error.to_base())?;
@@ -416,11 +416,10 @@ fn validate_targets(input: &CreateJobInput, open_id: &str) -> Result<Vec<String>
 async fn validate_target_users(
     ctx: &ActionContext,
     settings: &crate::config::FeishuSettings,
-    token: &str,
     target_ids: &[String],
 ) -> Result<(), BaseError> {
     for open_id in target_ids.iter().filter(|id| !id.is_empty()) {
-        let detail = api::user_detail(ctx, settings, token, open_id)
+        let detail = api::user_detail(ctx, settings, open_id)
             .await
             .map_err(|error| error.to_base())?;
         let user = detail.pointer("/data/user").ok_or_else(|| {

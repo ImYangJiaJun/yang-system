@@ -398,13 +398,15 @@ pub(crate) async fn search_users(
 pub(crate) async fn user_detail(
     ctx: &ActionContext,
     settings: &FeishuSettings,
-    access_token: &str,
     open_id: &str,
 ) -> Result<Value, ApiError> {
+    // 通讯录详情用 tenant token：用户 token 对 contact 接口可能返回空 data，
+    // 会被上层误判成「目标用户不存在」；tenant token 还天然限定在本租户内。
+    let access_token = tenant_access_token(ctx, settings).await?;
     call(
         ctx,
         settings,
-        access_token,
+        &access_token,
         OutboundMethod::Get,
         &format!("/open-apis/contact/v3/users/{open_id}"),
         vec![("user_id_type".to_string(), "open_id".to_string())],
