@@ -135,7 +135,7 @@ describe("App", () => {
       "/access/workspace",
     );
   });
-  it("批量审批作为审批派发的同级侧边栏入口出现", async () => {
+  it("批量审批作为个人账户模块对所有登录用户可见", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -150,18 +150,35 @@ describe("App", () => {
               table_views: [],
               modules: [
                 {
-                  module_id: "feishu.approval",
+                  module_id: "account.user",
                   identity: {
-                    id: "admin",
-                    title: "系统管理",
-                    icon: "access",
-                    order: 20,
+                    id: "user",
+                    title: "个人账户",
+                    icon: "person",
+                    order: 10,
                   },
-                  title: "审批派发",
+                  title: "账号设置",
                   description: "",
-                  icon: "send",
+                  icon: "account",
+                  order: 10,
+                  app_route: "/account",
+                  actions: [],
+                  action_presentations: [],
+                  views: [],
+                },
+                {
+                  module_id: "feishu.batch_approval",
+                  identity: {
+                    id: "user",
+                    title: "个人账户",
+                    icon: "person",
+                    order: 10,
+                  },
+                  title: "批量审批",
+                  description: "批量处理当前账号自己的飞书待办",
+                  icon: "batch_approval",
                   order: 20,
-                  app_route: "/admin/feishu-approval",
+                  app_route: "/batch-approval",
                   actions: [],
                   action_presentations: [],
                   views: [],
@@ -173,11 +190,11 @@ describe("App", () => {
         ),
       ),
     );
-    renderTestApp({ path: "/", identity: "admin" });
+    renderTestApp({ path: "/", identity: "user" });
     const nav = within(screen.getByRole("navigation"));
-    expect(await nav.findByRole("link", { name: "审批派发" })).toHaveAttribute(
+    expect(await nav.findByRole("link", { name: "账号设置" })).toHaveAttribute(
       "href",
-      "/admin/feishu-approval",
+      "/account",
     );
     expect(nav.getByRole("link", { name: "批量审批" })).toHaveAttribute(
       "href",

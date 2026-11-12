@@ -73,7 +73,7 @@ const ICONS: Record<string, ComponentType<{ className?: string }>> = {
   account_circle: CircleUser,
   admin_panel_settings: ShieldCheck,
   apartment: Building2,
-  "clipboard-check": ClipboardCheck,
+  batch_approval: ClipboardCheck,
   domain: Building2,
   extension: Puzzle,
   groups: Users,

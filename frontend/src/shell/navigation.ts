@@ -54,36 +54,6 @@ export type NavigationGroup = {
   pages: ModulePageDefinition[];
 };
 
-const BATCH_APPROVAL_PAGE_ID = "feishu-batch-approval";
-
-/// 批量审批是专注页（不套 AppLayout 的根层路由），但用户需要一个和
-/// 「审批派发」同级的入口。它只在后端确实下发了「审批派发」模块时出现，
-/// 这样「没有 Module 就不生成硬编码业务菜单」的约束仍然成立。
-function withBatchApprovalEntry(group: NavigationGroup): NavigationGroup {
-  if (group.pages.some((page) => page.id === BATCH_APPROVAL_PAGE_ID)) {
-    return group;
-  }
-  const dispatch = group.pages.find((page) => page.title === "审批派发");
-  if (!dispatch) return group;
-  const entry: ModulePageDefinition = {
-    id: BATCH_APPROVAL_PAGE_ID,
-    identity: group.identity,
-    title: "批量审批",
-    description: "批量处理飞书待办",
-    icon: "clipboard-check",
-    order: dispatch.order + 1,
-    link: "/batch-approval",
-    primaryAction: undefined,
-    actions: [],
-    actionPresentations: [],
-    views: [],
-  };
-  const index = group.pages.indexOf(dispatch);
-  const nextPages = [...group.pages];
-  nextPages.splice(index + 1, 0, entry);
-  return { ...group, pages: nextPages };
-}
-
 export function groupNavigationPages(
   pages: ModulePageDefinition[],
   catalog: UiCatalog | undefined,
@@ -103,5 +73,5 @@ export function groupNavigationPages(
     group.pages.push(page);
     groups.set(page.identity, group);
   }
-  return [...groups.values()].map(withBatchApprovalEntry);
+  return [...groups.values()];
 }

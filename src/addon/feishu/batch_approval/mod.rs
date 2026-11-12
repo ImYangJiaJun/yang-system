@@ -11,7 +11,7 @@ pub(crate) use domain::{api, worker};
 use std::sync::Arc;
 
 use yang_base::action::TokenAuthMiddleware;
-use yang_base::definition::{ModuleName, ModuleSpec};
+use yang_base::definition::{ModuleName, ModulePresentationSpec, ModuleSpec};
 use yang_base::BaseError;
 
 use crate::addon::account::user_from_claims;
@@ -34,5 +34,13 @@ pub(crate) fn build_module(
             .with_claims_validator(authorization_validator)
             .authenticate_public_actions(),
     );
-    Ok(actions::register_all(module, context))
+    Ok(actions::register_all(module, context).presentation(
+        ModulePresentationSpec::new(crate::addon::user_identity(), "批量审批", "batch_approval")
+            .app_route("/batch-approval")
+            .description("批量处理当前账号自己的飞书待办")
+            .order(20)
+            .primary_action(yang_base::action!(
+                "feishu.batch_approval.feishu_batch_list_tasks"
+            )),
+    ))
 }

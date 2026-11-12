@@ -229,7 +229,7 @@ mod tests {
 
     /// 导航落点必须随真实 Module 声明，原始数据表不得成为隐式侧边栏入口。
     #[tokio::test]
-    async fn navigation_catalog_has_six_console_landings_without_demo() {
+    async fn navigation_catalog_has_seven_console_landings_without_demo() {
         let app = build_application(test_tools(), test_security())
             .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let modules: Vec<_> = app
@@ -264,6 +264,7 @@ mod tests {
                     Some("/feishu/approval-export"),
                     "admin",
                 ),
+                ("feishu.batch_approval", Some("/batch-approval"), "user",),
                 ("feishu.datasource", Some("/feishu/datasources"), "admin"),
             ]
         );
