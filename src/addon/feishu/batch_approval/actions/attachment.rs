@@ -135,8 +135,12 @@ fn validate_attachment_url(raw: &str) -> Result<(), BaseError> {
         || authority.contains(':')
         || !(authority == "feishu.cn"
             || authority.ends_with(".feishu.cn")
+            || authority == "feishucdn.com"
+            || authority.ends_with(".feishucdn.com")
             || authority == "larksuite.com"
-            || authority.ends_with(".larksuite.com"))
+            || authority.ends_with(".larksuite.com")
+            || authority == "larksuitecdn.com"
+            || authority.ends_with(".larksuitecdn.com"))
     {
         return Err(BaseError::ParamInvalid(
             "url".to_string(),
@@ -171,6 +175,7 @@ mod tests {
         )
         .is_ok());
         assert!(validate_attachment_url("https://open.feishu.cn/open-apis/a").is_ok());
+        assert!(validate_attachment_url("https://lf9-approval-sign.feishucdn.com/a").is_ok());
         assert!(validate_attachment_url("http://open.feishu.cn/a").is_err());
         assert!(validate_attachment_url("https://evil.example.com/a.png").is_err());
         assert!(validate_attachment_url("https://open.feishu.cn.evil.example/a.png").is_err());
