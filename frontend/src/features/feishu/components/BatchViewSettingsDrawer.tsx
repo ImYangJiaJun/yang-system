@@ -410,7 +410,11 @@ export function BatchViewSettingsDrawer({
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [catalogFailed, setCatalogFailed] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 控件目录读不到时，明细列无法出现在 draft 里；保存时按原配置保留，
+  // 避免一次保存把所有 detail: 列（含附件列）清空。
+  const originalColumnsRef = useRef<BatchViewConfig["columns"]>([]);
   const [tab, setTab] = useState<"columns" | "computed">("columns");
   const [options, setOptions] = useState<CatalogOptions>({
     fields: [],
@@ -427,15 +431,22 @@ export function BatchViewSettingsDrawer({
     let cancelled = false;
     setLoading(true);
     setLoadError("");
+    setCatalogFailed(false);
     setFormError("");
     setEditing(null);
     setTab("columns");
+    let catalogFailed = false;
     void Promise.all([
       fetchBatchViewConfig(approvalCode, accessToken),
-      fetchBatchFieldCatalog(approvalCode, accessToken).catch(() => []),
+      fetchBatchFieldCatalog(approvalCode, accessToken).catch(() => {
+        catalogFailed = true;
+        return [];
+      }),
     ])
       .then(([view, catalog]) => {
         if (cancelled) return;
+        setCatalogFailed(catalogFailed);
+        originalColumnsRef.current = view.columns;
         const form = catalogOptions(catalog, fieldsRef.current);
         setOptions(form);
         setRules(view.computedFields);
@@ -604,14 +615,29 @@ export function BatchViewSettingsDrawer({
     if (saving) return;
     setSaving(true);
     try {
+      const draftKeys = new Set(columns.map((column) => column.key));
+      // 只有目录读取失败时才保留原始 detail: 配置：此时 draft 里没有明细列，
+      // 不保留就会一次保存清空。目录正常时按 draft 为准，避免把定义里已经
+      // 删除/改名的子控件 key 回传，让后端 validate_widgets 拒绝整次保存。
+      const preservedDetailColumns = catalogFailed
+        ? originalColumnsRef.current
+            .filter(
+              (column) =>
+                column.key.startsWith("detail:") && !draftKeys.has(column.key),
+            )
+            .map((column) => ({ key: column.key, visible: column.visible }))
+        : [];
       await saveBatchViewConfig(
         approvalCode,
         {
           computedFields: rules,
-          columns: columns.map((column) => ({
-            key: column.key,
-            visible: column.visible,
-          })),
+          columns: [
+            ...columns.map((column) => ({
+              key: column.key,
+              visible: column.visible,
+            })),
+            ...preservedDetailColumns,
+          ],
         },
         accessToken,
       );
@@ -649,6 +675,12 @@ export function BatchViewSettingsDrawer({
             ），不会改变其他人的配置或审批定义本身。
           </DialogDescription>
         </DialogHeader>
+
+        {catalogFailed && (
+          <p role="alert" className="text-tone-warning text-xs">
+            控件目录读取失败：未展示的明细列会按原配置保留，本次保存不会删除它们。
+          </p>
+        )}
 
         <div className="flex gap-2">
           <Button

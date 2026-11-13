@@ -76,15 +76,20 @@ pub(super) async fn handle(
         tokio::time::sleep(Duration::from_secs(600)).await;
         let _ = tokio::fs::remove_file(cleanup).await;
     });
-    let inline = matches!(
-        extension.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" | "pdf"
-    );
-    if inline {
+    if is_inline_preview(&extension) {
         Ok(ResponseBody::preview(path))
     } else {
         Ok(ResponseBody::download(path, filename))
     }
+}
+
+/// 只有浏览器能安全内联渲染的格式才走 preview。SVG 可以携带脚本，
+/// 同源部署下直接导航代理 URL 会在应用源执行，因此强制按附件下载。
+fn is_inline_preview(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif" | "pdf"
+    )
 }
 
 /// 优先用附件名扩展名；附件名没有扩展名时回退到地址路径，保证 PDF/图片能用正确 MIME 内联。
@@ -202,5 +207,13 @@ mod tests {
             attachment_extension("无扩展名", "https://open.feishu.cn/a"),
             "bin"
         );
+    }
+
+    #[test]
+    fn svg_is_forced_to_download() {
+        assert!(!is_inline_preview("svg"));
+        assert!(!is_inline_preview("SVG"));
+        assert!(is_inline_preview("pdf"));
+        assert!(is_inline_preview("PNG"));
     }
 }

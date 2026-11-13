@@ -144,15 +144,18 @@ const TASKS = [
 type Call = { method: string; path: string; body: unknown };
 
 type StubOptions = {
-  tasksResponse?: Response;
+  /// 固定 Response 只能被读一次；刷新类用例传工厂，每次请求返回新的 body。
+  tasksResponse?: Response | (() => Response);
   detail?: unknown;
   jobResponses?: Record<string, unknown>;
   onCreateJob?: (body: unknown) => { job_id: string };
   onSearch?: (query: string) => unknown;
   viewConfig?: unknown;
   catalog?: unknown[];
+  catalogError?: boolean;
   onSaveView?: (body: unknown) => void;
   detailRows?: (taskId: string, params: URLSearchParams) => unknown;
+  detailRowsError?: boolean;
 };
 
 function stubBatchApi(options: StubOptions = {}): Call[] {
@@ -204,18 +207,23 @@ function stubBatchApi(options: StubOptions = {}): Call[] {
         });
       }
       if (url.pathname === "/api/v1/feishu/batch-approval/tasks") {
-        return (
-          options.tasksResponse ??
-          jsonResponse({
-            code: 0,
-            data: { tasks: TASKS, truncated: false },
-          })
-        );
+        if (options.tasksResponse) {
+          return typeof options.tasksResponse === "function"
+            ? options.tasksResponse()
+            : options.tasksResponse;
+        }
+        return jsonResponse({
+          code: 0,
+          data: { tasks: TASKS, truncated: false },
+        });
       }
       const rowsMatch = url.pathname.match(
         /^\/api\/v1\/feishu\/batch-approval\/tasks\/([^/]+)\/rows$/,
       );
       if (rowsMatch) {
+        if (options.detailRowsError) {
+          return jsonResponse({ code: 50001, message: "读取明细失败" }, 500);
+        }
         return jsonResponse({
           code: 0,
           data: options.detailRows
@@ -250,6 +258,12 @@ function stubBatchApi(options: StubOptions = {}): Call[] {
         return jsonResponse({ code: 0, data: { views: {} } });
       }
       if (url.pathname === "/api/v1/feishu/batch-approval/field-catalog") {
+        if (options.catalogError) {
+          return jsonResponse(
+            { code: 50000, message: "控件目录读取失败" },
+            500,
+          );
+        }
         return jsonResponse({
           code: 0,
           data: { widgets: options.catalog ?? [] },
@@ -631,6 +645,98 @@ describe("BatchApprovalPage", () => {
     expect(columns.some((column) => column.key === "computed:c1")).toBe(false);
   });
 
+  it("控件目录读取失败时保存不会丢失明细列配置", async () => {
+    let saved: unknown;
+    const view = {
+      computed_fields: [],
+      columns: [
+        { key: "base:title", visible: true },
+        { key: "detail:items:itemName", visible: false },
+      ],
+    };
+    stubBatchApi({
+      catalogError: true,
+      viewConfig: view,
+      onSaveView: (body) => {
+        saved = body;
+      },
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [TASKS[0]], truncated: false, views: { D1: view } },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "字段设置" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      await within(dialog).findByText(/控件目录读取失败/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(saved).toBeDefined());
+    const columns = (
+      saved as { columns: Array<{ key: string; visible: boolean }> }
+    ).columns;
+    // 目录失败时 draft 里没有明细列，保存必须按原配置保留它（包括隐藏状态）。
+    expect(columns).toContainEqual({
+      key: "detail:items:itemName",
+      visible: false,
+    });
+  });
+
+  it("控件目录正常时保存会丢弃已不存在的明细列配置", async () => {
+    let saved: unknown;
+    const view = {
+      computed_fields: [],
+      columns: [
+        { key: "detail:items:itemName", visible: true },
+        { key: "detail:items:gone", visible: true },
+      ],
+    };
+    stubBatchApi({
+      catalog: [
+        {
+          id: "items",
+          name: "费用明细",
+          type: "fieldList",
+          children: ["itemName"],
+        },
+        { id: "itemName", name: "物品", type: "input", parent_id: "items" },
+      ],
+      viewConfig: view,
+      onSaveView: (body) => {
+        saved = body;
+      },
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [TASKS[0]], truncated: false, views: { D1: view } },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "字段设置" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(saved).toBeDefined());
+    const columns = (
+      saved as { columns: Array<{ key: string; visible: boolean }> }
+    ).columns;
+    expect(columns).toContainEqual({
+      key: "detail:items:itemName",
+      visible: true,
+    });
+    // 后端 validate_widgets 会拒绝目录里已不存在的子控件；保存前必须丢弃。
+    expect(columns.some((column) => column.key === "detail:items:gone")).toBe(
+      false,
+    );
+  });
+
   it("明细控件先显示行数与首行预览，展开后加载全部明细行", async () => {
     const detailTask = {
       ...TASKS[0],
@@ -712,7 +818,9 @@ describe("BatchApprovalPage", () => {
         {
           id: "invoice",
           name: "发票",
-          value: ["https://files.example.com/发票.pdf"],
+          value: [
+            "https://files.example.com/stream/download/authcode/invoice-opaque",
+          ],
           field_type: "attachmentV2",
           ext: "'发票.pdf'",
         },
@@ -787,7 +895,7 @@ describe("BatchApprovalPage", () => {
           id: "attachments",
           name: "附件",
           value: [
-            "https://files.example.com/第一份.pdf",
+            "https://files.example.com/stream/download/authcode/first-opaque",
             "https://files.example.com/第二份.pdf",
           ],
           field_type: "attachmentV2",
@@ -1034,5 +1142,658 @@ describe("BatchApprovalPage", () => {
     expect(
       (await screen.findAllByRole("cell", { name: /待办请假单/ })).length,
     ).toBeGreaterThan(0);
+  });
+
+  function groupCard(groupName: string): HTMLElement {
+    const heading = screen.getByRole("heading", { name: groupName });
+    const card = heading.parentElement?.parentElement;
+    if (!card) throw new Error("找不到分组的表格容器");
+    return card as HTMLElement;
+  }
+
+  function rowsOf(groupName?: string): HTMLElement[] {
+    const scope = groupName ? groupCard(groupName) : document;
+    return Array.from(
+      scope.querySelectorAll<HTMLElement>(
+        ".ant-table-tbody > tr.ant-table-row",
+      ),
+    );
+  }
+
+  async function choosePageSize(
+    user: ReturnType<typeof userEvent.setup>,
+    groupName: string,
+    size: number,
+  ) {
+    const card = groupCard(groupName);
+    const select = card.querySelector<HTMLElement>(
+      ".ant-pagination-options .ant-select",
+    );
+    expect(select).not.toBeNull();
+    await user.click(select as HTMLElement);
+    const option = await waitFor(() => {
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+      );
+      const target = candidates.find((element) =>
+        element.textContent?.includes(`${size} 条/页`),
+      );
+      if (!target) throw new Error(`没有 ${size} 条/页 选项`);
+      return target;
+    });
+    await user.click(option);
+  }
+
+  async function clickPagination(
+    user: ReturnType<typeof userEvent.setup>,
+    card: HTMLElement,
+    page: number,
+  ) {
+    const item = card.querySelector<HTMLElement>(
+      `.ant-pagination-item-${page}`,
+    );
+    if (!item) throw new Error(`找不到第 ${page} 页分页项`);
+    const clickable = item.querySelector<HTMLElement>("button, a") ?? item;
+    await user.click(clickable);
+  }
+
+  function pageSizeLabel(groupName: string): string {
+    return (
+      groupCard(groupName).querySelector(".ant-pagination-options")
+        ?.textContent ?? ""
+    );
+  }
+
+  function makeTasks(
+    count: number,
+    options: {
+      code?: string;
+      name?: string;
+      titlePrefix?: string;
+    } = {},
+  ) {
+    const code = options.code ?? "D1";
+    const name = options.name ?? "报销审批";
+    const titlePrefix = options.titlePrefix ?? "批量报销单";
+    const suffix = code.toLowerCase();
+    return Array.from({ length: count }, (_, index) => ({
+      ...TASKS[0],
+      task_id: `${suffix}-${index + 1}`,
+      instance_code: `${suffix}-i${index + 1}`,
+      definition_code: code,
+      definition_name: name,
+      title: `${titlePrefix} ${String(index + 1).padStart(3, "0")}`,
+    }));
+  }
+
+  it("切换每页条数立即生效，并在刷新后保留", async () => {
+    stubBatchApi({
+      tasksResponse: () =>
+        jsonResponse({
+          code: 0,
+          data: { tasks: makeTasks(45), truncated: false },
+        }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+    expect(rowsOf("报销审批")).toHaveLength(20);
+
+    const user = userEvent.setup();
+    await choosePageSize(user, "报销审批", 50);
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(45));
+    expect(pageSizeLabel("报销审批")).toContain("50");
+
+    await user.click(screen.getByRole("button", { name: /刷新/ }));
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(45));
+    expect(pageSizeLabel("报销审批")).toContain("50");
+  });
+
+  it("翻页后切换每页条数会回到第 1 页", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: makeTasks(120), truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+
+    const user = userEvent.setup();
+    const card = groupCard("报销审批");
+    // 120 条、20/页时第 3 页切 50/页：rc-pagination 自身算出的页码仍是 3，
+    // 只有实现里显式回到第 1 页才能通过。
+    await clickPagination(user, card, 3);
+    await waitFor(() =>
+      expect(
+        card.querySelector(".ant-pagination-item-active")?.textContent,
+      ).toBe("3"),
+    );
+
+    await choosePageSize(user, "报销审批", 50);
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(50));
+    expect(card.querySelector(".ant-pagination-item-active")?.textContent).toBe(
+      "1",
+    );
+  });
+
+  it("每页条数按审批定义分组独立保存", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            ...makeTasks(25),
+            ...makeTasks(25, {
+              code: "D2",
+              name: "请假审批",
+              titlePrefix: "批量请假单",
+            }),
+          ],
+          truncated: false,
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+    await screen.findByText("批量请假单 001");
+
+    const user = userEvent.setup();
+    await choosePageSize(user, "报销审批", 50);
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(25));
+    expect(pageSizeLabel("报销审批")).toContain("50");
+
+    // 切到请假审批（默认仍是 20 条/页），单独设置 100 条/页。
+    await user.click(screen.getByRole("button", { name: /请假审批/ }));
+    await waitFor(() => expect(rowsOf("请假审批")).toHaveLength(20));
+    await choosePageSize(user, "请假审批", 100);
+    await waitFor(() => expect(rowsOf("请假审批")).toHaveLength(25));
+    expect(pageSizeLabel("请假审批")).toContain("100");
+
+    // 切回报销审批，之前设置的 50 仍然保留。
+    await user.click(screen.getByRole("button", { name: /报销审批/ }));
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(25));
+    expect(pageSizeLabel("报销审批")).toContain("50");
+  });
+
+  it("搜索使数据变少时回到第 1 页，清空搜索也不跳回旧页", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: makeTasks(120), truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+
+    const user = userEvent.setup();
+    const card = groupCard("报销审批");
+    await clickPagination(user, card, 2);
+    await waitFor(() =>
+      expect(
+        card.querySelector(".ant-pagination-item-active")?.textContent,
+      ).toBe("2"),
+    );
+
+    const search = screen.getByLabelText("搜索待办");
+    await user.type(search, "批量报销单 001");
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(1));
+    expect(card.querySelector(".ant-pagination-item-active")?.textContent).toBe(
+      "1",
+    );
+
+    await user.click(screen.getByRole("button", { name: "清空搜索" }));
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(20));
+    expect(card.querySelector(".ant-pagination-item-active")?.textContent).toBe(
+      "1",
+    );
+  });
+
+  it("表体独立纵向滚动，横向滚动条与分页留在卡片内", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: makeTasks(3), truncated: false },
+      }),
+    });
+    const originalInnerHeight = window.innerHeight;
+    window.innerHeight = 768;
+    try {
+      renderTestApp({ path: "/batch-approval", authenticated: true });
+      await screen.findByText("批量报销单 001");
+
+      const card = groupCard("报销审批");
+      // scroll.y 生效后 rc-table 拆出固定表头与独立滚动的表体：
+      // 横滑条位于 .ant-table-body 底边，分页紧跟其后。
+      const body = card.querySelector<HTMLElement>(".ant-table-body");
+      expect(body).not.toBeNull();
+      expect(card.querySelector(".ant-table-header")).not.toBeNull();
+      expect(card.querySelector(".ant-table-pagination")).not.toBeNull();
+      // jsdom 下固定 chrome 高度为 0：768 - 0 - 246 = 522。
+      await waitFor(() => expect(body?.style.maxHeight).toBe("522px"));
+
+      // 视口缩到 300 时夹到 192px 的最小高度。
+      window.innerHeight = 300;
+      window.dispatchEvent(new Event("resize"));
+      await waitFor(() => expect(body?.style.maxHeight).toBe("192px"));
+    } finally {
+      window.innerHeight = originalInnerHeight;
+    }
+  });
+
+  it("小分组也保留每页条数选择器", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: makeTasks(3), truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+
+    const card = groupCard("报销审批");
+    expect(card.querySelector(".ant-pagination")).not.toBeNull();
+    expect(card.querySelector(".ant-pagination-options")).not.toBeNull();
+    expect(rowsOf("报销审批")).toHaveLength(3);
+  });
+
+  it("跨页全选覆盖全部可处理任务，而不只是当前页", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: makeTasks(120), truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+
+    const user = userEvent.setup();
+    const card = groupCard("报销审批");
+    await clickPagination(user, card, 2);
+    await waitFor(() =>
+      expect(
+        card.querySelector(".ant-pagination-item-active")?.textContent,
+      ).toBe("2"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "全选可处理" }));
+    await waitFor(() => {
+      const summary = Array.from(document.querySelectorAll("span")).find(
+        (element) => /已选\s*120\s*条/.test(element.textContent ?? ""),
+      );
+      expect(summary).toBeTruthy();
+    });
+  });
+
+  function detailTaskWithItems() {
+    return {
+      ...TASKS[0],
+      task_id: "t1",
+      form_fields: [
+        {
+          id: "items",
+          name: "费用明细",
+          field_type: "fieldList",
+          value: null,
+          row_count: 2,
+          preview: ["笔记本"],
+        },
+      ],
+    };
+  }
+
+  async function expandDetailRows() {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "全部展开" }));
+    return user;
+  }
+
+  it("明细控件里的附件显示文件名并可预览，多附件用 +N 收拢", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [detailTaskWithItems()], truncated: false },
+      }),
+      detailRows: () => ({
+        field_id: "items",
+        name: "费用明细",
+        columns: [
+          { id: "name", name: "物品", type: "input" },
+          { id: "invoice", name: "发票附件", type: "attachmentV2" },
+        ],
+        rows: [
+          [
+            { id: "name", type: "input", value: "笔记本" },
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: [
+                "https://files.example.com/stream/download/authcode/invoice-opaque",
+              ],
+              ext: "'发票.pdf'",
+            },
+          ],
+          [
+            { id: "name", type: "input", value: "鼠标" },
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: [
+                "https://files.example.com/stream/download/authcode/first-opaque",
+                "https://files.example.com/凭证.png",
+              ],
+              ext: "'第一份.pdf','凭证.png'",
+            },
+          ],
+        ],
+        total: 2,
+        unfiltered_total: 2,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+    const user = await expandDetailRows();
+
+    const single = await screen.findByRole("button", {
+      name: "预览 发票.pdf",
+    });
+    expect(single).toHaveTextContent("发票.pdf");
+    const multi = screen.getByRole("button", { name: "预览 第一份.pdf" });
+    expect(multi).toHaveTextContent("+1");
+
+    await user.click(single);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("发票.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("link", { name: "下载附件" }),
+    ).toHaveAttribute("download", "发票.pdf");
+  });
+
+  it("明细附件兼容对象数组，且只有 file_token 时纯文本降级", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [detailTaskWithItems()], truncated: false },
+      }),
+      detailRows: () => ({
+        field_id: "items",
+        name: "费用明细",
+        columns: [
+          { id: "name", name: "物品", type: "input" },
+          { id: "invoice", name: "发票附件", type: "attachmentV2" },
+        ],
+        rows: [
+          [
+            { id: "name", type: "input", value: "笔记本" },
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: [
+                {
+                  url: "https://files.example.com/stream/download/authcode/opaque",
+                  name: "合同.pdf",
+                },
+              ],
+            },
+          ],
+          [
+            { id: "name", type: "input", value: "鼠标" },
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: [{ file_token: "tok-1", name: "补充协议.pdf" }],
+              ext: "'补充协议.pdf'",
+            },
+          ],
+        ],
+        total: 2,
+        unfiltered_total: 2,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+    await expandDetailRows();
+
+    expect(
+      await screen.findByRole("button", { name: "预览 合同.pdf" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("补充协议.pdf")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "预览 补充协议.pdf" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("历史视图的隐藏明细列仍隐藏，未配置的新列追加可见", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [detailTaskWithItems()],
+          truncated: false,
+          // 旧视图保存了「物品」（可见）和「发票附件」（隐藏）；
+          // 「数量」是后来新增、视图里没有配置的列。
+          views: {
+            D1: {
+              computed_fields: [],
+              columns: [
+                { key: "detail:items:name", visible: true },
+                { key: "detail:items:invoice", visible: false },
+              ],
+            },
+          },
+        },
+      }),
+      detailRows: () => ({
+        field_id: "items",
+        name: "费用明细",
+        columns: [
+          { id: "name", name: "物品", type: "input" },
+          { id: "invoice", name: "发票附件", type: "attachmentV2" },
+          { id: "qty", name: "数量", type: "number" },
+        ],
+        rows: [
+          [
+            { id: "name", type: "input", value: "笔记本" },
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: [
+                "https://files.example.com/stream/download/authcode/invoice-opaque",
+              ],
+              ext: "'发票.pdf'",
+            },
+            { id: "qty", type: "number", value: 300 },
+          ],
+        ],
+        total: 1,
+        unfiltered_total: 1,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+    await expandDetailRows();
+
+    expect(await screen.findByText("笔记本")).toBeInTheDocument();
+    // 已配置为隐藏的附件列不渲染；视图里没有配置的数量列追加可见。
+    expect(
+      screen.queryByRole("button", { name: "预览 发票.pdf" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("300")).toBeInTheDocument();
+  });
+
+  it("明细附件兼容 JSON 字符串数组与逗号分隔值", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [detailTaskWithItems()], truncated: false },
+      }),
+      detailRows: () => ({
+        field_id: "items",
+        name: "费用明细",
+        columns: [{ id: "invoice", name: "发票附件", type: "attachmentV2" }],
+        rows: [
+          [
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value: JSON.stringify([
+                "https://files.example.com/stream/download/authcode/json-opaque",
+              ]),
+              ext: "'JSON发票.pdf'",
+            },
+          ],
+          [
+            {
+              id: "invoice",
+              type: "attachmentV2",
+              value:
+                "https://files.example.com/stream/download/authcode/comma-a, https://files.example.com/stream/download/authcode/comma-b",
+              ext: "'逗号一.pdf','逗号二.png'",
+            },
+          ],
+        ],
+        total: 2,
+        unfiltered_total: 2,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+    await expandDetailRows();
+
+    expect(
+      await screen.findByRole("button", { name: "预览 JSON发票.pdf" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "预览 逗号一.pdf" }),
+    ).toHaveTextContent("+1");
+  });
+
+  it("非附件字段的单对象值不会被当成附件", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              form_fields: [
+                {
+                  id: "link",
+                  name: "链接",
+                  value: { name: "说明", url: "https://example.com/x" },
+                  field_type: "input",
+                  ext: null,
+                },
+              ],
+            },
+          ],
+          truncated: false,
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+
+    expect(screen.getByText("说明")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "预览 说明" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("明细行读取失败时显示错误且不崩溃", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [detailTaskWithItems()], truncated: false },
+      }),
+      detailRowsError: true,
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("报销单 A");
+    await expandDetailRows();
+
+    expect(await screen.findByText(/读取明细失败/)).toBeInTheDocument();
+  });
+
+  it("筛选后搜索再清空，表格与父级镜像保持一致", async () => {
+    const tasks = makeTasks(3).map((task, index) => ({
+      ...task,
+      initiator_name: ["李四", "王五", "赵六"][index],
+    }));
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks, truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+
+    const user = userEvent.setup();
+    await filterColumn(user, "报销审批", "发起人", "李四");
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(1));
+
+    // 搜索改变数据源：表格重挂载、列筛选回到无筛选，父级镜像同步重置。
+    const search = screen.getByLabelText("搜索待办");
+    await user.type(search, "批量报销单 002");
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "清空搜索" }));
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(3));
+
+    await user.click(screen.getByRole("button", { name: "全选可处理" }));
+    await waitFor(() => {
+      const summary = Array.from(document.querySelectorAll("span")).find(
+        (element) => /已选\s*3\s*条/.test(element.textContent ?? ""),
+      );
+      expect(summary).toBeTruthy();
+    });
+  });
+
+  it("切换分组后清理旧的列筛选镜像，全选范围不缩小", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            ...makeTasks(3),
+            ...makeTasks(3, {
+              code: "D2",
+              name: "请假审批",
+              titlePrefix: "批量请假单",
+            }),
+          ],
+          truncated: false,
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByText("批量报销单 001");
+    await screen.findByText("批量请假单 001");
+
+    const user = userEvent.setup();
+    await filterColumn(user, "报销审批", "标题", "批量报销单 001");
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(1));
+
+    // 切走再切回：表格重挂载、列筛选状态丢失；父级镜像也必须同步清理，
+    // 否则“全选可处理”会按旧的 1 条子集计算。
+    await user.click(screen.getByRole("button", { name: /请假审批/ }));
+    await waitFor(() => expect(rowsOf("请假审批")).toHaveLength(3));
+    await user.click(screen.getByRole("button", { name: /报销审批/ }));
+    await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(3));
+
+    await user.click(screen.getByRole("button", { name: "全选可处理" }));
+    await waitFor(() => {
+      const summary = Array.from(document.querySelectorAll("span")).find(
+        (element) => /已选\s*3\s*条/.test(element.textContent ?? ""),
+      );
+      expect(summary).toBeTruthy();
+    });
   });
 });

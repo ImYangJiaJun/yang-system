@@ -13,6 +13,7 @@ use super::list_tasks::text_of;
 use super::task_detail::{self, DetailAccess};
 use crate::addon::feishu::batch_approval::domain::widget_catalog::WidgetCatalog;
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::widget_rules;
 use crate::addon::feishu::sso::credentials;
 
 yang_base::params! {
@@ -181,38 +182,64 @@ fn parse_rows(value: &Value) -> Vec<Vec<Value>> {
         .collect()
 }
 
-/// 列顺序优先用控件目录里的子控件顺序，目录缺失时退回首行顺序。
+/// 列顺序优先用控件目录里的子控件顺序；目录缺失时按行首出现的顺序。
+/// 目录可能缺少只在后续行出现的子控件（稀疏明细），所以始终把全部行的 id
+/// 并集追加在目录之后，避免附件等列永远不可见。
 fn columns(
     catalog: Option<&WidgetCatalog>,
     field_id: &str,
     rows: &[Vec<Value>],
 ) -> (Vec<Value>, Vec<String>) {
-    let child_ids: Vec<String> = catalog
+    let mut ids: Vec<String> = catalog
         .map(|catalog| catalog.children(field_id).to_vec())
         .unwrap_or_default();
-    let ids = if child_ids.is_empty() {
-        rows.first()
-            .map(|row| {
-                row.iter()
-                    .filter_map(cell_id)
-                    .map(ToString::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        child_ids
-    };
+    for row in rows {
+        for cell in row {
+            let Some(id) = cell_id(cell) else { continue };
+            // 说明文字、容器等不可配置控件不进目录，也不该占一列；
+            // 只有「目录没列出来但本身可配置」的子控件才追加（例如附件列）。
+            if !cell_is_configurable(cell) {
+                continue;
+            }
+            if !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
     let columns = ids
         .iter()
         .map(|id| {
             let name = catalog.and_then(|catalog| catalog.name(id)).unwrap_or(id);
             let widget_type = catalog
                 .and_then(|catalog| catalog.widget_type(id))
+                .filter(|value| !value.is_empty())
+                .or_else(|| first_cell_type(rows, id))
                 .unwrap_or("");
             json!({"id": id, "name": name, "type": widget_type})
         })
         .collect();
     (columns, ids)
+}
+
+/// 行内 cell 的控件类型是否可配置（说明文字/容器等不进明细列）。
+/// 类型缺失时保守保留：目录不可用时仍需显示行里出现的附件等列。
+fn cell_is_configurable(cell: &Value) -> bool {
+    cell.get("type")
+        .and_then(Value::as_str)
+        .map(|widget_type| widget_type.is_empty() || widget_rules::is_configurable(widget_type))
+        .unwrap_or(true)
+}
+
+/// 目录里没有类型时，退回到行数据里该子控件第一个非空 `type`。
+fn first_cell_type<'a>(rows: &'a [Vec<Value>], id: &str) -> Option<&'a str> {
+    rows.iter()
+        .flat_map(|row| row.iter())
+        .filter(|cell| cell_id(cell) == Some(id))
+        .find_map(|cell| {
+            cell.get("type")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 fn cell_id(cell: &Value) -> Option<&str> {
@@ -221,9 +248,14 @@ fn cell_id(cell: &Value) -> Option<&str> {
 
 fn row_matches(row: &[Value], keyword: &str) -> bool {
     row.iter().any(|cell| {
-        text_of(cell.get("value").unwrap_or(cell))
-            .to_lowercase()
-            .contains(keyword)
+        let value = cell
+            .get("value")
+            .or_else(|| cell.get("field_value"))
+            .unwrap_or(cell);
+        text_of(value).to_lowercase().contains(keyword)
+            || text_of(cell.get("ext").unwrap_or(&Value::Null))
+                .to_lowercase()
+                .contains(keyword)
     })
 }
 
@@ -256,16 +288,22 @@ fn row_json(row: &[Value], order: &[String]) -> Value {
 fn cell_json(cell: &Value) -> Value {
     json!({
         "id": cell.get("id").cloned().unwrap_or(Value::Null),
-        "value": cell.get("value").cloned().unwrap_or(Value::Null),
+        // 兼容飞书旧形态的 field_value；附件原名在 ext 里（单引号列表/JSON 数组）。
+        "value": cell
+            .get("value")
+            .or_else(|| cell.get("field_value"))
+            .cloned()
+            .unwrap_or(Value::Null),
         "type": cell.get("type").cloned().unwrap_or(Value::Null),
+        "ext": cell.get("ext").cloned().unwrap_or(Value::Null),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{columns, detail_field, row_json, row_matches, select_page};
+    use super::{cell_json, columns, detail_field, row_json, row_matches, select_page};
     use crate::addon::feishu::domain::approval_match::FormWidget;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn detail() -> serde_json::Value {
         json!({
@@ -352,6 +390,8 @@ mod tests {
         let catalog = super::super::super::domain::widget_catalog::build(&[items]);
         let (_, rows) = detail_field(&detail(), "items").unwrap_or_else(|| panic!("应找到明细"));
         let (columns, order) = columns(Some(&catalog), "items", &rows);
+        // 目录顺序之后只追加可配置的行内子控件；type=text 的说明列（note）
+        // 与目录一样被排除，避免出现无法配置的原始 id 列。
         assert_eq!(order, ["price", "name"]);
         assert_eq!(columns[0]["name"], "单价");
         assert_eq!(columns[1]["type"], "input");
@@ -365,7 +405,70 @@ mod tests {
     fn falls_back_to_first_row_order_without_catalog() {
         let (_, rows) = detail_field(&detail(), "items").unwrap_or_else(|| panic!("应找到明细"));
         let (columns, order) = columns(None, "items", &rows);
-        assert_eq!(order, ["name", "price", "note"]);
+        assert_eq!(order, ["name", "price"]);
         assert_eq!(columns[0]["name"], "name");
+    }
+
+    #[test]
+    fn cell_json_keeps_ext_and_maps_field_value() {
+        let cell = json!({
+            "id": "invoice",
+            "type": "attachmentV2",
+            "field_value": ["https://files.example.com/a.pdf"],
+            "ext": "'发票.pdf'"
+        });
+        let value = cell_json(&cell);
+        assert_eq!(value["id"], "invoice");
+        assert_eq!(value["value"][0], "https://files.example.com/a.pdf");
+        assert_eq!(value["type"], "attachmentV2");
+        assert_eq!(value["ext"], "'发票.pdf'");
+
+        let plain = cell_json(&json!({"id": "name", "value": "笔记本"}));
+        assert_eq!(plain["ext"], Value::Null);
+    }
+
+    #[test]
+    fn columns_add_ids_that_only_appear_in_later_rows() {
+        let rows = vec![
+            vec![json!({"id": "name", "type": "input", "value": "笔记本"})],
+            vec![
+                json!({"id": "name", "type": "input", "value": "鼠标"}),
+                json!({
+                    "id": "invoice",
+                    "type": "attachmentV2",
+                    "value": ["https://files.example.com/a.pdf"]
+                }),
+            ],
+        ];
+        let (columns, order) = columns(None, "items", &rows);
+        assert_eq!(order, ["name", "invoice"]);
+        assert_eq!(columns[1]["id"], "invoice");
+        assert_eq!(columns[1]["type"], "attachmentV2");
+    }
+
+    #[test]
+    fn columns_type_falls_back_to_first_non_empty_cell_type() {
+        let rows = vec![
+            vec![json!({"id": "invoice", "value": ["https://files.example.com/a.pdf"]})],
+            vec![json!({
+                "id": "invoice",
+                "type": "attachmentV2",
+                "value": ["https://files.example.com/b.pdf"]
+            })],
+        ];
+        let (columns, _) = columns(None, "items", &rows);
+        assert_eq!(columns[0]["type"], "attachmentV2");
+    }
+
+    #[test]
+    fn row_search_matches_attachment_file_names_in_ext() {
+        let row = vec![json!({
+            "id": "invoice",
+            "type": "attachmentV2",
+            "value": ["https://files.example.com/stream/authcode/opaque"],
+            "ext": "'差旅发票.pdf'"
+        })];
+        assert!(row_matches(&row, "差旅发票"));
+        assert!(!row_matches(&row, "住宿"));
     }
 }

@@ -280,6 +280,8 @@ export type BatchTaskDetailCell = {
   id: string | null;
   value: unknown;
   type: string | null;
+  /// 飞书子控件扩展信息；附件控件的原文件名列表在 `ext` 里。
+  ext: unknown;
 };
 
 export type BatchTaskDetailRows = {
@@ -1260,6 +1262,7 @@ function parseDetailCell(raw: unknown): BatchTaskDetailCell {
     id: firstText(record, "id"),
     value: record && "value" in record ? record.value : raw,
     type: firstText(record, "type"),
+    ext: record && "ext" in record ? record.ext : null,
   };
 }
 

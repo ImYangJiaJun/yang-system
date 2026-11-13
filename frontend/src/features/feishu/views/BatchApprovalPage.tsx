@@ -230,20 +230,118 @@ function attachmentObject(value: unknown): Record<string, unknown> | null {
   return hasUrl || hasToken || hasName ? record : null;
 }
 
-function attachmentUrls(value: unknown): string[] {
-  if (typeof value === "string") {
-    return value
-      .split(/,\s*(?=https?:\/\/)/)
+/// 飞书部分字段会把数组序列化成 JSON 字符串；先尝试解析，失败按原字符串处理。
+function parseAttachmentJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text.startsWith("[") && !text.startsWith("{")) return value;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+type AttachmentEntry = {
+  url?: string;
+  name?: string;
+  token?: string;
+};
+
+/// 把附件值归一化为条目：单个/逗号分隔的 URL 字符串、JSON 字符串数组、
+/// 对象数组（url/tmp_url/file_token + name/file_name）都兼容。
+function attachmentEntries(value: unknown): AttachmentEntry[] {
+  const normalized = parseAttachmentJson(value);
+  if (typeof normalized === "string") {
+    return normalized
+      .split(/,\s*(?=https?:\/\/)/i)
       .map((item) => item.trim())
-      .filter((item) => /^https?:\/\//i.test(item));
+      .filter((item) => /^https?:\/\//i.test(item))
+      .map((url) => ({ url }));
   }
-  if (Array.isArray(value)) {
-    return value.flatMap(attachmentUrls);
+  if (Array.isArray(normalized)) {
+    return normalized.flatMap(attachmentEntries);
   }
-  const record = attachmentObject(value);
+  const record = attachmentObject(normalized);
   if (!record) return [];
-  const url = record.url ?? record.tmp_url;
-  return typeof url === "string" && /^https?:\/\//i.test(url) ? [url] : [];
+  const url =
+    typeof record.url === "string"
+      ? record.url
+      : typeof record.tmp_url === "string"
+        ? record.tmp_url
+        : undefined;
+  const name =
+    typeof record.name === "string"
+      ? record.name
+      : typeof record.file_name === "string"
+        ? record.file_name
+        : undefined;
+  const token =
+    typeof record.file_token === "string" ? record.file_token : undefined;
+  if (!url && !name && !token) return [];
+  return [{ url, name, token }];
+}
+
+function isAttachmentType(type: string | null | undefined): boolean {
+  const normalized = (type ?? "").toLowerCase();
+  return normalized.includes("attachment") || normalized.includes("image");
+}
+
+/// 附件值 → 可预览/下载的文件。只接受 http(s) URL；只有 file_token 的
+/// 附件由 [`attachmentDisplayNames`] 做纯文本降级，不进入附件代理。
+function attachmentFiles(
+  fieldType: string | null | undefined,
+  value: unknown,
+  ext: unknown,
+): AttachmentFile[] {
+  const entries = attachmentEntries(value);
+  // 保留原始下标：ext 里的文件名按 entries 顺序对齐；先过滤再取
+  // names[index] 会在「token-only + URL」混合时把名字错配到另一个文件。
+  const urlEntries = entries.flatMap((entry, index) =>
+    typeof entry.url === "string" && /^https?:\/\//i.test(entry.url)
+      ? [{ url: entry.url, name: entry.name, index }]
+      : [],
+  );
+  if (urlEntries.length === 0) return [];
+  const type = (fieldType ?? "").toLowerCase();
+  const parsedValue = parseAttachmentJson(value);
+  const looksLikeAttachment =
+    type.includes("attachment") ||
+    type.includes("image") ||
+    (Array.isArray(parsedValue) &&
+      entries.some(
+        (entry) => entry.name !== undefined || entry.token !== undefined,
+      )) ||
+    (Array.isArray(value) &&
+      value.some((item) => attachmentObject(item) !== null));
+  if (!looksLikeAttachment) return [];
+  const names = attachmentNames(ext);
+  return urlEntries.map(({ url, name: objectName, index }) => {
+    const name =
+      objectName || names[index] || urlFileName(url) || `附件 ${index + 1}`;
+    return {
+      name,
+      url,
+      kind:
+        type.includes("image") && !/\.[a-z0-9]+$/i.test(name)
+          ? "image"
+          : fileKind(name, url),
+    };
+  });
+}
+
+/// 附件显示名（含只有 file_token、没有 URL 的纯文本降级）。
+function attachmentDisplayNames(value: unknown, ext: unknown): string[] {
+  const entries = attachmentEntries(value);
+  if (entries.length === 0) return attachmentNames(ext);
+  const names = attachmentNames(ext);
+  return entries.map(
+    (entry, index) =>
+      entry.name ||
+      names[index] ||
+      urlFileName(entry.url ?? "") ||
+      `附件 ${index + 1}`,
+  );
 }
 
 function fileKind(name: string, url: string): AttachmentKind {
@@ -257,11 +355,11 @@ function fileKind(name: string, url: string): AttachmentKind {
   const extension = `${name} ${path}`
     .toLowerCase()
     .match(/\.([a-z0-9]+)(?:\s|$)/)?.[1];
+  // SVG 可以携带脚本，附件代理已强制按下载返回（application/octet-stream）；
+  // 不作为图片预览，避免浏览器直接渲染同源可执行内容。
   if (
     extension &&
-    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"].includes(
-      extension,
-    )
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"].includes(extension)
   ) {
     return "image";
   }
@@ -281,28 +379,7 @@ function urlFileName(url: string): string {
 }
 
 function attachmentsOf(field: BatchTaskFormField): AttachmentFile[] {
-  const fieldType = (field.fieldType ?? "").toLowerCase();
-  const urls = attachmentUrls(field.value);
-  if (urls.length === 0) return [];
-  const looksLikeAttachment =
-    fieldType.includes("attachment") ||
-    fieldType.includes("image") ||
-    (Array.isArray(field.value) &&
-      field.value.some((item) => attachmentObject(item) !== null));
-  if (!looksLikeAttachment) return [];
-
-  const names = attachmentNames(field.ext);
-  return urls.map((url, index) => {
-    const name = names[index] || urlFileName(url) || `附件 ${index + 1}`;
-    return {
-      name,
-      url,
-      kind:
-        fieldType.includes("image") && !/\.[a-z0-9]+$/i.test(name)
-          ? "image"
-          : fileKind(name, url),
-    };
-  });
+  return attachmentFiles(field.fieldType, field.value, field.ext);
 }
 
 function attachmentProxyUrl(file: AttachmentFile): string {
@@ -850,6 +927,65 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
       )}
     </div>
   );
+}
+
+/// 明细行的附件列：固定 34px 行高内单行展示，多附件用 +N 收拢。
+/// 可预览文件点击后由 TaskDetailSection 打开统一预览弹窗；只有 file_token
+/// 的附件显示文件名纯文本，不进入附件代理。
+function DetailAttachmentCell({
+  files,
+  labels,
+  onPreview,
+}: {
+  files: AttachmentFile[];
+  labels: string[];
+  onPreview: (files: AttachmentFile[], index: number) => void;
+}) {
+  const title = labels.join("、");
+  if (files.length === 0) {
+    return (
+      <span
+        className="block truncate text-xs text-muted-foreground"
+        title={title || undefined}
+      >
+        {labels[0] || "—"}
+        {labels.length > 1 ? ` +${labels.length - 1}` : ""}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="text-primary flex max-w-full min-w-0 items-center gap-1 truncate text-left text-xs underline-offset-2 hover:underline"
+      aria-label={`预览 ${files[0].name}`}
+      title={title}
+      onClick={() => onPreview(files, 0)}
+    >
+      <Eye className="size-3 shrink-0" aria-hidden="true" />
+      <span className="truncate">{files[0].name}</span>
+      {labels.length > 1 && (
+        <span className="shrink-0">+{labels.length - 1}</span>
+      )}
+    </button>
+  );
+}
+
+/// 明细单元格是否是附件：`cell.type` 与 `column.type` 分别判型后取或，
+/// 避免一个非空但非附件的 cell.type 掩盖目录里的附件类型。
+function detailAttachmentInfo(
+  cell: BatchTaskDetailCell | undefined,
+  column: BatchTaskDetailColumn,
+): { attachment: boolean; files: AttachmentFile[]; labels: string[] } {
+  const cellType = cell?.type ?? "";
+  const columnType = column.type ?? "";
+  if (!isAttachmentType(cellType) && !isAttachmentType(columnType)) {
+    return { attachment: false, files: [], labels: [] };
+  }
+  return {
+    attachment: true,
+    files: attachmentFiles(`${cellType} ${columnType}`, cell?.value, cell?.ext),
+    labels: attachmentDisplayNames(cell?.value, cell?.ext),
+  };
 }
 
 function isDescriptionField(field: BatchTaskFormField): boolean {
@@ -1415,9 +1551,81 @@ const TABLE_COMPONENTS = { header: { cell: ResizableHeaderCell } };
 
 const DETAIL_PAGE_SIZE = 50;
 const DETAIL_ROW_HEIGHT = 34;
+/// 待办表格默认每页条数与可选项。pageSize 由页面按定义分组保存，
+/// 刷新/保存字段设置导致表格重挂载后仍然保留。
+const DEFAULT_TABLE_PAGE_SIZE = 20;
+const TABLE_PAGE_SIZE_OPTIONS = [20, 50, 100];
 /// 明细只有一两行时不要撑出固定高度，最多 300px。
 const DETAIL_MAX_HEIGHT = 300;
 const DETAIL_MIN_HEIGHT = 72;
+
+/// 表格卡片除表体外的高度预留：卡片头、展开按钮行、表头、分页与间距。
+/// 首帧用 CSS 兜底；真实可用高度在布局完成后测量。
+const TABLE_CARD_CHROME_HEIGHT = 246;
+const TABLE_BODY_MAX_FALLBACK = "max(12rem, calc(100svh - 26rem))";
+
+/// 让待办表格的表体在视口内纵向滚动：横向滚动条固定在表体底边，
+/// 分页紧跟表体，用户不必再把整页滚到表格末尾才能操作。
+/// 表头/标题/工具栏/提示条用真实高度测量（它们会换行、会增减），
+/// 其余卡片 chrome 用固定预留；测量只观察固定 chrome，避免观察表体自身导致振荡。
+function useTableBodyMaxHeight(revision: unknown): string {
+  const [maxHeight, setMaxHeight] = useState(TABLE_BODY_MAX_FALLBACK);
+
+  useEffect(() => {
+    let frame: number | null = null;
+    const fixedSelectors = [
+      "[data-slot='batch-approval-header']",
+      "[data-slot='batch-approval-title']",
+      "[data-slot='batch-approval-toolbar']",
+    ];
+    const bannerSelector = "[data-slot='batch-approval-banner']";
+    const measuredElements = () => [
+      ...fixedSelectors.map((selector) =>
+        document.querySelector<HTMLElement>(selector),
+      ),
+      ...Array.from(document.querySelectorAll<HTMLElement>(bannerSelector)),
+    ];
+    const measure = () => {
+      frame = null;
+      let chromeHeight = 0;
+      for (const element of measuredElements()) {
+        chromeHeight += element?.offsetHeight ?? 0;
+      }
+      const available = Math.max(
+        192,
+        Math.floor(
+          window.innerHeight - chromeHeight - TABLE_CARD_CHROME_HEIGHT,
+        ),
+      );
+      const next = `${available}px`;
+      setMaxHeight((previous) => (previous === next ? previous : next));
+    };
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(measure);
+    };
+    measure();
+    const observer =
+      typeof ResizeObserver === "function"
+        ? new ResizeObserver(schedule)
+        : null;
+    if (observer) {
+      // 提示条可能有多条（重新授权 + 加载错误），全部纳入观察；
+      // 新出现的提示条由 revision 变化触发 effect 重跑后重新绑定。
+      for (const element of measuredElements()) {
+        if (element) observer.observe(element);
+      }
+    }
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [revision]);
+
+  return maxHeight;
+}
 
 /// 明细列顺序/可见性来自字段设置里的 `detail:<明细控件>:<子控件>` 配置；
 /// 没有配置时按控件目录顺序全部展示。
@@ -1432,10 +1640,19 @@ function detailVisibleColumns(
   );
   if (configured.length === 0) return columns;
   const byId = new Map(columns.map((column) => [column.id, column]));
-  return configured
-    .filter((column) => column.visible)
-    .map((column) => byId.get(column.key.slice(prefix.length)))
-    .filter((column): column is BatchTaskDetailColumn => column !== undefined);
+  const configuredIds = new Set<string>();
+  const visible: BatchTaskDetailColumn[] = [];
+  for (const column of configured) {
+    const id = column.key.slice(prefix.length);
+    configuredIds.add(id);
+    if (!column.visible) continue;
+    const match = byId.get(id);
+    if (match) visible.push(match);
+  }
+  // 历史视图保存时还不存在的明细列（例如新加的附件列）默认追加可见，
+  // 否则用户必须先打开字段设置并保存一次才能看到它们。
+  const appended = columns.filter((column) => !configuredIds.has(column.id));
+  return [...visible, ...appended];
 }
 
 /// 单条任务的明细控件：按需分页加载 + 固定行高虚拟滚动，接近底部自动续读。
@@ -1457,6 +1674,11 @@ function TaskDetailSection({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [scrollTop, setScrollTop] = useState(0);
+  // 预览弹窗放在 section 层：虚拟滚动的行会被卸载，放在单元格里会连同弹窗一起消失。
+  const [preview, setPreview] = useState<{
+    files: AttachmentFile[];
+    index: number;
+  } | null>(null);
   const loadingRef = useRef(false);
   const loadedRef = useRef(0);
   const doneRef = useRef(false);
@@ -1549,7 +1771,7 @@ function TaskDetailSection({
               ))}
             </div>
             <div
-              className="overflow-auto"
+              className="overscroll-contain overflow-auto"
               style={{ height: viewportHeight }}
               onScroll={(event) => {
                 const element = event.currentTarget;
@@ -1593,6 +1815,20 @@ function TaskDetailSection({
                       </div>
                       {visibleColumns.map((column) => {
                         const cell = row.find((item) => item.id === column.id);
+                        const attachment = detailAttachmentInfo(cell, column);
+                        if (attachment.attachment) {
+                          return (
+                            <div key={column.id} className="min-w-0 px-2.5">
+                              <DetailAttachmentCell
+                                files={attachment.files}
+                                labels={attachment.labels}
+                                onPreview={(files, index) =>
+                                  setPreview({ files, index })
+                                }
+                              />
+                            </div>
+                          );
+                        }
                         const text = fieldValueText(cell?.value);
                         return (
                           <div
@@ -1611,6 +1847,16 @@ function TaskDetailSection({
             </div>
           </div>
         )
+      )}
+      {preview && (
+        <AttachmentPreview
+          files={preview.files}
+          index={preview.index}
+          onChange={(index) =>
+            setPreview((current) => (current ? { ...current, index } : current))
+          }
+          onClose={() => setPreview(null)}
+        />
       )}
     </div>
   );
@@ -1654,6 +1900,9 @@ function DefinitionTable({
   selected,
   onSelect,
   onFilteredTasksChange,
+  pageSize,
+  onPageSizeChange,
+  bodyMaxHeight,
 }: {
   tasks: BatchTask[];
   definitionKey: string;
@@ -1662,7 +1911,15 @@ function DefinitionTable({
   selected: SelectedMap;
   onSelect: (tableTasks: BatchTask[], selectedTasks: BatchTask[]) => void;
   onFilteredTasksChange: (definitionKey: string, taskIds: string[]) => void;
+  /// 该审批定义当前的每页条数；由页面级 map 持有，重挂载不丢。
+  pageSize: number;
+  onPageSizeChange: (size: number) => void;
+  /// 表体最大高度：让横滑条和分页留在视口内。
+  bodyMaxHeight: string;
 }) {
+  const [current, setCurrent] = useState(1);
+  const [tableRevision, setTableRevision] = useState(0);
+  const tableRef = useRef<HTMLDivElement | null>(null);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const baseColumns = useMemo(
     () => buildTaskColumns(tasks, view),
@@ -1692,6 +1949,33 @@ function DefinitionTable({
       }),
     [baseColumns, columnWidths],
   );
+  const tasksSignature = useMemo(
+    () => tasks.map((task) => task.taskId).join("\u0000"),
+    [tasks],
+  );
+  const previousTasksSignature = useRef(tasksSignature);
+  // 搜索或外部筛选改变了数据源：页数可能变少，回到第 1 页并把表体回顶。
+  // antd 的 scrollToFirstRowOnChange 只在 filter/sort/paginate 触发，
+  // dataSource prop 变化不会走 onChange。
+  useEffect(() => {
+    setCurrent(1);
+    const body =
+      tableRef.current?.querySelector<HTMLElement>(".ant-table-body");
+    if (body) body.scrollTop = 0;
+  }, [tasks]);
+  // 数据源变化时 antd 不触发 onChange，旧的列筛选镜像会与新数据不一致：
+  // 新出现的行可以勾选，但父级只认旧镜像，已选/可处理计数偏小。
+  // 重挂载表格（列筛选回到无筛选）并把镜像重置为当前全量任务。
+  useEffect(() => {
+    if (previousTasksSignature.current === tasksSignature) return;
+    previousTasksSignature.current = tasksSignature;
+    onFilteredTasksChange(
+      definitionKey,
+      tasks.map((task) => task.taskId),
+    );
+    setTableRevision((revision) => revision + 1);
+  }, [definitionKey, onFilteredTasksChange, tasks, tasksSignature]);
+
   const selectedRowKeys = tasks
     .filter((task) => selected[task.taskId])
     .map((task) => task.taskId);
@@ -1745,61 +2029,84 @@ function DefinitionTable({
           </Button>
         </div>
       )}
-      <Table<BatchTask>
-        rowKey="taskId"
-        className="batch-table"
-        size="small"
-        tableLayout="fixed"
-        columns={columnsWithExpand}
-        components={TABLE_COMPONENTS}
-        dataSource={tasks}
-        onChange={(_pagination, _filters, _sorter, extra) =>
-          onFilteredTasksChange(
-            definitionKey,
-            extra.currentDataSource.map((task) => task.taskId),
-          )
-        }
-        expandable={{
-          columnWidth: 44,
-          expandedRowKeys: expandedKeys,
-          expandedRowClassName: () => "batch-expanded-row",
-          onExpandedRowsChange: (keys) =>
-            setExpandedKeys(keys.map((key) => String(key))),
-          rowExpandable: (task) =>
-            task.formFields.some((field) => isDetailField(field) && field.id),
-          expandedRowRender: (task) => (
-            <TaskDetailPanels
-              task={task}
-              view={view}
-              accessToken={accessToken}
-            />
-          ),
-        }}
-        scroll={{ x: "max-content" }}
-        pagination={{
-          pageSize: 20,
-          pageSizeOptions: [20, 50, 100],
-          showSizeChanger: true,
-          hideOnSinglePage: true,
-          showTotal: (total) => `共 ${total} 条`,
-        }}
-        rowSelection={{
-          selectedRowKeys,
-          preserveSelectedRowKeys: true,
-          getCheckboxProps: (task) => ({
-            disabled: !taskOperability(task).operable,
-            "aria-label": `选择 ${task.title}`,
-          }),
-          onChange: (keys) => {
-            const selectedKeys = new Set(keys.map(String));
-            onSelect(
-              tasks,
-              tasks.filter((task) => selectedKeys.has(task.taskId)),
-            );
-          },
-        }}
-        locale={{ emptyText: "没有符合筛选条件的待办" }}
-      />
+      <div ref={tableRef}>
+        <Table<BatchTask>
+          key={tableRevision}
+          rowKey="taskId"
+          className="batch-table"
+          size="small"
+          tableLayout="fixed"
+          columns={columnsWithExpand}
+          components={TABLE_COMPONENTS}
+          dataSource={tasks}
+          onChange={(pagination, _filters, _sorter, extra) => {
+            // 每页条数是受控的：antd 内部 state 会被传入值覆盖，必须在这里
+            // 接住 onChange 才能让切换真正生效。切条数回到第 1 页。
+            const nextPageSize = pagination.pageSize ?? pageSize;
+            if (nextPageSize !== pageSize) {
+              onPageSizeChange(nextPageSize);
+              setCurrent(1);
+            } else {
+              setCurrent(pagination.current ?? 1);
+            }
+            // 只有列筛选会改变“可见任务集合”；翻页/排序的 currentDataSource
+            // 仍是过滤后的全量数据，重复回写没有意义。
+            if (extra.action === "filter") {
+              onFilteredTasksChange(
+                definitionKey,
+                extra.currentDataSource.map((task) => task.taskId),
+              );
+            }
+          }}
+          expandable={{
+            columnWidth: 44,
+            expandedRowKeys: expandedKeys,
+            expandedRowClassName: () => "batch-expanded-row",
+            onExpandedRowsChange: (keys) =>
+              setExpandedKeys(keys.map((key) => String(key))),
+            rowExpandable: (task) =>
+              task.formFields.some((field) => isDetailField(field) && field.id),
+            expandedRowRender: (task) => (
+              <TaskDetailPanels
+                task={task}
+                view={view}
+                accessToken={accessToken}
+              />
+            ),
+          }}
+          scroll={{
+            x: "max-content",
+            y: bodyMaxHeight,
+            // 翻页/切换条数后由 antd 把表体滚回第一行（表头固定）。
+            scrollToFirstRowOnChange: true,
+          }}
+          pagination={{
+            current,
+            pageSize,
+            pageSizeOptions: TABLE_PAGE_SIZE_OPTIONS,
+            showSizeChanger: true,
+            // 小分组也要保留条数选择器，否则用户看到的分页“设置”会直接消失。
+            hideOnSinglePage: false,
+            showTotal: (total) => `共 ${total} 条`,
+          }}
+          rowSelection={{
+            selectedRowKeys,
+            preserveSelectedRowKeys: true,
+            getCheckboxProps: (task) => ({
+              disabled: !taskOperability(task).operable,
+              "aria-label": `选择 ${task.title}`,
+            }),
+            onChange: (keys) => {
+              const selectedKeys = new Set(keys.map(String));
+              onSelect(
+                tasks,
+                tasks.filter((task) => selectedKeys.has(task.taskId)),
+              );
+            },
+          }}
+          locale={{ emptyText: "没有符合筛选条件的待办" }}
+        />
+      </div>
     </ConfigProvider>
   );
 }
@@ -1836,6 +2143,11 @@ export default function BatchApprovalPage() {
     Record<string, string[]>
   >({});
   const [tableVersion, setTableVersion] = useState(0);
+  // 每页条数按审批定义分组保存：刷新/保存字段设置会重挂载表格，
+  // 组件内 state 会被重置，所以放在页面层。
+  const [tablePageSizes, setTablePageSizes] = useState<Record<string, number>>(
+    {},
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selected, setSelected] = useState<SelectedMap>({});
   const [action, setAction] = useState<BatchApprovalAction | null>(null);
@@ -1901,6 +2213,9 @@ export default function BatchApprovalPage() {
     return () => abort.abort();
   }, [loadTasks, token]);
 
+  const tableBodyMaxHeight = useTableBodyMaxHeight(
+    `${truncated}|${reauthRequired}|${scopeError}|${loadError}`,
+  );
   const groups = useMemo(() => groupBatchTasks(tasks), [tasks]);
   const normalizedKeyword = keyword.trim().toLowerCase();
   const filteredGroups = useMemo(() => {
@@ -1935,6 +2250,20 @@ export default function BatchApprovalPage() {
     () => visibleGroups.reduce((total, group) => total + group.tasks.length, 0),
     [visibleGroups],
   );
+  // 分组离开视图（切换定义/搜索让分组消失）时，表格会被卸载并丢失列筛选，
+  // 父级的筛选镜像必须同步清掉；否则“全选可处理/已选计数”会按旧子集少选。
+  useEffect(() => {
+    const keys = new Set(visibleGroups.map((group) => group.key));
+    setTableFilteredIds((previous) => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+      for (const [key, ids] of Object.entries(previous)) {
+        if (keys.has(key)) next[key] = ids;
+        else changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [visibleGroups]);
   const tableFilteredSets = useMemo(() => {
     const sets = new Map<string, Set<string>>();
     for (const [key, ids] of Object.entries(tableFilteredIds)) {
@@ -2148,7 +2477,10 @@ export default function BatchApprovalPage() {
 
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground">
-      <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/95 px-6 py-3 backdrop-blur">
+      <header
+        data-slot="batch-approval-header"
+        className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/95 px-6 py-3 backdrop-blur"
+      >
         <div className="flex items-center gap-2 text-sm font-semibold">
           <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
             易
@@ -2175,7 +2507,10 @@ export default function BatchApprovalPage() {
       </header>
 
       <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-4 p-6">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div
+          data-slot="batch-approval-title"
+          className="flex flex-wrap items-start justify-between gap-3"
+        >
           <div>
             <h1 className="text-xl font-semibold">批量审批</h1>
             <p className="text-sm text-muted-foreground">
@@ -2194,13 +2529,17 @@ export default function BatchApprovalPage() {
         </div>
 
         {truncated && (
-          <p className="rounded-md border border-tone-warning/40 bg-tone-warning/10 px-3 py-2 text-sm">
+          <p
+            data-slot="batch-approval-banner"
+            className="rounded-md border border-tone-warning/40 bg-tone-warning/10 px-3 py-2 text-sm"
+          >
             待办超过 1000 条，仅显示前 1000 条。请按审批定义筛选或分批处理。
           </p>
         )}
         {reauthRequired && (
           <div
             role="alert"
+            data-slot="batch-approval-banner"
             className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-tone-warning/40 bg-tone-warning/10 px-3 py-2 text-sm"
           >
             <span>
@@ -2218,6 +2557,7 @@ export default function BatchApprovalPage() {
         {scopeError && (
           <p
             role="alert"
+            data-slot="batch-approval-banner"
             className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           >
             飞书应用未开通审批/通讯录权限，请联系管理员在开放平台开通并发布版本。
@@ -2226,6 +2566,7 @@ export default function BatchApprovalPage() {
         {loadError && (
           <div
             role="alert"
+            data-slot="batch-approval-banner"
             className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           >
             <span>{loadError}</span>
@@ -2320,7 +2661,10 @@ export default function BatchApprovalPage() {
           </aside>
 
           <section className="min-w-0 flex-1 space-y-3">
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 md:sticky md:top-14 md:z-20 md:bg-card/95 md:backdrop-blur">
+            <div
+              data-slot="batch-approval-toolbar"
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 md:sticky md:top-14 md:z-20 md:bg-card/95 md:backdrop-blur"
+            >
               <div className="relative w-full sm:w-64">
                 <Input
                   value={keyword}
@@ -2508,6 +2852,17 @@ export default function BatchApprovalPage() {
                           return { ...previous, [key]: ids };
                         })
                       }
+                      pageSize={
+                        tablePageSizes[group.key] ?? DEFAULT_TABLE_PAGE_SIZE
+                      }
+                      onPageSizeChange={(size) =>
+                        setTablePageSizes((previous) =>
+                          previous[group.key] === size
+                            ? previous
+                            : { ...previous, [group.key]: size },
+                        )
+                      }
+                      bodyMaxHeight={tableBodyMaxHeight}
                     />
                   </div>
                 ))}
