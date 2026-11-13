@@ -3,7 +3,7 @@
 use super::super::{context::FeishuContext, outbound::*};
 use super::{
     begin_effect, begin_group_effect, confirm_effect, confirm_group_effect, facts, mark_unknown,
-    TaskClaim,
+    renew_lease, TaskClaim,
 };
 use yang_base::BaseError;
 
@@ -24,6 +24,14 @@ impl OutboundTransport for ExecutionTransport<'_> {
             return self.inner.send(request).await;
         }
         let storage = |error: anyhow::Error| BaseError::ConfigError(error.to_string());
+        // 附件搬运等准备出站不走本 transport，可能把单条任务拖过 300 秒租约；
+        // 真正写入前续一次。续不上说明已被接管，直接失败，不制造第二个执行者。
+        if !renew_lease(self.context, self.claim)
+            .await
+            .map_err(storage)?
+        {
+            return Err(BaseError::ConfigError("审批任务执行权已失效".into()));
+        }
         let (_, instance) = facts(self.context, self.claim).await.map_err(storage)?;
         begin_effect(
             self.context,
@@ -128,15 +136,17 @@ impl OutboundTransport for ExecutionTransport<'_> {
     }
 }
 
-/// 聚合组的执行传输：**只拦创建实例**，确认走组专用函数。
+/// 聚合组的执行传输：拦截创建实例与回填，确认走组专用函数。
 ///
-/// # 为什么回填不拦
+/// # 为什么回填只续租、不拦阶段
 ///
 /// 组 leader 任务行永远不持有组实例码（设计 §4.1），单条那套「靠 leader 的
 /// `instance_code` 判安全阶段」在组上没有可判的事实；而组回填的失败由
 /// `BackfillReport.failed` 判定并整组重试（`CreatedPendingBackfill`），重复写同一
-/// 编号是幂等的。把 `batch_update` 也拦进来反而会把组行阶段从 `created` 误写成
-/// `ready`——那会让下一轮重新尝试创建，凭空多出一个实例。
+/// 编号是幂等的。把 `batch_update` 也拦进阶段机反而会把组行阶段从 `created` 误写成
+/// `ready`——那会让下一轮重新尝试创建，凭空多出一个实例。但回填可能持续几分钟到
+/// 几十分钟（193 成员逐条写），必须顺延租约，否则 `finish_group` 会在租约过期后
+/// 失败、整组永远做不完。
 pub(crate) struct GroupExecutionTransport<'a> {
     pub(crate) inner: &'a dyn OutboundTransport,
     pub(crate) context: &'a FeishuContext,
@@ -149,10 +159,23 @@ impl OutboundTransport for GroupExecutionTransport<'_> {
     async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
         let create = request.method == OutboundMethod::Post
             && request.url.ends_with("/approval/v4/instances");
-        if !create {
+        let backfill = request.method == OutboundMethod::Post
+            && request.url.ends_with("/records/batch_update");
+        if !create && !backfill {
             return self.inner.send(request).await;
         }
         let storage = |error: anyhow::Error| BaseError::ConfigError(error.to_string());
+        // 组准备阶段的检查点只在成员循环里续租；创建与回填之间、以及回填的
+        // 每条 batch_update 同样要顺延，否则长回填跑完后 `finish_group` 必失败。
+        if !renew_lease(self.context, self.claim)
+            .await
+            .map_err(storage)?
+        {
+            return Err(BaseError::ConfigError("聚合组 leader 执行权已失效".into()));
+        }
+        if !create {
+            return self.inner.send(request).await;
+        }
         // 创建前先提交组行与 leader 的 `creating`：崩溃后只能靠组 uuid 回捞。
         begin_group_effect(self.context, self.claim, self.group_key, "creating")
             .await

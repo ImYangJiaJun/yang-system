@@ -7,7 +7,8 @@
 //!
 //! 与 `feishu_pull` 同一条决策（那里的 A10）：`deploy/deploy-blue-green.sh` 的
 //! `cutover` 先 `stop_pair` 停线上再起新的，两实例不重叠。所以**不做跨实例单飞、
-//! 不做表级互斥锁**；循环是单线程的，同一时刻只可能有一轮在跑。
+//! 不做表级互斥锁**；轮次仍由单个循环串行驱动，同一时刻只可能有一轮在跑，轮内
+//! 再用有界队列并发处理任务。
 //!
 //! # 认领而不是「扫表决定要不要处理」
 //!
@@ -20,7 +21,7 @@
 //!
 //! `FOR UPDATE SKIP LOCKED` 只能用原始 SQL，而原始 SQL 要求 `raw-sql-boundary`
 //! 门禁登记（见 `docs/architecture/raw-sql-boundaries.md`）。本 worker **不需要它**：
-//! 部署是单实例、循环是单线程，同一时刻只可能有一轮在跑，拿行锁与租约都没有收益。
+//! 部署是单实例、轮次串行驱动，同一时刻只可能有一轮在跑，拿行锁没有收益。
 //! 用 DSL 认领因此零门禁成本，也复用了 fail-closed 的字段权限校验。
 //!
 //! # 崩溃恢复
@@ -94,7 +95,7 @@ use crate::infrastructure::audit;
 /// 播种时最多翻多少页（每页 500 条）。
 ///
 /// 防失控而不是分页参数：筛选条件没生效时一页页拉全表会把这一轮无限拖长，
-/// 而 worker 是单线程的——它卡住等于整个队列停摆。到上限即失败，
+/// 而 worker 同一时刻只跑一轮——它卡住等于整个队列停摆。到上限即失败，
 /// 让「条件没生效」以显式报错出现。
 const SEED_MAX_PAGES: u32 = 20;
 
@@ -110,6 +111,18 @@ const SEED_MAX_CONFIG_PAGES: usize = 10;
 
 /// 认领一批处理多少条。
 const CLAIM_BATCH: usize = 50;
+
+/// 单轮内同时处理多少条任务。
+///
+/// 串行处理时，一条大组任务（准备阶段可达几十分钟）会让整轮和后续点击全部
+/// 排队；并发后慢任务只占一个槽位。创建出站仍由 Redis 共享门控限速
+/// （`approval_create_rate_per_minute`），并发不会突破配额。
+const PROCESS_WORKERS: usize = 3;
+
+/// 工作队列 / 结果队列的深度。
+///
+/// 等于认领上限：生产者把一整批任务排满工作队列也不会与结果收集互相等待。
+const PROCESS_QUEUE_DEPTH: usize = CLAIM_BATCH;
 
 /// 编译期守护：`CLAIM_BATCH` 是**手工挑**的数，一旦被调到框架上限之上，`claim`
 /// 会在运行期直接失败——不是少取几条。上限是 fail-closed 的拒绝语义，而运行期只留
@@ -159,12 +172,11 @@ const GROUP_PREPARE_NOTIFY_INTERVAL: Duration = Duration::from_secs(120);
 struct ResumeCursor(i64);
 
 impl ResumeCursor {
-    /// 一批里最后一个已处理记录的 id；扫描结束后从头重试 pending 任务。
-    fn advance(&mut self, rows: &[ClaimedTask]) {
-        if let Some(last) = rows.last() {
-            self.0 = self.0.max(last.id);
-        } else {
-            self.0 = 0;
+    /// 一批里最后一条已认领任务的 id；`None`（本批为空）时回到起点重扫。
+    fn advance(&mut self, last_id: Option<i64>) {
+        match last_id {
+            Some(id) => self.0 = self.0.max(id),
+            None => self.0 = 0,
         }
     }
 }
@@ -284,7 +296,7 @@ impl ApprovalDispatchWorker {
 
         let (shutdown, receiver) = watch::channel(false);
         let heartbeat = ProgressHeartbeat::default();
-        let runner = RoundRunner {
+        let runner = Arc::new(RoundRunner {
             tools,
             context,
             tokens,
@@ -293,7 +305,7 @@ impl ApprovalDispatchWorker {
             timezone_offset,
             heartbeat: heartbeat.clone(),
             seed_failures: Arc::default(),
-        };
+        });
         let idle_poll = Duration::from_secs(settings.approval_scan_interval_seconds);
         let task = tokio::spawn(run_loop(runner, idle_poll, requests, receiver.clone()));
         let watchdog = tokio::spawn(watch_progress(heartbeat, receiver));
@@ -381,6 +393,9 @@ impl RoundRunner {
 /// 单独抽出来是因为它要在**卡住时**仍然可读：主循环自己无法报告「我卡在
 /// 哪个 await」，巡检任务拿这份快照就能说清。`stage` 只接受固定短标签，
 /// 避免把任务 id 之外的动态值写进指标基数。
+///
+/// 并发处理后，每条在途任务各记一个观测点：只看全局「最近一次推进」会被
+/// 别的任务刷新，慢任务就再也告不出来。
 #[derive(Clone, Default)]
 struct ProgressHeartbeat {
     state: Arc<Mutex<HeartbeatState>>,
@@ -391,52 +406,118 @@ struct HeartbeatState {
     stage: &'static str,
     task_id: Option<i64>,
     at: Option<Instant>,
-    /// 本轮停住是否已经告警过，避免每 30 秒刷一条同样的 WARN。
+    /// 全局阶段（滚序 / 认领 / 落库）是否已经告警过。
     warned: bool,
+    /// 在途任务各自的推进时刻；任务结束即移除。
+    tasks: HashMap<i64, TaskProgress>,
 }
 
-impl HeartbeatState {
-    /// 是否该告警：有观测点、超过阈值、且本轮还没告警过。
-    fn is_stalled(&self, threshold: Duration) -> bool {
-        !self.warned && self.at.is_some_and(|at| at.elapsed() >= threshold)
-    }
+#[derive(Clone, Copy)]
+struct TaskProgress {
+    stage: &'static str,
+    at: Instant,
+    /// 该任务是否已经告警过，避免每 30 秒刷一条同样的 WARN。
+    warned: bool,
 }
 
 impl ProgressHeartbeat {
     /// 记录一次推进。恢复推进时补一条 INFO，让「WARN → INFO」在日志里成对。
     fn mark(&self, stage: &'static str, task_id: Option<i64>) {
-        let resumed = {
+        let (resumed, resumed_task) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let resumed = state.warned;
+            let now = Instant::now();
             state.stage = stage;
             state.task_id = task_id;
-            state.at = Some(Instant::now());
-            state.warned = false;
-            resumed
+            state.at = Some(now);
+            let resumed = std::mem::take(&mut state.warned);
+            // 轮次边界清空上一轮遗留的在途任务：取消的轮次不会走 task_finished，
+            // 留着它们会让下一轮刚开头就报假停滞。
+            if task_id.is_none() && matches!(stage, "seed" | "idle") {
+                state.tasks.clear();
+            }
+            let resumed_task = match task_id {
+                Some(id) => {
+                    let entry = state.tasks.entry(id).or_insert(TaskProgress {
+                        stage,
+                        at: now,
+                        warned: false,
+                    });
+                    let resumed = entry.warned;
+                    entry.stage = stage;
+                    entry.at = now;
+                    entry.warned = false;
+                    resumed
+                }
+                None => false,
+            };
+            (resumed, resumed_task)
         };
         metrics::gauge!("feishu_approval_last_progress_timestamp_seconds").set(unix_now_seconds());
-        if resumed {
+        if resumed || resumed_task {
             tracing::info!(stage, task_id, "审批派发 Worker 恢复推进");
         }
     }
 
-    fn mark_warned(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .warned = true;
+    /// 任务处理完（含结果收集）后移除观测点，避免完成的慢任务继续参与停滞判定。
+    fn task_finished(&self, task_id: i64) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.tasks.remove(&task_id);
+        state.at = Some(Instant::now());
     }
 
-    fn should_warn(&self, threshold: Duration) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_stalled(threshold)
+    fn mark_warned(&self, task_id: Option<i64>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match task_id {
+            Some(id) => {
+                if let Some(entry) = state.tasks.get_mut(&id) {
+                    entry.warned = true;
+                } else {
+                    state.warned = true;
+                }
+            }
+            None => state.warned = true,
+        }
+    }
+
+    /// 取最陈旧的在途任务；没有在途任务时退回全局阶段。
+    ///
+    /// 返回 `None` 表示没有可告警的观测点（全部已告警或都还在阈值内）。
+    fn stalled(&self, threshold: Duration) -> Option<(&'static str, Option<i64>, Duration)> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut stalled: Option<(&'static str, Option<i64>, Duration)> = None;
+        for (id, entry) in &state.tasks {
+            if entry.warned {
+                continue;
+            }
+            let idle = entry.at.elapsed();
+            if idle >= threshold && stalled.map_or(true, |(_, _, seen)| idle > seen) {
+                stalled = Some((entry.stage, Some(*id), idle));
+            }
+        }
+        // 有在途任务时只按任务判定：全局 `at` 会被任意任务的推进刷新，
+        // 再拿它告警等于把慢任务藏起来。
+        if stalled.is_some() || !state.tasks.is_empty() {
+            return stalled;
+        }
+        if state.warned {
+            return None;
+        }
+        let at = state.at?;
+        let idle = at.elapsed();
+        (idle >= threshold).then_some((state.stage, state.task_id, idle))
     }
 
     /// `(阶段, 任务, 已停滞时长, 是否已告警)`；没有观测点时为 `None`。
+    #[cfg(test)]
     fn snapshot(&self) -> Option<(&'static str, Option<i64>, Duration, bool)> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((id, entry)) = state
+            .tasks
+            .iter()
+            .max_by_key(|(_, entry)| entry.at.elapsed())
+        {
+            return Some((entry.stage, Some(*id), entry.at.elapsed(), entry.warned));
+        }
         state
             .at
             .map(|at| (state.stage, state.task_id, at.elapsed(), state.warned))
@@ -463,13 +544,10 @@ async fn watch_progress(heartbeat: ProgressHeartbeat, mut shutdown: watch::Recei
                 }
             }
             _ = ticker.tick() => {
-                if !heartbeat.should_warn(PROGRESS_STALL_AFTER) {
-                    continue;
-                }
-                let Some((stage, task_id, idle, _)) = heartbeat.snapshot() else {
+                let Some((stage, task_id, idle)) = heartbeat.stalled(PROGRESS_STALL_AFTER) else {
                     continue;
                 };
-                heartbeat.mark_warned();
+                heartbeat.mark_warned(task_id);
                 tracing::warn!(
                     stage,
                     task_id,
@@ -535,7 +613,7 @@ fn reopens_on_click(trigger: RoundTrigger, config_id: i64) -> bool {
 
 /// 主循环：等信号或到点，然后跑一轮。
 async fn run_loop(
-    runner: RoundRunner,
+    runner: Arc<RoundRunner>,
     idle_poll: Duration,
     mut requests: mpsc::UnboundedReceiver<ApprovalDispatchRequest>,
     mut shutdown: watch::Receiver<bool>,
@@ -581,7 +659,7 @@ async fn run_loop(
     }
 }
 
-/// 跑一轮：播种 → （受理发起人落库）→ 认领 → 逐条处理 → 写回结果。
+/// 跑一轮：播种 → （受理发起人落库）→ 认领 → 有界队列并发处理 → 统一汇总写回。
 ///
 /// `applicant` 是手动受理请求携带的 `(config_id, 发起人 open_id, record_id)`；
 /// `None` 表示本轮由自动轮询触发，不落发起人。第三项 `record_id` 为 `Some` 时是
@@ -610,7 +688,7 @@ async fn run_loop(
 /// `review`，之后靠人工点击重开。
 #[tracing::instrument(name = "approval_round", skip_all, fields(trigger, cursor_start = cursor.0))]
 async fn run_round(
-    runner: &RoundRunner,
+    runner: &Arc<RoundRunner>,
     cursor: &mut ResumeCursor,
     applicant: Option<(i64, String, Option<String>)>,
     trigger: RoundTrigger,
@@ -689,7 +767,7 @@ async fn run_round(
     // 说明一批被处理掉了但还有——积压本身由 `idled` 分支的 gauge 兜底。
     metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
-        cursor.advance(&claimed);
+        cursor.advance(None);
         runner.heartbeat.mark("idle", None);
         // 零认领也要发汇总：手动点击的人不能等一条永远不来的消息。
         notify_round_summary(runner, trigger, click.as_ref(), &report, &[]).await;
@@ -703,57 +781,140 @@ async fn run_round(
     }
     tracing::debug!(count = claimed.len(), "审批派发认领到任务");
 
+    let claimed_len = claimed.len();
+    let last_claimed_id = claimed.last().map(|task| task.id);
     let mut counts = [0usize; 4];
     let mut idled = false;
     let mut row_edits = Vec::new();
     // 被点击配置的逐条结果，供轮末汇总使用（见 [`notify_round_summary`]）。
     let mut entries: Vec<RoundEntry> = Vec::new();
-    for task in &claimed {
-        if idled {
-            break;
-        }
-        // 缺少共享设施时中断；具体名额在每次真实创建出站前领取。
-        if runner.tools.cache().is_err() {
-            tracing::warn!("Redis 不可用，审批派发中断本轮");
-            metrics::counter!(
-                "feishu_approval_round_total",
-                "result" => "idle",
-                "reason" => "redis_unavailable"
-            )
-            .increment(1);
-            idled = true;
-            break;
-        }
 
-        let (outcome, edit) = async {
-            let task_started = std::time::Instant::now();
-            runner.heartbeat.mark("process", Some(task.id));
-            let processed = process_one(runner, task).await;
+    // 生产者 → 有界工作队列 → 3 个 worker → 结果队列 → 本轮收集者。
+    //
+    // 只有 `process_one` 并发；落库、通知、汇总仍在收集者里串行完成——那些
+    // 动作有顺序与去重要求（`record_outcome` 按 `last_error` 去重），并发写
+    // 会让同一任务的结论与通知交错。工作队列有界：任务本来就已按认领批次
+    // 落库，内存里只是「这一批还没跑完的任务」，不需要无限缓冲。
+    let (work_tx, work_rx) = mpsc::channel::<(usize, ClaimedTask)>(PROCESS_QUEUE_DEPTH);
+    let (result_tx, mut result_rx) =
+        mpsc::channel::<(usize, ClaimedTask, TaskOutcome)>(PROCESS_QUEUE_DEPTH);
+    // `mpsc::Receiver` 不能 clone；多 worker 用互斥串行取任务，取到即释放锁，
+    // 处理本身仍然并发。
+    let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
+    let mut workers = tokio::task::JoinSet::new();
+    for _ in 0..PROCESS_WORKERS {
+        let runner = Arc::clone(runner);
+        let work_rx = Arc::clone(&work_rx);
+        let result_tx = result_tx.clone();
+        workers.spawn(async move {
+            loop {
+                let task = {
+                    let mut queue = work_rx.lock().await;
+                    queue.recv().await
+                };
+                let Some((index, task)) = task else {
+                    break;
+                };
+                runner.heartbeat.mark("process", Some(task.id));
+                let task_started = std::time::Instant::now();
+                let processed = process_one(&runner, &task)
+                    .instrument(tracing::info_span!(
+                        "approval_task",
+                        task_id = task.id,
+                        config_id = task.config_id,
+                        table_id = %task.table_id,
+                        record_id = %task.record_id,
+                    ))
+                    .await;
+                tracing::debug!(
+                    duration_ms = task_started.elapsed().as_millis() as u64,
+                    "审批任务本轮处理结束"
+                );
+                // 收集者可能正忙：结果排队时把阶段记为 result_queue，
+                // 停滞告警才指得准，而不是继续显示 process。
+                runner.heartbeat.mark("result_queue", Some(task.id));
+                if result_tx.send((index, task, processed)).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    // 收集者自己不再持有发送端，否则结果队列永远等不到关闭。
+    drop(result_tx);
+
+    // 生产者单独一个任务：它可能被有界工作队列挡住，不能在收集者里同步递交。
+    // Redis 不可用时立刻停止递交，本轮按 interrupted 收尾（不推进游标）。
+    let idle_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let runner = Arc::clone(runner);
+        let idle_flag = Arc::clone(&idle_flag);
+        let work_tx = work_tx.clone();
+        workers.spawn(async move {
+            for (index, task) in claimed.into_iter().enumerate() {
+                if runner.tools.cache().is_err() {
+                    tracing::warn!("Redis 不可用，审批派发中断本轮");
+                    metrics::counter!(
+                        "feishu_approval_round_total",
+                        "result" => "idle",
+                        "reason" => "redis_unavailable"
+                    )
+                    .increment(1);
+                    idle_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                if work_tx.send((index, task)).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(work_tx);
+
+    // 结果按认领顺序回填下标：收集是完成序，汇总仍按原顺序输出。
+    let mut results: Vec<Option<(ClaimedTask, TaskOutcome)>> =
+        (0..claimed_len).map(|_| None).collect();
+    while let Some((index, task, processed)) = result_rx.recv().await {
+        let edit = if processed.persisted {
             // 组分支自己完成了落库与通知（`persisted`）：通用 `record_outcome`
             // 的阶段白名单收不了 `lookup`/`creating` 的组尾，还会把 `paused`
             // 经 `Waiting→pending` 拉回轮询（设计 §4.6 第 10 步）。
-            let edit = if processed.persisted {
-                None
-            } else {
-                runner.heartbeat.mark("record_outcome", Some(task.id));
-                record_outcome(runner, task, &processed).await
-            };
-            tracing::debug!(
-                duration_ms = task_started.elapsed().as_millis() as u64,
-                "审批任务本轮处理结束"
-            );
-            (processed, edit)
-        }
-        .instrument(
-            tracing::info_span!("approval_task", task_id = task.id, config_id = task.config_id,
-            table_id = %task.table_id, record_id = %task.record_id),
-        )
-        .await;
+            None
+        } else {
+            runner.heartbeat.mark("record_outcome", Some(task.id));
+            record_outcome(runner, &task, &processed)
+                .instrument(tracing::info_span!(
+                    "approval_task",
+                    task_id = task.id,
+                    config_id = task.config_id,
+                    table_id = %task.table_id,
+                    record_id = %task.record_id,
+                ))
+                .await
+        };
         if let Some(edit) = edit {
             row_edits.push(edit);
         }
-        let group_size = outcome.group_size;
-        let outcome = outcome.result;
+        runner.heartbeat.task_finished(task.id);
+        results[index] = Some((task, processed));
+    }
+    // 结果队列关闭 = 所有 worker 已退出；剩下的只可能是生产者。正常路径下它
+    // 早已送完并结束了，但若 worker 全部 panic，生产者会卡在满队列的 `send`
+    // 上——先中止残余任务，避免整轮永远挂死。
+    workers.abort_all();
+    // 这里只收尸并记录 panic。
+    while let Some(joined) = workers.join_next().await {
+        if let Err(error) = joined {
+            tracing::error!(error = %error, "审批派发任务处理异常退出");
+            idled = true;
+        }
+    }
+    if idle_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        idled = true;
+    }
+
+    for (task, processed) in results.into_iter().flatten() {
+        let group_size = processed.group_size;
+        let outcome = processed.result;
         counts[match outcome {
             DispatchResult::Backfilled { .. } => 0,
             DispatchResult::Waiting { .. } => 1,
@@ -772,9 +933,10 @@ async fn run_round(
             }
         }
     }
-    // 全部走完才推进游标：中途 `idled` 中断时**不推进**，否则会跳过未处理的记录。
+    // 全部走完才推进游标：中途 `idled` 中断（Redis 不可用 / worker panic）时
+    // **不推进**，否则会跳过未处理的记录。
     if !idled {
-        cursor.advance(&claimed);
+        cursor.advance(last_claimed_id);
     }
 
     // 行号补写放在**发送之后**：消息已先按无行号出站，这里只扫一次表、逐条编辑
@@ -798,7 +960,7 @@ async fn run_round(
         tracing::warn!(
             elapsed_seconds = elapsed,
             budget_seconds = ROUND_WORST_CASE_SECONDS,
-            claimed = claimed.len(),
+            claimed = claimed_len,
             "审批派发单轮超出预算；认领批或限速配置需要复核"
         );
     }
@@ -807,7 +969,7 @@ async fn run_round(
     // 放在指标/日志之前，best-effort，不影响轮次语义。
     notify_round_summary(runner, trigger, click.as_ref(), &report, &entries).await;
     tracing::debug!(
-        claimed = claimed.len(),
+        claimed = claimed_len,
         backfilled = counts[0],
         waiting = counts[1],
         retryable = counts[2],
@@ -5650,7 +5812,7 @@ mod tests {
     #[test]
     fn exhausted_cursor_revisits_pending_tasks() {
         let mut cursor = ResumeCursor(42);
-        cursor.advance(&[]);
+        cursor.advance(None);
         assert_eq!(cursor.0, 0, "扫描结束后旧 pending 任务必须能重新认领");
     }
 
@@ -6521,32 +6683,62 @@ mod tests {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            state.at = Some(Instant::now() - PROGRESS_STALL_AFTER);
+            let past = Instant::now() - PROGRESS_STALL_AFTER;
+            state.at = Some(past);
+            state
+                .tasks
+                .get_mut(&7)
+                .unwrap_or_else(|| panic!("任务观测点还在"))
+                .at = past;
         }
         let (_, _, idle, warned) = heartbeat.snapshot().unwrap_or_else(|| panic!("有快照"));
         assert!(!warned);
         assert!(idle >= PROGRESS_STALL_AFTER);
-        {
-            let state = heartbeat
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            assert!(state.is_stalled(PROGRESS_STALL_AFTER));
-        }
+        let (stage, task_id, _) = heartbeat
+            .stalled(PROGRESS_STALL_AFTER)
+            .unwrap_or_else(|| panic!("超阈值应判定停滞"));
+        assert_eq!((stage, task_id), ("process", Some(7)));
 
         // 同一轮只告警一次；恢复推进时重置标记。
-        heartbeat.mark_warned();
-        {
-            let state = heartbeat
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            assert!(!state.is_stalled(PROGRESS_STALL_AFTER), "同一轮不重复告警");
-        }
+        heartbeat.mark_warned(Some(7));
+        assert!(
+            heartbeat.stalled(PROGRESS_STALL_AFTER).is_none(),
+            "同一轮不重复告警"
+        );
         heartbeat.mark("idle", None);
         let (stage, task_id, _, warned) = heartbeat.snapshot().unwrap_or_else(|| panic!("有快照"));
         assert_eq!((stage, task_id), ("idle", None));
         assert!(!warned, "恢复推进后重置告警标记");
+    }
+
+    #[test]
+    fn heartbeat_tracks_tasks_independently() {
+        let heartbeat = ProgressHeartbeat::default();
+        heartbeat.mark("process", Some(1));
+        heartbeat.mark("process", Some(2));
+        // 任务 2 持续推进，但任务 1 停在原地：慢任务不能被别的任务掩盖。
+        heartbeat.mark("process", Some(2));
+        {
+            let mut state = heartbeat
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let past = Instant::now() - PROGRESS_STALL_AFTER;
+            state
+                .tasks
+                .get_mut(&1)
+                .unwrap_or_else(|| panic!("任务 1 的观测点还在"))
+                .at = past;
+            state.at = Some(past);
+        }
+        let (stage, task_id, _) = heartbeat
+            .stalled(PROGRESS_STALL_AFTER)
+            .unwrap_or_else(|| panic!("停滞任务应被定位"));
+        assert_eq!((stage, task_id), ("process", Some(1)));
+        heartbeat.mark_warned(Some(1));
+        assert!(heartbeat.stalled(PROGRESS_STALL_AFTER).is_none());
+        heartbeat.task_finished(1);
+        assert!(heartbeat.stalled(PROGRESS_STALL_AFTER).is_none());
     }
 
     // -----------------------------------------------------------------------
