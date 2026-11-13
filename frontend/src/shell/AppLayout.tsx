@@ -254,9 +254,7 @@ export default function AppLayout() {
           alt="易行 标识"
           className="size-10 shrink-0"
         />
-        <span className="text-sm font-semibold tracking-tight">
-          易行
-        </span>
+        <span className="text-sm font-semibold tracking-tight">易行</span>
       </div>
       <div className="border-b border-border p-2">
         <AccountSwitcher catalog={catalog} />

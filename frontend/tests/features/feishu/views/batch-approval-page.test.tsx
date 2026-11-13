@@ -340,14 +340,10 @@ describe("BatchApprovalPage", () => {
     await screen.findByText("报销单 A");
 
     const user = userEvent.setup();
-    await user.click(
-      screen.getByRole("button", { name: "收起审批定义侧栏" }),
-    );
+    await user.click(screen.getByRole("button", { name: "收起审批定义侧栏" }));
     expect(screen.queryByText("全部待办")).not.toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "展开审批定义侧栏" }),
-    );
+    await user.click(screen.getByRole("button", { name: "展开审批定义侧栏" }));
     expect(screen.getByText("全部待办")).toBeInTheDocument();
   });
 
@@ -885,7 +881,9 @@ describe("BatchApprovalPage", () => {
       await screen.findByRole("button", { name: "预览 合同.docx" }),
     );
     const dialog = await screen.findByRole("dialog");
-    expect(await within(dialog).findByText("Word 文档正文")).toBeInTheDocument();
+    expect(
+      await within(dialog).findByText("Word 文档正文"),
+    ).toBeInTheDocument();
 
     await user.click(
       within(dialog).getByRole("button", { name: "下一个附件" }),

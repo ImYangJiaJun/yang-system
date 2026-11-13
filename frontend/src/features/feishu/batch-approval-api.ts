@@ -194,7 +194,8 @@ export const BATCH_COMPUTED_AGGREGATE_LABELS: Record<
   average: "平均值",
 };
 
-export type BatchComputedAggregate = "sum" | "max" | "min" | "range" | "average";
+export type BatchComputedAggregate =
+  "sum" | "max" | "min" | "range" | "average";
 
 /// 计算字段的操作数：顶层表单控件，或明细控件里某一列的行级聚合。
 export type BatchComputedOperand =
@@ -1015,13 +1016,22 @@ function parseViewOperand(
     const detailFieldId = firstText(record, "detailFieldId", "detail_field_id");
     const columnId = firstText(record, "columnId", "column_id");
     const aggregate = firstText(record, "aggregate");
-    if (!detailFieldId || !columnId || !aggregate || !AGGREGATES.has(aggregate)) {
+    if (
+      !detailFieldId ||
+      !columnId ||
+      !aggregate ||
+      !AGGREGATES.has(aggregate)
+    ) {
       return null;
     }
     return {
       kind: "detail",
       detailFieldId,
-      detailFieldName: firstText(record, "detailFieldName", "detail_field_name"),
+      detailFieldName: firstText(
+        record,
+        "detailFieldName",
+        "detail_field_name",
+      ),
       columnId,
       columnName: firstText(record, "columnName", "column_name"),
       aggregate: aggregate as BatchComputedAggregate,

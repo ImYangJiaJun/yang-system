@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, GripVertical, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  GripVertical,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
 import { useToast } from "@/shared/lib/toast";
 import { Button } from "@/shared/ui/button";
@@ -306,7 +312,9 @@ function OperandEditor({
             <Select
               value={operand.detailFieldId}
               onValueChange={(value) => {
-                const next = options.details.find((entry) => entry.id === value);
+                const next = options.details.find(
+                  (entry) => entry.id === value,
+                );
                 onChange({
                   ...operand,
                   detailFieldId: value,
@@ -529,7 +537,10 @@ export function BatchViewSettingsDrawer({
   };
   const commitDrop = () => {
     if (dragIndex !== null && dropIndex !== null) {
-      moveColumnTo(dragIndex, dropIndex > dragIndex ? dropIndex - 1 : dropIndex);
+      moveColumnTo(
+        dragIndex,
+        dropIndex > dragIndex ? dropIndex - 1 : dropIndex,
+      );
     }
     finishDrag();
   };
@@ -676,96 +687,96 @@ export function BatchViewSettingsDrawer({
               const groupStart =
                 Boolean(column.group) && column.group !== previous?.group;
               return (
-              <div key={column.key}>
-                {groupStart && (
-                  <div className="pb-1 pt-2 text-xs font-medium text-muted-foreground">
-                    明细内的列 · {column.group}
-                  </div>
-                )}
-                {dragIndex !== null && dropIndex === index && (
+                <div key={column.key}>
+                  {groupStart && (
+                    <div className="pb-1 pt-2 text-xs font-medium text-muted-foreground">
+                      明细内的列 · {column.group}
+                    </div>
+                  )}
+                  {dragIndex !== null && dropIndex === index && (
+                    <div
+                      className="mb-1 h-0.5 rounded-full bg-primary"
+                      data-slot="drop-indicator"
+                    />
+                  )}
                   <div
-                    className="mb-1 h-0.5 rounded-full bg-primary"
-                    data-slot="drop-indicator"
-                  />
-                )}
-                <div
-                  draggable
-                  onDragStart={(event) => {
-                    setDragIndex(index);
-                    setDropIndex(index);
-                    pointerYRef.current = event.clientY;
-                    startAutoScroll();
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    pointerYRef.current = event.clientY;
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setDropIndex(
-                      event.clientY > rect.top + rect.height / 2
-                        ? index + 1
-                        : index,
-                    );
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    commitDrop();
-                  }}
-                  onDragEnd={finishDrag}
-                  className={`flex cursor-grab items-center gap-2 rounded border px-2 py-1.5 ${
-                    dragIndex === index ? "opacity-50" : ""
-                  }`}
-                >
-                  <GripVertical
-                    className="size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                  <Checkbox
-                    checked={column.visible}
-                    aria-label={`显示 ${column.label}`}
-                    onCheckedChange={(checked) =>
-                      setColumns((current) =>
-                        current.map((entry) =>
-                          entry.key === column.key
-                            ? { ...entry, visible: checked === true }
-                            : entry,
-                        ),
-                      )
-                    }
-                  />
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {column.label}
-                  </span>
-                  <span className="flex shrink-0 items-center">
-                    <button
-                      type="button"
-                      aria-label={`上移 ${column.label}`}
-                      title="上移"
-                      disabled={index === 0}
-                      onClick={() => moveColumnTo(index, index - 1)}
-                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
-                    >
-                      <ChevronUp className="size-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`下移 ${column.label}`}
-                      title="下移"
-                      disabled={index === columns.length - 1}
-                      onClick={() => moveColumnTo(index, index + 1)}
-                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
-                    >
-                      <ChevronDown className="size-3.5" />
-                    </button>
-                  </span>
-                  <span
-                    className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
-                      COLUMN_KIND_META[columnKind(column.key)].className
+                    draggable
+                    onDragStart={(event) => {
+                      setDragIndex(index);
+                      setDropIndex(index);
+                      pointerYRef.current = event.clientY;
+                      startAutoScroll();
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      pointerYRef.current = event.clientY;
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setDropIndex(
+                        event.clientY > rect.top + rect.height / 2
+                          ? index + 1
+                          : index,
+                      );
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      commitDrop();
+                    }}
+                    onDragEnd={finishDrag}
+                    className={`flex cursor-grab items-center gap-2 rounded border px-2 py-1.5 ${
+                      dragIndex === index ? "opacity-50" : ""
                     }`}
                   >
-                    {COLUMN_KIND_META[columnKind(column.key)].label}
-                  </span>
+                    <GripVertical
+                      className="size-4 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                    <Checkbox
+                      checked={column.visible}
+                      aria-label={`显示 ${column.label}`}
+                      onCheckedChange={(checked) =>
+                        setColumns((current) =>
+                          current.map((entry) =>
+                            entry.key === column.key
+                              ? { ...entry, visible: checked === true }
+                              : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {column.label}
+                    </span>
+                    <span className="flex shrink-0 items-center">
+                      <button
+                        type="button"
+                        aria-label={`上移 ${column.label}`}
+                        title="上移"
+                        disabled={index === 0}
+                        onClick={() => moveColumnTo(index, index - 1)}
+                        className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                      >
+                        <ChevronUp className="size-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`下移 ${column.label}`}
+                        title="下移"
+                        disabled={index === columns.length - 1}
+                        onClick={() => moveColumnTo(index, index + 1)}
+                        className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                      >
+                        <ChevronDown className="size-3.5" />
+                      </button>
+                    </span>
+                    <span
+                      className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
+                        COLUMN_KIND_META[columnKind(column.key)].className
+                      }`}
+                    >
+                      {COLUMN_KIND_META[columnKind(column.key)].label}
+                    </span>
+                  </div>
                 </div>
-              </div>
               );
             })}
             {dragIndex !== null && dropIndex === columns.length && (

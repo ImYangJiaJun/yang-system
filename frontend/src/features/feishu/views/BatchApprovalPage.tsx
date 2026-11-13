@@ -9,12 +9,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { Link, useNavigate } from "react-router";
-import {
-  ConfigProvider,
-  Table,
-  Tooltip,
-  type TableColumnsType,
-} from "antd";
+import { ConfigProvider, Table, Tooltip, type TableColumnsType } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
   ChevronLeft,
@@ -47,7 +42,10 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { formatProductDateTime } from "@/shared/lib/product-locale";
+import {
+  compareProductText,
+  formatProductDateTime,
+} from "@/shared/lib/product-locale";
 import { cn } from "@/shared/lib/utils";
 import { useToast } from "@/shared/lib/toast";
 
@@ -139,7 +137,10 @@ const STATUS_DOT_CLASS: Record<ReturnType<typeof statusTone>, string> = {
 /// 状态用小圆点 + 文字，比整块徽标更接近审批台的阅读密度。
 function StatusDot({ label }: { label: string }) {
   return (
-    <span data-slot="status-dot" className="inline-flex items-center gap-1.5 text-xs">
+    <span
+      data-slot="status-dot"
+      className="inline-flex items-center gap-1.5 text-xs"
+    >
       <span
         aria-hidden="true"
         className={cn(
@@ -888,7 +889,8 @@ function fieldDisplayText(field: BatchTaskFormField): string {
   if (fieldType === "fieldlist" || fieldType === "field_list") {
     const count =
       field.rowCount ?? (Array.isArray(field.value) ? field.value.length : 0);
-    const preview = field.preview.length > 0 ? `：${field.preview.join(" · ")}` : "";
+    const preview =
+      field.preview.length > 0 ? `：${field.preview.join(" · ")}` : "";
     return `明细 ${count} 行${preview}`;
   }
   if (fieldType === "address" && typeof field.value === "string") {
@@ -964,10 +966,7 @@ const DEFAULT_HIDDEN_COLUMNS = new Set(["base:instanceCode"]);
 
 type ColumnKind = "instance" | "form" | "computed";
 
-const COLUMN_KIND_META: Record<
-  ColumnKind,
-  { label: string; hint: string }
-> = {
+const COLUMN_KIND_META: Record<ColumnKind, { label: string; hint: string }> = {
   instance: {
     label: "实例",
     hint: "审批实例自带的数据",
@@ -1078,9 +1077,10 @@ function buildTaskColumns(
       key: "currentNode",
       width: 240,
       sorter: (left, right) =>
-        taskNodes(left)
-          .join("、")
-          .localeCompare(taskNodes(right).join("、"), "zh-CN"),
+        compareProductText(
+          taskNodes(left).join("、"),
+          taskNodes(right).join("、"),
+        ),
       filters: uniqueFilters(tasks.flatMap(taskNodes)),
       filterSearch: true,
       onFilter: (value, task) => taskNodes(task).includes(String(value)),
@@ -1103,7 +1103,10 @@ function buildTaskColumns(
                 <span
                   key={node}
                   title={node}
-                  className={cn("truncate", mine && "font-medium text-tone-info")}
+                  className={cn(
+                    "truncate",
+                    mine && "font-medium text-tone-info",
+                  )}
                 >
                   {node}
                   {mine && (
@@ -1123,7 +1126,7 @@ function buildTaskColumns(
       key: "status",
       width: 120,
       sorter: (left, right) =>
-        taskStatusLabel(left).localeCompare(taskStatusLabel(right), "zh-CN"),
+        compareProductText(taskStatusLabel(left), taskStatusLabel(right)),
       filters: uniqueFilters(tasks.map(taskStatusLabel)),
       onFilter: (value, task) => taskStatusLabel(task) === String(value),
       render: (_, task) => {
@@ -1163,7 +1166,7 @@ function buildTaskColumns(
       key: "instanceCode",
       width: 300,
       sorter: (left, right) =>
-        left.instanceCode.localeCompare(right.instanceCode),
+        compareProductText(left.instanceCode, right.instanceCode),
       filters: uniqueFilters(tasks.map((task) => task.instanceCode)),
       filterSearch: true,
       onFilter: (value, task) => task.instanceCode === String(value),
@@ -1221,7 +1224,10 @@ function buildTaskColumns(
         const waiting = waitingText(task.createdAt);
         return (
           <div className="leading-tight">
-            <span className="block tabular-nums" title={timeText(task.createdAt)}>
+            <span
+              className="block tabular-nums"
+              title={timeText(task.createdAt)}
+            >
               {timeText(task.createdAt)}
             </span>
             {waiting && (
@@ -1947,7 +1953,9 @@ export default function BatchApprovalPage() {
     () =>
       visibleGroups
         .flatMap((group) =>
-          group.tasks.filter((task) => taskVisibleInTable(group.key, task.taskId)),
+          group.tasks.filter((task) =>
+            taskVisibleInTable(group.key, task.taskId),
+          ),
         )
         .filter((task) => taskOperability(task).operable),
     [visibleGroups, taskVisibleInTable],
@@ -1957,14 +1965,15 @@ export default function BatchApprovalPage() {
       new Map(
         groups.map((group) => [
           group.key,
-          filteredGroups.find((candidate) => candidate.key === group.key)
-            ?.tasks.length ?? 0,
+          filteredGroups.find((candidate) => candidate.key === group.key)?.tasks
+            .length ?? 0,
         ]),
       ),
     [filteredGroups, groups],
   );
   const filteredTotalCount = useMemo(
-    () => filteredGroups.reduce((total, group) => total + group.tasks.length, 0),
+    () =>
+      filteredGroups.reduce((total, group) => total + group.tasks.length, 0),
     [filteredGroups],
   );
   const visibleTaskIds = useMemo(
@@ -1979,10 +1988,12 @@ export default function BatchApprovalPage() {
     [visibleGroups, taskVisibleInTable],
   );
   const selectedTasks = useMemo(
-    () => Object.values(selected).filter((task) => visibleTaskIds.has(task.taskId)),
+    () =>
+      Object.values(selected).filter((task) => visibleTaskIds.has(task.taskId)),
     [selected, visibleTaskIds],
   );
-  const hiddenSelectedCount = Object.keys(selected).length - selectedTasks.length;
+  const hiddenSelectedCount =
+    Object.keys(selected).length - selectedTasks.length;
 
   const resetFilters = () => {
     setDefinitionGroup("all");
@@ -2351,9 +2362,7 @@ export default function BatchApprovalPage() {
                 size="sm"
                 disabled={
                   operableVisibleTasks.length === 0 ||
-                  operableVisibleTasks.every(
-                    (task) => selected[task.taskId],
-                  )
+                  operableVisibleTasks.every((task) => selected[task.taskId])
                 }
                 onClick={selectAllOperable}
               >
@@ -2453,7 +2462,9 @@ export default function BatchApprovalPage() {
                     className="overflow-hidden rounded-lg border border-border bg-card"
                   >
                     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-3">
-                      <h2 className="text-[15px] font-semibold">{group.name}</h2>
+                      <h2 className="text-[15px] font-semibold">
+                        {group.name}
+                      </h2>
                       <span className="text-xs text-muted-foreground">
                         {group.code || "—"} · {group.tasks.length} 条 ·{" "}
                         {

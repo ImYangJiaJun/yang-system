@@ -27,14 +27,12 @@ describe("batch approval task parsing", () => {
     };
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          jsonResponse({
-            code: 0,
-            data: { tasks: [task, task], truncated: false },
-          }),
-        ),
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          code: 0,
+          data: { tasks: [task, task], truncated: false },
+        }),
+      ),
     );
 
     const { tasks } = await fetchBatchTasks("token");

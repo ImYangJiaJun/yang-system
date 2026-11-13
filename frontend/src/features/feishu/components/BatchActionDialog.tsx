@@ -151,10 +151,7 @@ export function BatchActionDialog({
                   key={task.taskId}
                   className="flex items-baseline gap-2 text-xs"
                 >
-                  <span
-                    className="min-w-0 flex-1 truncate"
-                    title={task.title}
-                  >
+                  <span className="min-w-0 flex-1 truncate" title={task.title}>
                     {task.title}
                   </span>
                   <span className="shrink-0 text-muted-foreground">
