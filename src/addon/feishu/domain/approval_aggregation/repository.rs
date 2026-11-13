@@ -379,15 +379,17 @@ pub(crate) async fn load_prepare_cache(
     config_id: i64,
     group_key: &str,
 ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
-    // tenant-boundary: raw-sql feishu-approval-group-prepare-cache-read
-    let raw: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT prepare_cache FROM feishu_approval_group WHERE config_id=? AND group_key=?",
-    )
-    .bind(config_id)
-    .bind(group_key)
-    .fetch_optional(context.approval_groups().pool())
-    .await?;
-    let Some(Some(json)) = raw else {
+    let Some(row) = context
+        .approval_groups()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("group_key", serde_json::json!(group_key))?
+        .optional()
+        .await?
+    else {
+        return Ok(Default::default());
+    };
+    let Some(json) = row.optional::<String>("prepare_cache")? else {
         return Ok(Default::default());
     };
     Ok(serde_json::from_str(&json).unwrap_or_default())
@@ -401,15 +403,13 @@ pub(crate) async fn save_prepare_cache(
     cache: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     let json = serde_json::to_string(cache)?;
-    // tenant-boundary: raw-sql feishu-approval-group-prepare-cache-write
-    sqlx::query(
-        "UPDATE feishu_approval_group SET prepare_cache=?,updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_key=?",
-    )
-    .bind(json)
-    .bind(config_id)
-    .bind(group_key)
-    .execute(context.approval_groups().pool())
-    .await?;
+    context
+        .approval_groups()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("group_key", serde_json::json!(group_key))?
+        .update(Record::new().set("prepare_cache", json))
+        .await?;
     Ok(())
 }
 
