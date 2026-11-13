@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use yang_base::action::{ActionContext, ApiResponse};
@@ -13,6 +14,11 @@ use super::super::domain::computed::computed_fields;
 use super::super::domain::view::{self, BatchUserView};
 use super::access_token_or_error;
 use crate::addon::feishu::domain::context::FeishuContext;
+
+/// 列表请求的总预算：飞书出站单次 20s、PULL_RETRY 重试 3 次能到 61s，
+/// 超过服务端 60s 请求超时后前端只会看到「操作结果尚未确认」。
+/// 这里提前收敛成一条明确的超时响应。
+const LIST_BUDGET: Duration = Duration::from_secs(25);
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -50,9 +56,20 @@ pub(super) async fn handle(
     let Some(settings) = context.settings() else {
         return Ok(ApiResponse::fail(50301, "飞书集成未配置"));
     };
-    let list = api::list_pending_tasks(&ctx, settings, &token)
-        .await
-        .map_err(|error| error.to_base())?;
+    let list =
+        match tokio::time::timeout(LIST_BUDGET, api::list_pending_tasks(&ctx, settings, &token))
+            .await
+        {
+            Ok(Ok(list)) => list,
+            Ok(Err(error)) => return Err(error.to_base()),
+            Err(_) => {
+                tracing::warn!(
+                    budget_secs = LIST_BUDGET.as_secs(),
+                    "拉取飞书待办列表超出预算"
+                );
+                return Ok(ApiResponse::fail(50401, "飞书待办列表响应超时，请稍后重试"));
+            }
+        };
     let mut definitions: BTreeMap<String, (String, usize)> = BTreeMap::new();
     for task in &list.tasks {
         let code = task
@@ -88,23 +105,23 @@ pub(super) async fn handle(
         .collect();
     let views = view::load_many(&context, user_id, &approval_codes).await?;
     let view_payload = view_map(&approval_codes, &views);
+    // 待办可能有上百条：逐条串行拉实例详情会把请求拖过 60 秒的 HTTP 超时。
+    // 先按实例去重再并发预取，单条失败仍按「无详情」降级。
+    let instance_codes: Vec<String> = list
+        .tasks
+        .iter()
+        .map(|task| task.instance_code.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let details = api::instance_details(&ctx, settings, &instance_codes).await;
     let mut rows = Vec::with_capacity(list.tasks.len());
-    let mut detail_cache: BTreeMap<String, Option<Value>> = BTreeMap::new();
     for task in list.tasks {
         let task_id = task.task_id.clone();
         let mut row = serde_json::to_value(&task)
             .map_err(|error| BaseError::Unknown(format!("序列化审批任务失败：{error}")))?;
         if let Value::Object(map) = &mut row {
-            let detail = if let Some(cached) = detail_cache.get(&task.instance_code) {
-                cached.clone()
-            } else {
-                // 详情接口只接受 tenant token；单条失败不应让整个待办列表失败。
-                let fetched = api::instance_detail(&ctx, settings, &task.instance_code)
-                    .await
-                    .ok();
-                detail_cache.insert(task.instance_code.clone(), fetched.clone());
-                fetched
-            };
+            let detail = details.get(&task.instance_code).cloned().flatten();
             if let Some(detail) = detail {
                 let nodes = current_node_names(&detail, &task_id);
                 map.insert(

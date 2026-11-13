@@ -5,12 +5,13 @@
 //! 返回值保留为 `serde_json::Value`，因为详情/表单/时间线的字段形状以真机为准，
 //! 过早强类型化只会在飞书字段调整时制造 502。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::task::JoinSet;
 
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
@@ -29,6 +30,12 @@ use crate::addon::feishu::domain::tenant_token::{
 const MAX_PAGES: usize = 10;
 const PAGE_SIZE: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
+/// 实例详情的并发上限。一个待办上百条时逐条串行会直接撞上 HTTP 请求超时；
+/// 取 8 既能把总耗时压到个位数秒，又不会让飞书侧限流（默认连接池上限 10）。
+const DETAIL_CONCURRENCY: usize = 8;
+/// 实例详情预取的总预算。列表里详情只是列表页的富化信息，超预算就整批降级成
+/// 「无详情」，不能让它把整页待办拖成超时。
+const DETAIL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 实例 Code 作为路径段：只保留 RFC3986 unreserved 字符，其余按字节百分号编码。
 fn encode_path_segment(value: &str) -> String {
@@ -357,15 +364,128 @@ pub(crate) async fn instance_detail(
     settings: &FeishuSettings,
     instance_code: &str,
 ) -> Result<Value, ApiError> {
+    let access_token = tenant_access_token(ctx, settings).await?;
+    instance_detail_with_token(ctx, settings, &access_token, instance_code).await
+}
+
+/// 批量取实例详情：tenant token 只换一次，按唯一实例去重后以有界并发拉取。
+///
+/// 单条失败不影响其他行（与列表页原有「拿不到详情就降级」的语义一致）。
+pub(crate) async fn instance_details(
+    ctx: &ActionContext,
+    settings: &FeishuSettings,
+    instance_codes: &[String],
+) -> BTreeMap<String, Option<Value>> {
+    if instance_codes.is_empty() {
+        return BTreeMap::new();
+    }
+    let access_token = match tenant_access_token(ctx, settings).await {
+        Ok(token) => Arc::new(token),
+        Err(error) => {
+            tracing::warn!(
+                error = %error.message,
+                count = instance_codes.len(),
+                "批量获取审批实例详情失败，本轮全部按无详情处理"
+            );
+            return instance_codes
+                .iter()
+                .map(|code| (code.clone(), None))
+                .collect();
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let mut details = BTreeMap::new();
+    let mut remaining = instance_codes.iter();
+    let mut set = JoinSet::new();
+    for _ in 0..DETAIL_CONCURRENCY {
+        let Some(code) = remaining.next() else { break };
+        spawn_instance_detail(&mut set, ctx, settings, &access_token, code);
+    }
+    // 飞书偶发变慢时，单条详情的 20s×3 次重试就能吃满整个 HTTP 超时。给预取
+    // 留一个总预算：超时后剩余的按「无详情」降级，列表本身照常返回。
+    let finished = tokio::time::timeout(DETAIL_BUDGET, async {
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((code, detail)) => {
+                    details.insert(code, detail);
+                }
+                Err(error) => {
+                    // JoinSet 的 JoinError 不携带实例 Code，只能记录任务已丢失；
+                    // 对应行会按无详情降级，不影响整个列表。
+                    tracing::warn!(error = %error, "审批实例详情任务异常退出");
+                }
+            }
+            if let Some(code) = remaining.next() {
+                spawn_instance_detail(&mut set, ctx, settings, &access_token, code);
+            }
+        }
+    })
+    .await;
+    if finished.is_err() {
+        tracing::warn!(
+            count = instance_codes.len(),
+            collected = details.len(),
+            budget_secs = DETAIL_BUDGET.as_secs(),
+            "审批实例详情预取超出预算，剩余按无详情降级"
+        );
+    }
+    tracing::debug!(
+        count = instance_codes.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "批量获取审批实例详情完成"
+    );
+    details
+}
+
+fn spawn_instance_detail(
+    set: &mut JoinSet<(String, Option<Value>)>,
+    ctx: &ActionContext,
+    settings: &FeishuSettings,
+    access_token: &Arc<String>,
+    instance_code: &str,
+) {
+    let ctx = ctx.clone();
+    let settings = settings.clone();
+    let access_token = Arc::clone(access_token);
+    let instance_code = instance_code.to_string();
+    set.spawn(async move {
+        let detail = match instance_detail_with_token(
+            &ctx,
+            &settings,
+            &access_token,
+            &instance_code,
+        )
+        .await
+        {
+            Ok(detail) => Some(detail),
+            Err(error) => {
+                tracing::debug!(
+                    instance_code = %instance_code,
+                    error = %error.message,
+                    "审批实例详情获取失败，按无详情降级"
+                );
+                None
+            }
+        };
+        (instance_code, detail)
+    });
+}
+
+async fn instance_detail_with_token(
+    ctx: &ActionContext,
+    settings: &FeishuSettings,
+    access_token: &str,
+    instance_code: &str,
+) -> Result<Value, ApiError> {
     let path = format!(
         "/open-apis/approval/v4/instances/{}",
         encode_path_segment(instance_code)
     );
-    let access_token = tenant_access_token(ctx, settings).await?;
     call(
         ctx,
         settings,
-        &access_token,
+        access_token,
         OutboundMethod::Get,
         &path,
         vec![("user_id_type".to_string(), "open_id".to_string())],
