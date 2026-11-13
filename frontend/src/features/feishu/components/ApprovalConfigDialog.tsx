@@ -17,6 +17,7 @@
 import { useState } from "react";
 
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -168,6 +169,14 @@ export function ApprovalConfigDialog({
       initialConfig?.maps
         .filter((map) => Boolean(map.intervalEndField))
         .map((map) => [map.widgetId, map.intervalEndField ?? ""]) ?? [],
+    ),
+  );
+  // 单行文本映射的「去除全部空白」开关：只记录开启项，缺省即关闭。
+  const [stripSpaces, setStripSpaces] = useState<Record<string, boolean>>(
+    Object.fromEntries(
+      initialConfig?.maps
+        .filter((map) => map.stripSpaces === true)
+        .map((map) => [map.widgetId, true]) ?? [],
     ),
   );
   const [optionDatasources, setOptionDatasources] = useState<
@@ -402,6 +411,7 @@ export function ApprovalConfigDialog({
           ...(endFields[widgetId]
             ? { intervalEndField: endFields[widgetId] }
             : {}),
+          ...(stripSpaces[widgetId] === true ? { stripSpaces: true } : {}),
           ...(mappingWidgets.find((widget) => widget.id === widgetId)
             ?.usesExternalOptions && optionSources[widgetId]
             ? { optionSourceKey: optionSources[widgetId] }
@@ -411,7 +421,19 @@ export function ApprovalConfigDialog({
     try {
       if (initialConfig) {
         await client.updateConfig(initialConfig.id, {
-          maps: input.maps,
+          // 更新是整份 maps 替换：本次开启或原本开启（需要关闭）时才发送明确
+          // 布尔值。无关编辑保持省略——旧后端没有该字段（deny_unknown_fields
+          // 会 400），省略可让单侧前端发布时保存配置仍然可用。
+          maps: input.maps?.map((map) => {
+            const next = stripSpaces[map.widgetId] === true;
+            const previous =
+              initialConfig?.maps.find((item) => item.widgetId === map.widgetId)
+                ?.stripSpaces === true;
+            return {
+              ...map,
+              ...(next || previous ? { stripSpaces: next } : {}),
+            };
+          }),
           baseTimezone: timezone,
           ...(title !== initialConfig.title ? { title } : {}),
           ...(approvalId !== (initialConfig.approvalId ?? "")
@@ -745,6 +767,11 @@ export function ApprovalConfigDialog({
                                       ...previous,
                                       [widget.id]: "",
                                     }));
+                                    // 取消映射时一并清掉开关，避免重新映射后残留。
+                                    setStripSpaces((previous) => ({
+                                      ...previous,
+                                      [widget.id]: false,
+                                    }));
                                   }
                                 }}
                               >
@@ -778,6 +805,36 @@ export function ApprovalConfigDialog({
                                   ))}
                                 </SelectContent>
                               </Select>
+                              {widget.type === "input" ? (
+                                <div className="mt-2 flex items-start gap-2">
+                                  <Checkbox
+                                    id={`strip-spaces-${widget.id}`}
+                                    className="mt-0.5"
+                                    aria-label={`${widget.qualifiedName ?? widget.name}去除全部空白`}
+                                    checked={stripSpaces[widget.id] === true}
+                                    disabled={
+                                      widgetsPending || !maps[widget.id]
+                                    }
+                                    onCheckedChange={(checked) =>
+                                      setStripSpaces((previous) => ({
+                                        ...previous,
+                                        [widget.id]: checked === true,
+                                      }))
+                                    }
+                                  />
+                                  <div className="space-y-1">
+                                    <label
+                                      htmlFor={`strip-spaces-${widget.id}`}
+                                      className="text-xs font-medium"
+                                    >
+                                      去除全部空白
+                                    </label>
+                                    <p className="text-xs text-muted-foreground">
+                                      派发时删除半角/全角空格、制表符与换行；只影响提交给审批的值，不回写多维表格。地址、备注等需要保留空格的内容请不要开启。
+                                    </p>
+                                  </div>
+                                </div>
+                              ) : null}
                               {widget.type === "dateInterval" ? (
                                 <div className="mt-2">
                                   <Select
@@ -1053,6 +1110,13 @@ export function ApprovalConfigDialog({
                       结束日期列：
                       {fields.find((f) => f.fieldId === endFields[widget.id])
                         ?.fieldName ?? endFields[widget.id]}
+                    </span>
+                  ) : null}
+                  {maps[widget.id] &&
+                  widget.type === "input" &&
+                  stripSpaces[widget.id] ? (
+                    <span className="block text-xs text-muted-foreground">
+                      已开启去除全部空白
                     </span>
                   ) : null}
                   {maps[widget.id] && widget.usesExternalOptions ? (

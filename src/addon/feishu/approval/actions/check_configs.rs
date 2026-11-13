@@ -92,20 +92,11 @@ pub(super) async fn handle(
             "bitable_field",
             "interval_end_field",
             "option_source_key",
+            "strip_spaces",
         ])?
         .all()
         .await?;
-    let mut maps: HashMap<i64, Vec<FieldMapping>> = HashMap::new();
-    for row in map_rows {
-        maps.entry(row.require("config_id")?)
-            .or_default()
-            .push(FieldMapping {
-                widget_id: row.require("widget_id")?,
-                bitable_field: row.require("bitable_field")?,
-                interval_end_field: row.optional("interval_end_field")?,
-                option_source_key: row.optional("option_source_key")?,
-            });
-    }
+    let mut maps = group_field_mappings(map_rows)?;
 
     let total = rows.len();
     let mut problems = Vec::new();
@@ -195,9 +186,51 @@ pub(super) async fn handle(
     )
 }
 
+/// 把库里的映射行还原成 `FieldMapping`，供 `build_plan` 按真实配置重放。
+///
+/// 抽成纯函数便于单测每一列的读取（含 `strip_spaces`）：漏读一列不会编译失败，
+/// 但会让体检静默按默认值重放。
+fn group_field_mappings(
+    rows: Vec<yang_base::table::Record>,
+) -> Result<HashMap<i64, Vec<FieldMapping>>, BaseError> {
+    let mut maps: HashMap<i64, Vec<FieldMapping>> = HashMap::new();
+    for row in rows {
+        maps.entry(row.require("config_id")?)
+            .or_default()
+            .push(FieldMapping {
+                widget_id: row.require("widget_id")?,
+                bitable_field: row.require("bitable_field")?,
+                interval_end_field: row.optional("interval_end_field")?,
+                option_source_key: row.optional("option_source_key")?,
+                strip_spaces: row.optional("strip_spaces")?,
+            });
+    }
+    Ok(maps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yang_base::table::Record;
+
+    #[test]
+    fn field_mappings_keep_strip_spaces_from_rows() {
+        let mut saved = Record::new();
+        saved.insert("config_id", serde_json::json!(1));
+        saved.insert("widget_id", serde_json::json!("w"));
+        saved.insert("bitable_field", serde_json::json!("fld"));
+        saved.insert("strip_spaces", serde_json::json!(true));
+        let maps = group_field_mappings(vec![saved]).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(maps[&1][0].strip_spaces, Some(true));
+
+        // 旧行没有该列：保持 None，由匹配/派发侧按关闭处理。
+        let mut legacy = Record::new();
+        legacy.insert("config_id", serde_json::json!(1));
+        legacy.insert("widget_id", serde_json::json!("w2"));
+        legacy.insert("bitable_field", serde_json::json!("fld2"));
+        let maps = group_field_mappings(vec![legacy]).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(maps[&1][0].strip_spaces, None);
+    }
 
     /// 空请求体是唯一合法形态；`deny_unknown_fields` 挡住手误多传的键。
     #[test]

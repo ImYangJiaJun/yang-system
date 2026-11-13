@@ -64,6 +64,7 @@ pub(super) const MAP_ITEM_COLUMNS: &[&str] = &[
     "required",
     "converter",
     "option_source_key",
+    "strip_spaces",
 ];
 
 /// 一条字段映射的对外视图。
@@ -87,6 +88,8 @@ pub(super) struct FieldMapItem {
     required: bool,
     /// 值转换器：`direct` / `date` / `option`。
     converter: String,
+    /// 派发时是否删除该控件值的全部 Unicode 空白（仅单行文本可开启）。
+    strip_spaces: bool,
     /// 外部选项来源；旧配置可能为空。
     option_source_key: Option<String>,
     option_source_name: Option<String>,
@@ -112,6 +115,7 @@ pub(super) fn group_maps(rows: &[Record]) -> Result<HashMap<i64, Vec<FieldMapIte
             option_source_key: row.optional("option_source_key")?,
             required: row.optional("required")?.unwrap_or(false),
             converter: row.optional("converter")?.unwrap_or_default(),
+            strip_spaces: row.optional("strip_spaces")?.unwrap_or(false),
         });
     }
     Ok(groups)
@@ -403,6 +407,20 @@ mod tests {
         let groups = group_maps(&rows).unwrap_or_else(|error| panic!("{error}"));
         let item = serde_json::to_value(&groups[&1][0]).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(item["option_source_key"], "fldq7lcb6y");
+    }
+
+    #[test]
+    fn grouped_maps_default_strip_spaces_to_false_and_keep_true() {
+        // 三处投影（列清单 / FieldMapItem / group_maps）任一遗漏都会让前端恒读
+        // false，编辑保存时把 true 静默重置。
+        let rows = [
+            map_row(1, "w1", "fldA", true),
+            map_row(1, "w2", "fldB", true).set("strip_spaces", true),
+        ];
+        let groups = group_maps(&rows).unwrap_or_else(|error| panic!("{error}"));
+        assert!(!groups[&1][0].strip_spaces, "旧行缺列按关闭");
+        assert!(groups[&1][1].strip_spaces, "true 必须原样投影");
+        assert!(MAP_ITEM_COLUMNS.contains(&"strip_spaces"));
     }
 
     #[test]

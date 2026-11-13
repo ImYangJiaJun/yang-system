@@ -186,6 +186,7 @@ Content-Type: application/json
 | `required` | Bool | 快照的必填标志 |
 | `converter` | Str | 转换器标识（见 §6.2） |
 | `option_map` | Text | 选项映射（单选/多选的选项名 ↔ 选项 value），JSON |
+| `strip_spaces` | Bool, default false | 派发时删除该控件值的全部 Unicode 空白（仅 `input` 可开启，见 §6.2「文本去空白」） |
 
 **用 `field_id` 而不是字段名作 key**：用户在多维表格里改列名会静默失配（现有 `feishu_datasource_field` 表同时存 `field_id` 与 `field_name`，`src/addon/feishu/datasource/domain/field_table.rs:13-84`，本设计对齐该做法——存 id 作 key，另存 name 仅供控制台展示）。
 
@@ -513,6 +514,16 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 - **`direct`**：文本/数字类，`value` 直接用多维表格单元格值。
 - **`date`**：多维表格日期是**毫秒时间戳**，需按 Base 时区转 RFC3339。**Base 时区必须作为配置项显式指定**，不要猜测（多维表格不带时区信息，审批 date 控件要带偏移量）。
 - **`option`**：单选/多选需要在配置时把**多维表格的选项文案**映射到**审批控件的选项 value**（`option_map` 列）。两者不一定同名，必须显式配。
+
+#### 文本去空白（`strip_spaces`）
+
+银行卡号、银行账户等单行文本常见「6222 0212 3456 7890」式分组空格，而审批侧通常要求连续字符。映射行提供按控件开启的 `strip_spaces` 开关：
+
+- 只对 `input`（单行文本）生效；`textarea` 的换行/缩进是排版，数字/金额/电话/选项/日期/联系人等各有专用转换，配置期即拒绝在它们上面开启。
+- 删除 `char::is_whitespace` 覆盖的全部 Unicode 空白：半角空格、全角空格 U+3000、NBSP、制表符、换行。**不处理**零宽字符（U+200B/U+2060/U+FEFF）、软连字符与全角数字；若业务需要「只保留数字」，应另立显式规则。
+- 默认关闭，存量配置与自动按名匹配的行为逐字节不变。开启后清洗发生在 `assemble_direct`，提交值与聚合签名同口径（仅空格不同的记录会得到相同签名）；已播种且 `effect_phase=ready` 的聚合组会因签名变化被判「排队期间被修改」而暂停，切换开关应避开有排队聚合组的窗口。
+- `update_config` 的 `maps` 是全量替换；请求中省略该键时按 `(widget_id, bitable_field)` 沿用库内旧值，显式 `false` 表示关闭。来源列变更时不继承旧开关。
+- 清洗后为空的单元格按缺失处理（必填报 `MissingRequired`、可选取省略）；明细容器的「是否有值」用同一口径，不会提交空明细行。
 
 #### 6.2.1 `option` 是**多态字段**（实测）
 

@@ -104,6 +104,18 @@ pub(crate) fn is_multi_select(widget_type: &str) -> bool {
     matches!(widget_type, "checkbox" | "checkboxV2")
 }
 
+/// 该类型是否支持「去除全部空白」：只允许**单行文本**。
+///
+/// 多行文本（`textarea`）里的换行与缩进是排版的一部分，删掉会把地址、备注
+/// 粘成一行；数字/金额/公式/电话/选项/日期等控件各有专用转换分支，空格清洗
+/// 对它们要么无意义（电话本来就只取数字），要么会破坏精度或精确匹配。
+///
+/// 配置期（`approval_match`）与派发期（`approval_convert`）共用这一份清单，
+/// 避免两处各写一份后静默漂移。
+pub(crate) fn supports_strip_spaces(widget_type: &str) -> bool {
+    widget_type == "input"
+}
+
 /// 媒体控件上传到飞书时使用的文件类型：图片控件只能传图片。
 pub(crate) fn upload_type(widget_type: &str) -> &'static str {
     if matches!(widget_type, "image" | "imageV2") {
@@ -184,6 +196,24 @@ mod tests {
         assert!(!is_control_group("fieldList"));
         for kind in ["input", "radioV2", "attachmentV2", "image"] {
             assert!(is_configurable(kind) && !is_container(kind), "{kind}");
+        }
+        // 去空白只对单行文本开放：多行文本的换行是排版，其余控件有专用转换。
+        assert!(supports_strip_spaces("input"));
+        for kind in [
+            "textarea",
+            "number",
+            "amount",
+            "formula",
+            "telephone",
+            "date",
+            "dateInterval",
+            "radioV2",
+            "checkboxV2",
+            "contact",
+            "connect",
+            "attachmentV2",
+        ] {
+            assert!(!supports_strip_spaces(kind), "{kind}");
         }
         for kind in ["attachmentV2", "image", "imageV2"] {
             assert!(is_media(kind), "{kind}");

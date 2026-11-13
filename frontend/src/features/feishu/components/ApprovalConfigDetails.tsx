@@ -504,6 +504,11 @@ export function ApprovalConfigDetails({
                     </div>
                     <div className="text-sm">
                       <p>{RULE_LABELS[map.converter] ?? "填写规则待确认"}</p>
+                      {map.stripSpaces && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          派发时去除全部空白（半角/全角空格、制表符、换行）
+                        </p>
+                      )}
                       {map.optionSourceKey && (
                         <p className="mt-1 break-words text-xs text-muted-foreground">
                           选项来自：
@@ -786,6 +791,7 @@ export function ApprovalConfigDetails({
                       ["来源列标识", map.bitableField],
                       ["控件原始类型", map.widgetType],
                       ["转换规则", map.converter],
+                      ["去除全部空白", map.stripSpaces ? "是" : "否"],
                       ["外部选项来源 key", map.optionSourceKey ?? "未设置"],
                     ].map(([label, value]) => (
                       <div key={label}>

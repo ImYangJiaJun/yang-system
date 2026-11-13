@@ -75,6 +75,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .require(true)
                     .max_length(32)
                     .default("direct"),
+                // 派发时是否删除该控件值里的全部 Unicode 空白（半角/全角空格、
+                // NBSP、制表符、换行）。只对单行文本（`input`）生效。
+                //
+                // 默认关闭：存量映射与自动按名匹配的行为逐字节不变。必须
+                // `require(true)` + `default(false)`——schema_sync 对已有数据的表
+                // 新增「必填且无默认值」列会直接拒绝启动，而带默认值的列由
+                // ALTER 把存量行回填为 0（与 `aggregate_batch` 同一做法）。
+                strip_spaces => Switch::new()
+                    .title("去除全部空白")
+                    .require(true)
+                    .default(false),
                 // 单选/多选专用：多维表格选项文案 ↔ 审批控件选项 value。
                 // 两者不一定同名（例如飞书侧的 value 是数字 id），所以必须显式配。
                 // JSON 文本：{"<多维表格文案>":"<审批控件 value>"}。
@@ -145,6 +156,23 @@ mod tests {
             converter.default_value(),
             Some(&serde_json::json!("direct"))
         );
+    }
+
+    #[test]
+    fn strip_spaces_is_required_and_defaults_to_false() {
+        // 默认关闭是兼容性的根：存量映射行由 ALTER 的 DEFAULT 0 回填，自动按名
+        // 匹配也恒为 false，关闭时派发值逐字节不变。
+        let definition = definition();
+        let field = definition
+            .field("strip_spaces")
+            .unwrap_or_else(|| panic!("strip_spaces 字段必须存在"));
+        assert!(field.is_required(), "开关必须显式落库");
+        assert_eq!(
+            field.default_value(),
+            Some(&serde_json::json!(false)),
+            "默认关闭"
+        );
+        assert_ne!(field.label(), field.name(), "必须有中文展示名");
     }
 
     #[test]

@@ -2345,6 +2345,8 @@ function parseApprovalConfigMap(
     intervalEndFieldName: asNullableString(raw.interval_end_field_name),
     required: raw.required === true,
     converter: asString(raw.converter),
+    // 旧后端没有这个键：缺键按关闭处理。
+    stripSpaces: raw.strip_spaces === true,
     optionSourceKey: asNullableString(raw.option_source_key),
     optionSourceName: asNullableString(raw.option_source_name),
   };
@@ -2517,6 +2519,8 @@ export type CreateApprovalConfigInput = {
     bitableField: string;
     /// 日期区间控件专用：结束日期列（field_id）；省略 = 单列区间对象模式。
     intervalEndField?: string;
+    /// 派发时删除全部 Unicode 空白（仅单行文本可开启）；省略 = 关闭。
+    stripSpaces?: boolean;
     optionSourceKey?: string;
   }>;
 };
@@ -2580,6 +2584,8 @@ export async function createApprovalConfig(
               ...(map.intervalEndField === undefined
                 ? {}
                 : { interval_end_field: map.intervalEndField }),
+              // 新建时省略等价于 false；只在开启时发送，保持请求体最小。
+              ...(map.stripSpaces === true ? { strip_spaces: true } : {}),
               ...(map.optionSourceKey === undefined
                 ? {}
                 : { option_source_key: map.optionSourceKey }),
@@ -2640,6 +2646,11 @@ export async function updateApprovalConfig(
       ...(map.intervalEndField === undefined
         ? {}
         : { interval_end_field: map.intervalEndField }),
+      // 更新是整份 maps 替换：编辑态必须显式发送布尔值，取消勾选才能关闭；
+      // 未给（旧调用方）由后端「省略 = 沿用旧值」兜底，不会静默复位。
+      ...(map.stripSpaces === undefined
+        ? {}
+        : { strip_spaces: map.stripSpaces }),
       ...(map.optionSourceKey === undefined
         ? {}
         : { option_source_key: map.optionSourceKey }),

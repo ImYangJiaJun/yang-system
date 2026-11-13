@@ -1140,6 +1140,9 @@ export type ApprovalConfigMap = {
   required: boolean;
   /// 值转换器：`direct` / `date` / `option`。
   converter: string;
+  /// 派发时删除该控件值的全部 Unicode 空白（半角/全角空格、NBSP、制表符、
+  /// 换行）。只对单行文本（`input`）生效；默认 false。
+  stripSpaces?: boolean;
   optionSourceKey?: string | null;
   optionSourceName?: string | null;
 };

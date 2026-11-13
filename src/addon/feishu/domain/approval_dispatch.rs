@@ -2108,6 +2108,12 @@ pub(crate) fn widget_maps_from_rows(
                 .get("interval_end_field")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            // 旧库行与旧 `dispatch_payload` 快照没有这个键：缺键按关闭处理，
+            // 已受理任务的行为不变。
+            strip_spaces: row
+                .get("strip_spaces")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
     Some(widgets)
@@ -2285,6 +2291,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         }
     }
 
@@ -4314,6 +4321,25 @@ mod tests {
             ("converter".to_string(), json!("typo")),
         ])];
         assert!(widget_maps_from_rows(&rows, |_| None).is_none());
+    }
+
+    #[test]
+    fn widget_maps_default_strip_spaces_to_false_and_read_true() {
+        let rows = vec![serde_json::Map::from_iter([
+            ("widget_id".to_string(), json!("w1")),
+            ("widget_type".to_string(), json!("input")),
+            ("bitable_field".to_string(), json!("fld")),
+            ("converter".to_string(), json!("direct")),
+        ])];
+        // 旧库行与旧 dispatch_payload 快照都没有这个键。
+        let widgets = widget_maps_from_rows(&rows, |_| None).unwrap_or_else(|| panic!("应可解析"));
+        assert!(!widgets[0].strip_spaces, "缺键按关闭");
+
+        let mut saved_rows = rows.clone();
+        saved_rows[0].insert("strip_spaces".into(), json!(true));
+        let saved =
+            widget_maps_from_rows(&saved_rows, |_| None).unwrap_or_else(|| panic!("应可解析"));
+        assert!(saved[0].strip_spaces);
     }
 
     #[test]

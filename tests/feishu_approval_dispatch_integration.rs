@@ -920,6 +920,10 @@ async fn console_crud_loop_on_a_seeded_config() {
             .bind(snapshot).bind(config_id).execute(database.pool()).await?;
         sqlx::query("UPDATE `feishu_approval_field_map` SET `bitable_field_name` = '实际付款金额' WHERE `config_id` = ? AND `widget_id` = 'w2'")
             .bind(config_id).execute(database.pool()).await?;
+        // 映射级去空白开关：真实库列存在（schema_sync 已补列）、存量默认关闭、
+        // 显式开启后列表投影原样返回。
+        sqlx::query("UPDATE `feishu_approval_field_map` SET `strip_spaces` = 1 WHERE `config_id` = ? AND `widget_id` = 'w2'")
+            .bind(config_id).execute(database.pool()).await?;
 
         // ---- list_configs：映射分组 + 不投影 form_snapshot ----
         let listed = dispatch_as_operator(
@@ -945,6 +949,8 @@ async fn console_crud_loop_on_a_seeded_config() {
         ensure!(company["widget_name"] == "公司名称", "必须返回控件名称: {company}");
         ensure!(amount["widget_name"] == "付款明细_金额", "明细控件必须带父控件名称: {amount}");
         ensure!(amount["bitable_field_name"] == "实际付款金额", "必须返回列名: {amount}");
+        ensure!(company["strip_spaces"] == json!(false), "存量行默认关闭: {company}");
+        ensure!(amount["strip_spaces"] == json!(true), "开启状态必须原样投影: {amount}");
         ensure!(
             !item.to_string().contains("\"form_snapshot\""),
             "列表项不得投影 form_snapshot 大字段"

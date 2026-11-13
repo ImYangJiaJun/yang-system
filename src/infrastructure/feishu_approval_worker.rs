@@ -5928,6 +5928,7 @@ mod tests {
                 .collect(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         };
         let mut pooled = vec![widget(&[("差旅", "opt-1")])];
         assert!(merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-1")])]).is_ok());
@@ -8515,6 +8516,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         }]
     }
 
@@ -8548,6 +8550,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         });
         widgets
     }

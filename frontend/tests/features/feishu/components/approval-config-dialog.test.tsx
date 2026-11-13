@@ -492,6 +492,121 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     );
   }, 15000);
 
+  it("单行文本可勾选去除全部空白，新建按开启提交", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", {
+      name: "费用金额对应的多维表格字段",
+    });
+    // 只有 input 显示开关；textarea 不显示。
+    const checkbox = screen.getByRole("checkbox", {
+      name: "费用金额去除全部空白",
+    });
+    expect(checkbox).not.toBeChecked();
+    expect(
+      screen.queryByRole("checkbox", { name: "出差原因去除全部空白" }),
+    ).not.toBeInTheDocument();
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("combobox", { name: "申请人员字段" }));
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByText("已开启去除全部空白")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建配置" }));
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maps: [
+            {
+              widgetId: "widget-1",
+              bitableField: "fldAmount",
+              stripSpaces: true,
+            },
+          ],
+        }),
+      ),
+    );
+  }, 15000);
+
+  it("编辑态回显开关，取消勾选后保存显式关闭", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <ApprovalConfigDialog
+        client={client}
+        onCancel={vi.fn()}
+        initialConfig={{
+          ...SAVED_CONFIG,
+          maps: [{ ...SAVED_CONFIG.maps[0], stripSpaces: true }],
+        }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "费用金额去除全部空白",
+    });
+    expect(checkbox).toBeChecked();
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() =>
+      expect(client.updateConfig).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({
+          maps: [
+            {
+              widgetId: "widget-1",
+              bitableField: "fldAmount",
+              stripSpaces: false,
+            },
+          ],
+        }),
+      ),
+    );
+  }, 15000);
+
+  it("编辑态保持开启时保存仍发送明确布尔值", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <ApprovalConfigDialog
+        client={client}
+        onCancel={vi.fn()}
+        initialConfig={{
+          ...SAVED_CONFIG,
+          maps: [{ ...SAVED_CONFIG.maps[0], stripSpaces: true }],
+        }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    expect(
+      await screen.findByRole("checkbox", { name: "费用金额去除全部空白" }),
+    ).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() =>
+      expect(client.updateConfig).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({
+          maps: [
+            {
+              widgetId: "widget-1",
+              bitableField: "fldAmount",
+              stripSpaces: true,
+            },
+          ],
+        }),
+      ),
+    );
+  }, 15000);
+
   it("紧凑展示控件与字段映射，技术信息默认隐藏且可展开", async () => {
     const user = userEvent.setup();
     const client = stubClient();

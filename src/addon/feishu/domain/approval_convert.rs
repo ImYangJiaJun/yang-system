@@ -57,6 +57,11 @@ pub(crate) struct WidgetMap {
     pub(crate) option_source_key: Option<String>,
     /// 金额控件的币种（`amount` 专用）。
     pub(crate) currency: Option<String>,
+    /// 派发时删除文本值里的全部 Unicode 空白；只对单行文本（`input`）生效。
+    ///
+    /// 默认关闭。值同时参与聚合签名（`collect_signature` 复用
+    /// [`assemble_widget`]），因此提交值与分组口径天然一致。
+    pub(crate) strip_spaces: bool,
 }
 
 /// 金额控件的币种：审批定义里该控件 `option.currencyRange` 的首值。
@@ -598,8 +603,12 @@ fn assemble_definition(
                     let has_value = node.walk().iter().any(|child| {
                         mappings
                             .get(child.id.as_str())
-                            .and_then(|mapping| row.cells.get(&mapping.bitable_field))
-                            .is_some_and(|cell| !is_empty(cell))
+                            .and_then(|mapping| {
+                                row.cells
+                                    .get(&mapping.bitable_field)
+                                    .map(|cell| !cell_yields_no_value(mapping, cell))
+                            })
+                            .unwrap_or(false)
                     });
                     if !has_value {
                         return Err(ConvertError::BadValue {
@@ -622,8 +631,13 @@ fn assemble_definition(
             let has_value = node.walk().iter().any(|child| {
                 mappings
                     .get(child.id.as_str())
-                    .and_then(|mapping| primary.cells.get(&mapping.bitable_field))
-                    .is_some_and(|cell| !is_empty(cell))
+                    .and_then(|mapping| {
+                        primary
+                            .cells
+                            .get(&mapping.bitable_field)
+                            .map(|cell| !cell_yields_no_value(mapping, cell))
+                    })
+                    .unwrap_or(false)
             });
             if !has_value {
                 if node.required {
@@ -735,6 +749,20 @@ fn assemble_widget(
             Ok(None)
         };
     };
+
+    // 去空白后可能变成空串：结构化单元格（`{"text":" ","link":"…"}`）的空白
+    // 内容不会被上面的 `is_empty` 判出来，而 `text_from_cell` 拼出的文本只有
+    // 空白。不清洗就提交会发一个空控件给飞书（必填控件报 1395006），所以必须
+    // 在清洗后按「无值」重新判定：必填报缺、可选取省略。
+    if cell_yields_no_value(widget, cell) {
+        return if widget.required {
+            Err(ConvertError::MissingRequired {
+                widget_id: widget.widget_id.clone(),
+            })
+        } else {
+            Ok(None)
+        };
+    }
 
     // 日期区间配了结束列时，结束值也必须存在：半截区间发给飞书只会在审批侧
     // 缺结束时间，按「没有值」处理（数据问题，补齐即可，不必判成配置错误）。
@@ -1038,9 +1066,43 @@ fn assemble_direct(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertErr
                 .map(|id| json!({ "open_id": id }))
                 .collect(),
         )),
-        // 其余文本类（input / textarea）直取字符串。
-        _ => Ok(Value::String(text_from_cell(cell))),
+        // 其余文本类（input / textarea）直取字符串；去空白只对显式开启的单行
+        // 文本生效，默认路径逐字节保留原值。
+        _ => {
+            let text = text_from_cell(cell);
+            if widget.strip_spaces && widget_rules::supports_strip_spaces(&widget.widget_type) {
+                Ok(Value::String(strip_whitespace(&text)))
+            } else {
+                Ok(Value::String(text))
+            }
+        }
     }
+}
+
+/// 该控件从该单元格是否取不到值（与 [`assemble_widget`] 同口径）。
+///
+/// `is_empty` 只看原始单元格；开启去空白后，结构化空白
+/// （`{"text":" ","link":"…"}`）在控件层会被清洗成空串并按缺失处理，容器层
+/// 的「明细是否有值」必须用同一口径——否则会提交空明细行，或绕过必填明细守卫。
+fn cell_yields_no_value(mapping: &WidgetMap, cell: &Value) -> bool {
+    if is_empty(cell) {
+        return true;
+    }
+    mapping.strip_spaces
+        && widget_rules::supports_strip_spaces(&mapping.widget_type)
+        && strip_whitespace(&text_from_cell(cell)).is_empty()
+}
+
+/// 删除文本中的全部 Unicode 空白：半角空格、全角空格（U+3000）、NBSP、
+/// 制表符、换行等（即 `char::is_whitespace`）。
+///
+/// **不处理**零宽空格（U+200B）、WORD JOINER（U+2060）、BOM（U+FEFF）与
+/// 全角数字——它们不属于 Unicode White_Space；若业务需要「只保留数字」，
+/// 应另立显式规则，不要悄悄并进这个开关。
+fn strip_whitespace(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 /// 只解析数据，不访问单元格里的 URL；链接须来自审批应用，编号不能代替实例 Code。
@@ -1614,6 +1676,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         }
     }
 
@@ -2556,6 +2619,211 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{e}"))[0]["value"],
             json!("Amazon.com Services LLC \nPO Box 84974 \nSeattle, WA 98124-6274")
+        );
+    }
+
+    #[test]
+    fn strip_spaces_removes_all_unicode_whitespace_only_for_input() {
+        // 银行卡/账户常见的分组空格：半角、全角（U+3000）、NBSP、Tab、CRLF。
+        let mut card = widget("w1", "input");
+        card.strip_spaces = true;
+        let widgets = [card];
+        for cell in [
+            json!(" 6222 0212 3456 7890 "),
+            json!("6222\u{3000}0212\t3456\r\n7890"),
+            json!("6222\u{00A0}0212 3456 7890"),
+        ] {
+            assert_eq!(
+                render(&widgets, &cells(&[("fld_src", cell)]))
+                    .unwrap_or_else(|error| panic!("{error}"))[0]["value"],
+                json!("6222021234567890")
+            );
+        }
+        // 零宽字符/软连字符不属于 Unicode White_Space：明确保留（要处理须另立规则）。
+        for kept in [
+            "6222\u{200B}0212",
+            "6222\u{2060}0212",
+            "6222\u{FEFF}0212",
+            "6222\u{00AD}0212",
+        ] {
+            assert_eq!(
+                render(&widgets, &cells(&[("fld_src", json!(kept))]))
+                    .unwrap_or_else(|error| panic!("{error}"))[0]["value"],
+                json!(kept)
+            );
+        }
+    }
+
+    #[test]
+    fn strip_spaces_is_off_by_default_and_never_touches_non_input_controls() {
+        // 默认关闭：原值逐字节保留（含首尾空格与富文本段间空格）。
+        let widgets = [widget("w1", "input")];
+        assert_eq!(
+            render(&widgets, &cells(&[("fld_src", json!(" 6222 0212 "))]))
+                .unwrap_or_else(|error| panic!("{error}"))[0]["value"],
+            json!(" 6222 0212 ")
+        );
+
+        // 非 input 控件即使脏库把开关写成 true 也不生效：各自走专用转换。
+        let mut textarea = widget("w1", "textarea");
+        textarea.strip_spaces = true;
+        assert_eq!(
+            render(
+                &[textarea],
+                &cells(&[("fld_src", json!("收款人：张三\n6222 0212"))])
+            )
+            .unwrap_or_else(|error| panic!("{error}"))[0]["value"],
+            json!("收款人：张三\n6222 0212")
+        );
+
+        let mut number = widget("w1", "number");
+        number.strip_spaces = true;
+        assert_eq!(
+            render(&[number], &cells(&[("fld_src", json!(" 1234 "))]))
+                .unwrap_or_else(|error| panic!("{error}"))[0]["value"],
+            json!(1234.0)
+        );
+
+        let mut telephone = widget("w1", "telephone");
+        telephone.strip_spaces = true;
+        assert_eq!(
+            render(&[telephone], &cells(&[("fld_src", json!(" 6222 0212 "))]))
+                .unwrap_or_else(|error| panic!("{error}"))[0]["value"]["nationalNumber"],
+            json!("62220212")
+        );
+    }
+
+    #[test]
+    fn strip_spaces_whitespace_only_structured_cell_is_treated_as_missing() {
+        // `{"text":" ","link":"…"}` 不会被 `is_empty` 判空（非内容键非空），但
+        // `text_from_cell` 只拼出空白；清洗后必须按「无值」处理，不能给飞书发
+        // 一个空控件。
+        let mut required = widget("w1", "input");
+        required.required = true;
+        required.strip_spaces = true;
+        let error = match render(
+            &[required],
+            &cells(&[("fld_src", json!({"text": " ", "link": "https://x.invalid"}))]),
+        ) {
+            Ok(_) => panic!("空白内容清洗后应判缺失"),
+            Err(error) => error,
+        };
+        assert!(error.contains("缺少必填控件"), "{error}");
+
+        // 可选控件同样按缺失处理（整块省略）。
+        let mut optional = widget("w1", "input");
+        optional.strip_spaces = true;
+        assert!(render(
+            &[optional],
+            &cells(&[("fld_src", json!({"text": " ", "link": "https://x.invalid"}),)]),
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
+        .is_empty());
+    }
+
+    #[test]
+    fn strip_spaces_makes_signature_equal_for_values_differing_only_in_whitespace() {
+        let mut widget = widget("w1", "input");
+        widget.strip_spaces = true;
+        let snapshot = flat_snapshot(std::slice::from_ref(&widget));
+        let signature = |value: &str| {
+            build_signature(&FormInput {
+                widgets: std::slice::from_ref(&widget),
+                form_snapshot: &snapshot,
+                cells: &cells(&[("fld_src", json!(value))]),
+                attachment_codes: &BTreeMap::new(),
+                timezone_offset: shanghai(),
+            })
+            .unwrap_or_else(|error| panic!("{error}"))
+        };
+        assert_eq!(signature("6222 0212"), signature("62220212"));
+
+        // 关闭时两者不同：默认路径不改变聚合分组口径。
+        let mut off = widget.clone();
+        off.strip_spaces = false;
+        let snapshot = flat_snapshot(std::slice::from_ref(&off));
+        let signature = |value: &str| {
+            build_signature(&FormInput {
+                widgets: std::slice::from_ref(&off),
+                form_snapshot: &snapshot,
+                cells: &cells(&[("fld_src", json!(value))]),
+                attachment_codes: &BTreeMap::new(),
+                timezone_offset: shanghai(),
+            })
+            .unwrap_or_else(|error| panic!("{error}"))
+        };
+        assert_ne!(signature("6222 0212"), signature("62220212"));
+    }
+
+    #[test]
+    fn strip_spaces_blank_detail_child_does_not_submit_an_empty_detail_row() {
+        // 容器层的「明细是否有值」必须与控件层同口径：结构化空白清洗后是缺失，
+        // 若容器仍按原始单元格判有值，会提交 `value:[[]]` 或绕过必填明细守卫。
+        let mut card = widget("card", "input");
+        card.strip_spaces = true;
+        let snapshot = |required: bool| {
+            format!(
+                r#"[{{"id":"detail","name":"明细","type":"fieldList","required":{required},"children":[{{"id":"card","name":"卡号","type":"input"}}]}}]"#
+            )
+        };
+        let build = |required: bool, cell: Value| {
+            let snapshot = snapshot(required);
+            build_form(&FormInput {
+                widgets: std::slice::from_ref(&card),
+                form_snapshot: &snapshot,
+                cells: &cells(&[("fld_src", cell)]),
+                attachment_codes: &BTreeMap::new(),
+                timezone_offset: shanghai(),
+            })
+        };
+
+        // 可选明细：空白子控件不算一行，整块省略。
+        let form = build(false, json!({"type": "text", "text": " "}))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&form).unwrap_or_else(|error| panic!("{error}")),
+            json!([])
+        );
+
+        // 必填明细：按缺失报错，而不是提交空行。
+        let error = match build(true, json!({"text": " ", "link": "https://x.invalid"})) {
+            Ok(form) => panic!("必填明细应报缺: {form}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("缺少必填控件"), "{error}");
+    }
+
+    #[test]
+    fn strip_spaces_blank_detail_member_is_reported_as_empty() {
+        let mut card = widget("card", "input");
+        card.strip_spaces = true;
+        let snapshot = r#"[{"id":"detail","name":"明细","type":"fieldList","required":true,"children":[{"id":"card","name":"卡号","type":"input"}]}]"#;
+        let blank = cells(&[("fld_src", json!({"type": "text", "text": " "}))]);
+        let valid = cells(&[("fld_src", json!("6222 0212"))]);
+        let rows = [
+            GroupFormRow {
+                record_id: "rec-blank",
+                cells: &blank,
+                attachment_codes: &BTreeMap::new(),
+            },
+            GroupFormRow {
+                record_id: "rec-valid",
+                cells: &valid,
+                attachment_codes: &BTreeMap::new(),
+            },
+        ];
+        let error = match build_group_form(&GroupFormInput {
+            widgets: std::slice::from_ref(&card),
+            form_snapshot: snapshot,
+            rows: &rows,
+            timezone_offset: shanghai(),
+        }) {
+            Ok(form) => panic!("空白成员应报明细为空: {form}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("明细为空") && error.contains("rec-blank"),
+            "{error}"
         );
     }
 

@@ -2468,6 +2468,1022 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/auth/feishu/authorize": {
+      "get": {
+        "description": "开始飞书 OAuth 登录（state + nonce + PKCE）",
+        "operationId": "feishu.sso.feishu_sso_authorize",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "redirect",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书登录",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/callback": {
+      "get": {
+        "description": "飞书授权页的重定向落点：校验 state/nonce、换码并登录或进入账号选择",
+        "operationId": "feishu.sso.feishu_sso_callback",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书登录回调",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/choose": {
+      "get": {
+        "description": "展示待绑定的飞书身份与「绑定已有 / 新建账号」选项",
+        "operationId": "feishu.sso.feishu_sso_choose",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "token",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书账号选择",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/choose/bind": {
+      "post": {
+        "description": "用已有系统账号的用户名/邮箱 + 密码（+MFA）绑定当前飞书身份",
+        "operationId": "feishu.sso.feishu_sso_choose_bind",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "mfa_code": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "password": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password",
+                  "token",
+                  "username"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "绑定已有账号",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/choose/create": {
+      "post": {
+        "description": "用用户输入的用户名/密码创建系统账号并绑定当前飞书身份",
+        "operationId": "feishu.sso.feishu_sso_choose_create",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password",
+                  "token",
+                  "username"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "新建系统账号",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/mfa": {
+      "post": {
+        "description": "完成飞书登录的 TOTP/恢复码/备用邮箱验证码校验并签发会话",
+        "operationId": "feishu.sso.feishu_sso_mfa",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "mfa_code": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mfa_code",
+                  "token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书登录第二因子",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/mfa/email-code": {
+      "post": {
+        "description": "向已绑定账号的已验证邮箱发送一次性第二因子验证码",
+        "operationId": "feishu.sso.feishu_sso_mfa_email_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书登录备用邮箱验证码",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/auth/feishu/status": {
+      "get": {
+        "description": "查询飞书 SSO 登录入口是否可用",
+        "operationId": "feishu.sso.feishu_sso_status",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "title": "StatusInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "飞书登录状态",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/feishu/approval/configs/check": {
       "post": {
         "description": "逐条按派发链路的校验重放，报告审批控件 / 多维表格列映射失效的配置",
@@ -2624,6 +3640,14 @@
                         "description": "外部选项来源的稳定标识；省略时按控件名称自动识别。",
                         "type": [
                           "string",
+                          "null"
+                        ]
+                      },
+                      "strip_spaces": {
+                        "default": null,
+                        "description": "派发时删除该控件值的全部 Unicode 空白；只允许单行文本（`input`）。\n\n三个值的语义不同，不要互相替代： - `Some(true)`：开启； - `Some(false)`：显式关闭； - `None`：新建配置时按关闭处理；更新配置时 **沿用该控件库内现值** （`update_config` 在删除旧映射前合并）——`maps` 是全量替换，旧控制台 不会发送新键，把 `None` 直接当 false 会静默复位已开启的开关。",
+                        "type": [
+                          "boolean",
                           "null"
                         ]
                       },
@@ -3995,6 +5019,14 @@
                           "null"
                         ]
                       },
+                      "strip_spaces": {
+                        "default": null,
+                        "description": "派发时删除该控件值的全部 Unicode 空白；只允许单行文本（`input`）。\n\n三个值的语义不同，不要互相替代： - `Some(true)`：开启； - `Some(false)`：显式关闭； - `None`：新建配置时按关闭处理；更新配置时 **沿用该控件库内现值** （`update_config` 在删除旧映射前合并）——`maps` 是全量替换，旧控制台 不会发送新键，把 `None` 直接当 false 会静默复位已开启的开关。",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
                       "widget_id": {
                         "type": "string"
                       }
@@ -4620,6 +5652,303 @@
           }
         ],
         "summary": "重试失败终态事件",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/approval/export/comment/runs/query": {
+      "post": {
+        "description": "分页查询审批评论回写台账，可按规则、状态、目标记录过滤",
+        "operationId": "feishu.approval_export.export_list_comment_runs",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "评论运行台账查询输入。",
+                "properties": {
+                  "count_total": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "page": {
+                    "default": 1,
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "page_size": {
+                    "default": 10,
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "record_id": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rule_id": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "state": {
+                    "default": null,
+                    "description": "pending / commenting / commented / done / retry / failed / skipped / waiting",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "title": "ListCommentRunsInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "审批评论运行记录",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/approval/export/comment/runs/retry": {
+      "post": {
+        "description": "把 failed 的评论运行记录重新排入队列",
+        "operationId": "feishu.approval_export.export_retry_comment_run",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "run_id": {
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "run_id"
+                ],
+                "title": "RetryCommentRunInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "重试审批评论回写",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [
@@ -6898,6 +8227,1807 @@
         "x-permissions": [
           "feishu.approval.read"
         ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/attachments": {
+      "get": {
+        "description": "代理下载飞书审批附件，供浏览器预览与下载",
+        "operationId": "feishu.batch_approval.feishu_batch_attachment",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "url",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "Action 的特殊业务响应体：文件下载、文件预览、重定向、原始响应体。\n\nAction 将本类型作为 `type Output` 返回时，派发边界 （[`DynAction::dispatch`](crate::action::DynAction)）会识别并把它转为 [`ApiResponse::attachment`]，普通输出的 JSON 线格式不受影响。\n\n标注 `#[non_exhaustive]`：未来新增变体不再构成破坏性变更，下游穷尽 `match` 请保留通配臂。\n\n# 示例\n\n```rust,ignore use yang_base::action::ResponseBody;\n\nasync fn index(&self, ctx: ActionContext, input: Self::Input) -> Result<Self::Output, BaseError> { // 文件下载 Ok(ResponseBody::download(\"/data/report.pdf\", \"report.pdf\")) // 文件预览 // Ok(ResponseBody::preview(\"/data/a.png\")) // 重定向 // Ok(ResponseBody::redirect(\"https://example.com/next\")) // 原始 JSON 响应体（不套 ApiResponse 包络） // ResponseBody::raw(r#\"{\"code\":0,\"msg\":\"ok\"}\"#, \"application/json\") } ```",
+                      "oneOf": [
+                        {
+                          "description": "文件下载：传输层以 `Content-Disposition: attachment` 返回文件字节。",
+                          "properties": {
+                            "filename": {
+                              "description": "下载文件名（写入 Content-Disposition 的 filename 参数）。",
+                              "type": "string"
+                            },
+                            "path": {
+                              "description": "服务器本地文件路径。",
+                              "type": "string"
+                            },
+                            "type": {
+                              "enum": [
+                                "download"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "filename",
+                            "path",
+                            "type"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "description": "文件预览：传输层以 `Content-Disposition: inline` 返回文件字节。",
+                          "properties": {
+                            "path": {
+                              "description": "服务器本地文件路径。",
+                              "type": "string"
+                            },
+                            "type": {
+                              "enum": [
+                                "preview"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "type"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "description": "重定向：传输层返回 302 状态码与 `Location` 头。",
+                          "properties": {
+                            "type": {
+                              "enum": [
+                                "redirect"
+                              ],
+                              "type": "string"
+                            },
+                            "url": {
+                              "description": "目标地址。",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "url"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "description": "原始响应体：传输层直接以 `content_type` 返回 `body`，**不套 [`ApiResponse`] 包络**。\n\n供外部系统要求固定响应形状（顶层键名、层级与框架包络不一致）时使用。 `content_type` 只允许 `application/json`；`body` 必须是该类型下的完整响应文本。\n\n请优先用 [`ResponseBody::raw`] 构造，它会校验 `content_type`。",
+                          "properties": {
+                            "body": {
+                              "description": "完整响应体文本（UTF-8）。",
+                              "type": "string"
+                            },
+                            "content_type": {
+                              "description": "响应 `Content-Type`；当前只允许 `application/json`。",
+                              "type": "string"
+                            },
+                            "type": {
+                              "enum": [
+                                "raw"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "body",
+                            "content_type",
+                            "type"
+                          ],
+                          "type": "object"
+                        }
+                      ],
+                      "title": "ResponseBody"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批附件下载",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/field-catalog": {
+      "get": {
+        "description": "列出审批定义的控件，供当前用户配置个人视图",
+        "operationId": "feishu.batch_approval.feishu_batch_field_catalog",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "approval_code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批字段目录",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/jobs": {
+      "post": {
+        "description": "校验待办并创建异步批量审批 job",
+        "operationId": "feishu.batch_approval.feishu_batch_create_job",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "JobItemInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "instance_code": {
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "instance_code",
+                      "task_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "action": {
+                    "type": "string"
+                  },
+                  "add_sign_open_ids": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "add_sign_type": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "approval_method": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "comment": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "items": {
+                      "$ref": "#/definitions/JobItemInput"
+                    },
+                    "type": "array"
+                  },
+                  "rollback_mode": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "transfer_open_id": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "action",
+                  "idempotency_key",
+                  "items"
+                ],
+                "title": "CreateJobInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "创建批量审批任务",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/jobs/{id}": {
+      "get": {
+        "description": "返回批量审批 job 的进度与逐条结果",
+        "operationId": "feishu.batch_approval.feishu_batch_get_job",
+        "parameters": [
+          {
+            "description": "",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "查询批量审批任务",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/jobs/{id}/cancel": {
+      "post": {
+        "description": "取消尚未开始的批量审批任务项",
+        "operationId": "feishu.batch_approval.feishu_batch_cancel_job",
+        "parameters": [
+          {
+            "description": "",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "取消批量审批任务",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/tasks": {
+      "get": {
+        "description": "列出当前用户的飞书待办并按审批定义分组",
+        "operationId": "feishu.batch_approval.feishu_batch_list_tasks",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "title": "ListTasksInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批待办",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/tasks/{task_id}": {
+      "get": {
+        "description": "按 instance_code 拉取审批实例详情（表单/时间线/当前节点）",
+        "operationId": "feishu.batch_approval.feishu_batch_task_detail",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "instance_code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "",
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "审批任务详情",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/tasks/{task_id}/rows": {
+      "get": {
+        "description": "分页读取审批实例中明细控件的行",
+        "operationId": "feishu.batch_approval.feishu_batch_detail_rows",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "field_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "instance_code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "",
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "",
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批明细行",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/users/search": {
+      "get": {
+        "description": "按关键词搜索飞书用户，供转交/加签选人",
+        "operationId": "feishu.batch_approval.feishu_batch_user_search",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "飞书通讯录搜索",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/view-config": {
+      "get": {
+        "description": "读取当前用户在指定审批定义下的个人视图",
+        "operationId": "feishu.batch_approval.feishu_batch_view_config",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "approval_code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批视图配置",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "post": {
+        "description": "保存当前用户在指定审批定义下的计算字段与显示字段",
+        "operationId": "feishu.batch_approval.feishu_batch_view_config_save",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "approval_code": {
+                    "type": "string"
+                  },
+                  "columns": {
+                    "default": [],
+                    "items": true,
+                    "type": "array"
+                  },
+                  "computed_fields": {
+                    "default": [],
+                    "items": true,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "approval_code"
+                ],
+                "title": "SaveViewInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "保存批量审批视图配置",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/view-config/reset": {
+      "post": {
+        "description": "删除当前用户在指定审批定义下的个人视图",
+        "operationId": "feishu.batch_approval.feishu_batch_view_config_reset",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "approval_code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "approval_code"
+                ],
+                "title": "ResetViewInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "重置批量审批视图配置",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/batch-approval/view-configs": {
+      "get": {
+        "description": "批量读取当前用户多个审批定义的个人视图",
+        "operationId": "feishu.batch_approval.feishu_batch_view_configs",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "approval_codes",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量审批视图配置列表",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -9867,7 +12997,17 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "取授权链接的输入：无参数。",
+                "description": "取授权链接的输入：可选 `purpose` 指定要授权的身份槽位。",
+                "properties": {
+                  "purpose": {
+                    "default": null,
+                    "description": "身份用途：`dispatch`（缺省）/ `comment`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
                 "title": "AuthorizeUrlInput",
                 "type": "object"
               }
@@ -9991,7 +13131,17 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "状态查询输入：无参数。",
+                "description": "状态查询输入：可选 `purpose` 区分两个身份槽位。",
+                "properties": {
+                  "purpose": {
+                    "default": null,
+                    "description": "身份用途：`dispatch`（缺省）/ `comment`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
                 "title": "OauthStatusInput",
                 "type": "object"
               }
@@ -15525,6 +18675,396 @@
           }
         ],
         "summary": "当前用户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/me/identities": {
+      "get": {
+        "description": "列出当前用户已绑定的外部身份",
+        "operationId": "feishu.sso.feishu_identities",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "title": "IdentitiesInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "外部身份绑定",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/me/identities/feishu": {
+      "delete": {
+        "description": "删除当前用户的飞书凭证与身份绑定",
+        "operationId": "feishu.sso.feishu_unbind",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "description": "当前账号密码，用作 Step-up。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirm",
+                  "password"
+                ],
+                "title": "UnbindInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "解绑飞书身份",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/me/identities/feishu/authorize": {
+      "post": {
+        "description": "生成飞书授权 URL，把当前飞书身份绑定到当前系统账号",
+        "operationId": "feishu.sso.feishu_bind_authorize",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "description": "显式二次确认；前端在跳转授权页前让用户确认。",
+                    "type": "string"
+                  },
+                  "password": {
+                    "description": "当前账号密码，用作 Step-up。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirm",
+                  "password"
+                ],
+                "title": "BindAuthorizeInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "绑定飞书身份",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [],

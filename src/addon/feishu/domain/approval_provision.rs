@@ -782,51 +782,7 @@ pub(crate) async fn insert_maps(
     plan: &ProvisionPlan,
 ) -> Result<(), BaseError> {
     for widget in &plan.widgets {
-        // `bitable_field_name` 是**展示**用的：对齐仍靠 `bitable_field`（id），
-        // 名字可被用户改、id 不会。
-        let column_name = plan
-            .columns
-            .iter()
-            .find(|column| column.field_id == widget.bitable_field)
-            .map(|column| column.field_name.clone())
-            .unwrap_or_default();
-
-        let mut map_row = Record::new();
-        map_row.insert("config_id", serde_json::json!(config_id));
-        map_row.insert("widget_id", serde_json::json!(&widget.widget_id));
-        map_row.insert("widget_type", serde_json::json!(&widget.widget_type));
-        map_row.insert("required", serde_json::json!(widget.required));
-        map_row.insert("bitable_field", serde_json::json!(&widget.bitable_field));
-        map_row.insert("bitable_field_name", serde_json::json!(column_name));
-        // 日期区间两列模式：结束列同样存 id + 展示名（未配置落 `NULL`）。
-        let interval_end_field_name = widget.interval_end_field.as_deref().and_then(|field_id| {
-            plan.columns
-                .iter()
-                .find(|column| column.field_id == field_id)
-                .map(|column| column.field_name.clone())
-        });
-        map_row.insert(
-            "interval_end_field",
-            serde_json::json!(&widget.interval_end_field),
-        );
-        map_row.insert(
-            "interval_end_field_name",
-            serde_json::json!(&interval_end_field_name),
-        );
-        map_row.insert(
-            "option_source_key",
-            serde_json::json!(&widget.option_source_key),
-        );
-        map_row.insert(
-            "converter",
-            serde_json::json!(converter_key(widget.converter)),
-        );
-        map_row.insert(
-            "option_map",
-            serde_json::json!(
-                serde_json::to_string(&widget.option_map).unwrap_or_else(|_| "{}".to_string())
-            ),
-        );
+        let map_row = map_record(config_id, widget, &plan.columns);
         context
             .approval_field_maps()
             .query()
@@ -835,6 +791,61 @@ pub(crate) async fn insert_maps(
     }
 
     Ok(())
+}
+
+/// 一条映射行的写入形态。
+///
+/// 拆成纯函数是为了让「每个新列是否真的写进去」可以单测——`insert_maps` 本身
+/// 需要数据库事务，分支漏写很难在集成测试里被发现。
+fn map_record(config_id: i64, widget: &WidgetMap, columns: &[Column]) -> Record {
+    // `bitable_field_name` 是**展示**用的：对齐仍靠 `bitable_field`（id），
+    // 名字可被用户改、id 不会。
+    let column_name = columns
+        .iter()
+        .find(|column| column.field_id == widget.bitable_field)
+        .map(|column| column.field_name.clone())
+        .unwrap_or_default();
+
+    let mut map_row = Record::new();
+    map_row.insert("config_id", serde_json::json!(config_id));
+    map_row.insert("widget_id", serde_json::json!(&widget.widget_id));
+    map_row.insert("widget_type", serde_json::json!(&widget.widget_type));
+    map_row.insert("required", serde_json::json!(widget.required));
+    map_row.insert("bitable_field", serde_json::json!(&widget.bitable_field));
+    map_row.insert("bitable_field_name", serde_json::json!(column_name));
+    // 日期区间两列模式：结束列同样存 id + 展示名（未配置落 `NULL`）。
+    let interval_end_field_name = widget.interval_end_field.as_deref().and_then(|field_id| {
+        columns
+            .iter()
+            .find(|column| column.field_id == field_id)
+            .map(|column| column.field_name.clone())
+    });
+    map_row.insert(
+        "interval_end_field",
+        serde_json::json!(&widget.interval_end_field),
+    );
+    map_row.insert(
+        "interval_end_field_name",
+        serde_json::json!(&interval_end_field_name),
+    );
+    map_row.insert(
+        "option_source_key",
+        serde_json::json!(&widget.option_source_key),
+    );
+    map_row.insert(
+        "converter",
+        serde_json::json!(converter_key(widget.converter)),
+    );
+    // 显式写入而不是依赖库默认值：自动按名匹配（`maps=None`）也要与显式
+    // 建配置路径保持同一份行为（`false`）。
+    map_row.insert("strip_spaces", serde_json::json!(widget.strip_spaces));
+    map_row.insert(
+        "option_map",
+        serde_json::json!(
+            serde_json::to_string(&widget.option_map).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    map_row
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,6 +1531,7 @@ mod tests {
             option_map: Default::default(),
             option_source_key: Some("fldq7lcb6y".into()),
             currency: None,
+            strip_spaces: false,
         };
         let body = option_match_feedback(
             &form,
@@ -1694,6 +1706,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            strip_spaces: false,
         };
         let mut parent = widget("parent", "fldBank");
         parent.option_map.insert("BPI".into(), "bank:bpi".into());
@@ -1776,6 +1789,33 @@ mod tests {
             field_name: name.to_string(),
             options: options.iter().map(|value| (*value).to_string()).collect(),
             field_type: Some(3),
+        }
+    }
+
+    #[test]
+    fn map_record_writes_strip_spaces_for_both_values() {
+        // 漏写这一列会让所有经 create_config/update_config 落库的 true 静默变 0。
+        let widget = |strip_spaces: bool| WidgetMap {
+            widget_id: "w".into(),
+            widget_type: "input".into(),
+            required: true,
+            bitable_field: "fld".into(),
+            interval_end_field: None,
+            converter: Converter::Direct,
+            option_map: BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+            strip_spaces,
+        };
+        let columns = [column("fld", "卡号", &[])];
+        for flag in [true, false] {
+            let record = map_record(9, &widget(flag), &columns);
+            assert_eq!(
+                record
+                    .optional::<bool>("strip_spaces")
+                    .unwrap_or_else(|error| panic!("{error}")),
+                Some(flag)
+            );
         }
     }
 
@@ -2110,6 +2150,7 @@ mod tests {
                 bitable_field: "field".into(),
                 interval_end_field: None,
                 option_source_key: Some(source),
+                strip_spaces: None,
             }];
             assert!(matches!(
                 match_fields(form, &[column("field", "备注", &[])], Some(&maps)),

@@ -182,16 +182,55 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
 
 pub(super) async fn handle(
     ctx: ActionContext,
-    input: UpdateConfigInput,
+    mut input: UpdateConfigInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+
+    // 映射级开关的「省略 = 沿用旧值」合并。
+    //
+    // `maps` 是全量替换：旧控制台/已打开的旧页面不会发送 `strip_spaces`，若把
+    // `None` 直接当 `false`，编辑一次配置就会把已开启的开关静默复位。显式
+    // `Some(false)` 仍然表示关闭——前端在编辑态始终发送明确布尔值。
+    //
+    // 继承键是 **(widget_id, bitable_field)**：同一控件的来源列被换掉时不能把
+    // 旧开关套到新列（例如从备注列换到地址列），否则会静默粘连地址。
+    let inherited = input
+        .maps
+        .as_ref()
+        .map(|maps| {
+            maps.iter()
+                .filter(|map| map.strip_spaces.is_none())
+                .map(|map| (map.widget_id.clone(), map.bitable_field.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(maps) = input.maps.as_mut() {
+        let stored = context
+            .approval_field_maps()
+            .query()
+            .select_fields(&["widget_id", "bitable_field", "strip_spaces"])?
+            .where_eq("config_id", serde_json::json!(input.config_id))?
+            .all()
+            .await?;
+        let mut previous = std::collections::BTreeMap::new();
+        for row in stored {
+            previous.insert(
+                (
+                    row.require::<String>("widget_id")?,
+                    row.require::<String>("bitable_field")?,
+                ),
+                row.optional::<bool>("strip_spaces")?,
+            );
+        }
+        merge_strip_spaces(maps, &previous);
+    }
 
     let column_updates = input.has_column_updates();
 
     // 飞书元数据校验（字段映射、六个可选回填列与批量范围列）在事务外完成，
     // 避免网络请求占用数据库事务。
-    let (plan, columns) = if input.maps.is_some() || column_updates {
+    let (mut plan, columns) = if input.maps.is_some() || column_updates {
         let coordinates = context
             .approval_configs()
             .query()
@@ -443,22 +482,46 @@ pub(super) async fn handle(
         }
 
         let old_maps_count = if plan.is_some() {
+            // 锁内重读：事务外那次合并只用于 build_plan 校验（其间可能打飞书
+            // 接口，耗时数秒）。并发保存时旧值可能已变，落库前必须以锁内读到
+            // 的最新值为准，否则后保存者会把先保存者的显式关闭覆盖回旧值。
             let maps = context
                 .approval_field_maps()
                 .query()
-                .select_fields(&["widget_id", "bitable_field"])?
+                .select_fields(&["widget_id", "bitable_field", "strip_spaces"])?
                 .where_eq("config_id", serde_json::json!(input.config_id))?
                 .all_in_tx(&mut transaction)
                 .await?;
+            let mut latest = std::collections::BTreeMap::new();
+            for row in &maps {
+                latest.insert(
+                    (
+                        row.require::<String>("widget_id")?,
+                        row.require::<String>("bitable_field")?,
+                    ),
+                    row.optional::<bool>("strip_spaces")?,
+                );
+            }
+            if let Some(plan) = plan.as_mut() {
+                apply_latest_strip_spaces(&mut plan.widgets, &inherited, &latest);
+            }
+            let old_strip_count = latest
+                .values()
+                .filter(|value| **value == Some(true))
+                .count();
             context
                 .approval_field_maps()
                 .query()
                 .where_eq("config_id", serde_json::json!(input.config_id))?
                 .delete_in_tx(&mut transaction)
                 .await?;
-            Some(maps.len())
+            Some((maps.len(), old_strip_count))
         } else {
             None
+        };
+        let (old_maps_count, old_strip_count) = match old_maps_count {
+            Some((maps, strip)) => (Some(maps), Some(strip)),
+            None => (None, None),
         };
         if let Some(plan) = &plan {
             insert_maps(&context, &mut transaction, input.config_id, plan).await?;
@@ -474,6 +537,7 @@ pub(super) async fn handle(
                 old_enabled,
                 &old_timezone,
                 old_maps_count,
+                old_strip_count,
                 old_aggregate,
             )?),
             Some(config_audit_summary(
@@ -481,6 +545,12 @@ pub(super) async fn handle(
                 after_enabled,
                 &after_timezone,
                 plan.as_ref().map(|p| p.widgets.len()),
+                plan.as_ref().map(|p| {
+                    p.widgets
+                        .iter()
+                        .filter(|widget| widget.strip_spaces)
+                        .count()
+                }),
                 after_aggregate,
             )?),
         )?;
@@ -494,19 +564,57 @@ pub(super) async fn handle(
     ApiResponse::success(value, "配置已更新")
 }
 
+/// 映射级开关的「省略 = 沿用旧值」合并。
+///
+/// 只对 `None` 生效：显式 `Some(false)` 必须保留（那是用户取消勾选）。
+/// 键是 `(widget_id, bitable_field)`：来源列变了就不继承旧开关。
+fn merge_strip_spaces(
+    maps: &mut [crate::addon::feishu::domain::approval_match::FieldMapping],
+    previous: &std::collections::BTreeMap<(String, String), Option<bool>>,
+) {
+    for map in maps.iter_mut() {
+        if map.strip_spaces.is_none() {
+            map.strip_spaces = previous
+                .get(&(map.widget_id.clone(), map.bitable_field.clone()))
+                .copied()
+                .flatten();
+        }
+    }
+}
+
+/// 用锁内读到的最新库值覆盖「请求中省略」的映射开关（并发保存的兜底）。
+///
+/// `build_plan` 在事务外构建，其间可能已有人保存过配置；落库前必须以锁内
+/// 值为准，但只覆盖请求里本来就省略的 `(widget, 列)`，显式值不动。
+fn apply_latest_strip_spaces(
+    widgets: &mut [crate::addon::feishu::domain::approval_convert::WidgetMap],
+    inherited: &std::collections::BTreeSet<(String, String)>,
+    latest: &std::collections::BTreeMap<(String, String), Option<bool>>,
+) {
+    for widget in widgets {
+        let key = (widget.widget_id.clone(), widget.bitable_field.clone());
+        if inherited.contains(&key) {
+            widget.strip_spaces = latest.get(&key).copied().flatten().unwrap_or(false);
+        }
+    }
+}
+
 fn config_audit_summary(
     title: &str,
     enabled: bool,
     base_timezone: &str,
     maps_count: Option<usize>,
+    strip_spaces_count: Option<usize>,
     aggregate_batch: bool,
 ) -> Result<audit::AuditSummary, BaseError> {
     // 审计摘要禁止嵌套对象；映射明细仍由配置表保存，审计记录数量即可。
+    // `strip_spaces_count` 让「谁把哪个配置的多少个字段开了去空白」可追溯。
     audit::summary([
         ("title", serde_json::json!(title)),
         ("enabled", serde_json::json!(enabled)),
         ("base_timezone", serde_json::json!(base_timezone)),
         ("maps_count", serde_json::json!(maps_count)),
+        ("strip_spaces_count", serde_json::json!(strip_spaces_count)),
         ("aggregate_batch", serde_json::json!(aggregate_batch)),
     ])
 }
@@ -514,20 +622,92 @@ fn config_audit_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::feishu::domain::approval_match::FieldMapping;
+
+    fn strip_mapping(widget: &str, field: &str, strip_spaces: Option<bool>) -> FieldMapping {
+        FieldMapping {
+            widget_id: widget.to_string(),
+            bitable_field: field.to_string(),
+            interval_end_field: None,
+            option_source_key: None,
+            strip_spaces,
+        }
+    }
+
+    #[test]
+    fn strip_spaces_omitted_inherits_and_explicit_false_closes() {
+        // `maps` 是全量替换：旧控制台省略新键时必须沿用旧值，否则编辑一次配置
+        // 就会把已开启的开关静默复位；显式 false 才表示用户取消勾选。
+        let mut maps = vec![
+            strip_mapping("card", "fld_card", None),
+            strip_mapping("note", "fld_note", Some(false)),
+            strip_mapping("new", "fld_new", None),
+        ];
+        let previous = std::collections::BTreeMap::from([
+            (("card".to_string(), "fld_card".to_string()), Some(true)),
+            (("note".to_string(), "fld_note".to_string()), Some(true)),
+        ]);
+        merge_strip_spaces(&mut maps, &previous);
+        assert_eq!(maps[0].strip_spaces, Some(true), "省略 = 沿用旧值");
+        assert_eq!(maps[1].strip_spaces, Some(false), "显式 false = 关闭");
+        assert_eq!(
+            maps[2].strip_spaces, None,
+            "库里没有旧值时保持省略（新建按关闭处理）"
+        );
+
+        // 同一控件换了来源列：旧开关不得套到新列（卡号列 → 地址列会粘连地址）。
+        let mut moved = vec![strip_mapping("card", "fld_address", None)];
+        merge_strip_spaces(&mut moved, &previous);
+        assert_eq!(moved[0].strip_spaces, None, "列变化不继承");
+    }
+
+    #[test]
+    fn latest_locked_values_override_only_omitted_mappings() {
+        use crate::addon::feishu::domain::approval_convert::{Converter, WidgetMap};
+        let widget = |id: &str, field: &str, strip_spaces: bool| WidgetMap {
+            widget_id: id.to_string(),
+            widget_type: "input".to_string(),
+            required: false,
+            bitable_field: field.to_string(),
+            interval_end_field: None,
+            converter: Converter::Direct,
+            option_map: std::collections::BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+            strip_spaces,
+        };
+        let mut widgets = vec![
+            widget("card", "fld_card", false),
+            widget("note", "fld_note", true),
+        ];
+        let inherited =
+            std::collections::BTreeSet::from([("card".to_string(), "fld_card".to_string())]);
+        let latest = std::collections::BTreeMap::from([
+            (("card".to_string(), "fld_card".to_string()), Some(true)),
+            (("note".to_string(), "fld_note".to_string()), Some(false)),
+        ]);
+        apply_latest_strip_spaces(&mut widgets, &inherited, &latest);
+        assert!(widgets[0].strip_spaces, "省略项以锁内最新值为准");
+        assert!(
+            widgets[1].strip_spaces,
+            "显式值不被锁内值覆盖（note 不在 inherited 集合）"
+        );
+    }
 
     #[test]
     fn mapping_updates_have_valid_audit_summaries() -> Result<(), BaseError> {
-        for (count, aggregate_batch) in [
-            (None, false),
-            (Some(0), false),
-            (Some(13), true),
-            (Some(1000), true),
+        for (count, strip_count, aggregate_batch) in [
+            (None, None, false),
+            (Some(0), Some(0), false),
+            (Some(13), Some(2), true),
+            (Some(1000), Some(7), true),
         ] {
             let summary = config_audit_summary(
                 "技术测试专用",
                 true,
                 "Asia/Shanghai",
                 count,
+                strip_count,
                 aggregate_batch,
             )?;
             assert_eq!(
@@ -537,6 +717,7 @@ mod tests {
                     "enabled": true,
                     "base_timezone": "Asia/Shanghai",
                     "maps_count": count,
+                    "strip_spaces_count": strip_count,
                     "aggregate_batch": aggregate_batch,
                 })
             );

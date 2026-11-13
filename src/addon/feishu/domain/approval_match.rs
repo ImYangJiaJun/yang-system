@@ -574,6 +574,16 @@ pub(crate) struct FieldMapping {
     /// 外部选项来源的稳定标识；省略时按控件名称自动识别。
     #[serde(default)]
     pub(crate) option_source_key: Option<String>,
+    /// 派发时删除该控件值的全部 Unicode 空白；只允许单行文本（`input`）。
+    ///
+    /// 三个值的语义不同，不要互相替代：
+    /// - `Some(true)`：开启；
+    /// - `Some(false)`：显式关闭；
+    /// - `None`：新建配置时按关闭处理；更新配置时 **沿用该控件库内现值**
+    ///   （`update_config` 在删除旧映射前合并）——`maps` 是全量替换，旧控制台
+    ///   不会发送新键，把 `None` 直接当 false 会静默复位已开启的开关。
+    #[serde(default)]
+    pub(crate) strip_spaces: Option<bool>,
 }
 
 /// 这类控件会不会出现在配置里（明细 / 控件组父级只作分组展示，仍然出现）。
@@ -665,7 +675,23 @@ pub(crate) fn match_fields(
     let flat = mapping_widgets(form);
     let mut selected = BTreeMap::new();
     let mut selected_end: BTreeMap<&str, &str> = BTreeMap::new();
+    // 只登记显式开启的映射；未出现（含 `Some(false)` / `None`）一律按关闭，
+    // 与派发期 `WidgetMap.strip_spaces` 的默认值一致。
+    let mut selected_strip: BTreeMap<&str, bool> = BTreeMap::new();
     for map in maps.into_iter().flatten() {
+        if map.strip_spaces == Some(true) {
+            // 控件不存在已在下面报「审批控件不存在」，这里只处理能找到的控件。
+            if let Some((widget, _)) = flat.iter().find(|(widget, _)| widget.id == map.widget_id) {
+                if !widget_rules::supports_strip_spaces(&widget.r#type) {
+                    errors.push(MatchError::InvalidMapping(format!(
+                        "控件「{}」不是单行文本控件，不能配置去除空白",
+                        map.widget_id
+                    )));
+                } else {
+                    selected_strip.insert(map.widget_id.as_str(), true);
+                }
+            }
+        }
         if let Some(source) = &map.option_source_key {
             if source.trim().is_empty() || source.len() > 64 {
                 errors.push(MatchError::InvalidMapping(format!(
@@ -888,6 +914,11 @@ pub(crate) fn match_fields(
             interval_end_field: selected_end
                 .get(widget.id.as_str())
                 .map(|field| (*field).to_string()),
+            // 自动按名匹配（`maps=None`）不经过显式映射，恒为关闭。
+            strip_spaces: selected_strip
+                .get(widget.id.as_str())
+                .copied()
+                .unwrap_or(false),
         });
     }
 
@@ -1155,7 +1186,65 @@ mod tests {
             bitable_field: field.to_string(),
             interval_end_field: None,
             option_source_key: None,
+            strip_spaces: None,
         }
+    }
+
+    #[test]
+    fn strip_spaces_is_validated_and_propagated() {
+        let form = vec![input("卡号", "card", false), fixed_radio("类型", "kind")];
+        let columns = vec![
+            column("卡号", "fld_card", &[]),
+            column("类型", "fld_kind", &["个人", "企业"]),
+        ];
+
+        // 单行文本 + 开启：透传到 WidgetMap；省略即关闭。
+        let outcome = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                FieldMapping {
+                    strip_spaces: Some(true),
+                    ..mapping("card", "fld_card")
+                },
+                mapping("kind", "fld_kind"),
+            ]),
+        );
+        let MatchOutcome::Matched(widgets) = outcome else {
+            panic!("单行文本应允许开启去空白: {outcome:?}");
+        };
+        let card = widgets
+            .iter()
+            .find(|widget| widget.widget_id == "card")
+            .unwrap_or_else(|| panic!("缺少卡号映射"));
+        assert!(card.strip_spaces);
+        let kind = widgets
+            .iter()
+            .find(|widget| widget.widget_id == "kind")
+            .unwrap_or_else(|| panic!("缺少类型映射"));
+        assert!(!kind.strip_spaces, "省略即关闭");
+
+        // 非单行文本开启：配置期一次报全，不留给派发期静默 no-op。
+        let outcome = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                mapping("card", "fld_card"),
+                FieldMapping {
+                    strip_spaces: Some(true),
+                    ..mapping("kind", "fld_kind")
+                },
+            ]),
+        );
+        let MatchOutcome::Invalid(errors) = outcome else {
+            panic!("非单行文本开启必须被拒绝");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("不是单行文本控件")),
+            "{errors:?}"
+        );
     }
 
     /// `linkageWidgetID` 可能带「控件组.子控件」点号前缀，父控件只认最后一段。

@@ -299,6 +299,66 @@ describe("审批配置外部选项绑定", () => {
       });
   });
 
+  it("创建只在开启时发送 strip_spaces，编辑可显式关闭", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: { config_id: 7 } });
+    const maps = [
+      { widgetId: "card", bitableField: "fldCard", stripSpaces: true },
+      { widgetId: "note", bitableField: "fldNote" },
+    ];
+    await createApprovalConfig(
+      {
+        baseToken: "app",
+        tableId: "table",
+        approvalCode: "code",
+        applicantField: "person",
+        backfillField: "serial",
+        baseTimezone: "Asia/Shanghai",
+        maps,
+      },
+      approvalDeps,
+    );
+    await updateApprovalConfig(
+      7,
+      {
+        maps: [
+          { widgetId: "card", bitableField: "fldCard", stripSpaces: false },
+        ],
+      },
+      approvalDeps,
+    );
+    const createBody = calls[0]?.body as {
+      maps: Array<Record<string, unknown>>;
+    };
+    expect(createBody.maps[0]).toMatchObject({ strip_spaces: true });
+    expect(createBody.maps[1]).not.toHaveProperty("strip_spaces");
+    // 更新是整份替换：显式 false 必须发送，才能真正关闭。
+    expect(calls[1]?.body).toMatchObject({
+      maps: [{ widget_id: "card", strip_spaces: false }],
+    });
+  });
+
+  it("列表解析 strip_spaces：缺键按关闭，true 保留", async () => {
+    stubFetch({
+      code: 0,
+      message: "ok",
+      data: {
+        items: [
+          { id: 1, maps: [{ widget_id: "a" }] },
+          { id: 2, maps: [{ widget_id: "b", strip_spaces: true }] },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 10,
+      },
+    });
+    const result = await listApprovalConfigs(
+      { page: 1, pageSize: 10, search: "" },
+      approvalDeps,
+    );
+    expect(result.items[0].maps[0].stripSpaces).toBe(false);
+    expect(result.items[1].maps[0].stripSpaces).toBe(true);
+  });
+
   it("预览提供来源候选，列表读取保存的绑定", async () => {
     stubFetch({
       code: 0,
