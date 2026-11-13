@@ -72,7 +72,7 @@ impl Default for AppSettings {
 }
 
 fn default_app_name() -> String {
-    "yang-system".to_owned()
+    "易行".to_owned()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -2006,7 +2006,7 @@ link_base_url = "http://localhost:5273"
         let settings =
             Settings::parse(raw).unwrap_or_else(|error| panic!("最小配置应解析成功: {error:#}"));
 
-        assert_eq!(settings.app.name, "yang-system");
+        assert_eq!(settings.app.name, "易行");
         assert_eq!(settings.http.bind, "127.0.0.1:8080");
         assert_eq!(settings.http.max_body_bytes, 17 * 1024 * 1024);
         assert_eq!(settings.http.max_json_body_bytes, 16 * 1024 * 1024);

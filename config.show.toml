@@ -9,7 +9,7 @@
 
 [app]
 # 应用名，用于日志与内部标识。不能为空。
-# 默认："yang-system"
+# 默认："易行"
 name = "易行"
 
 # 部署环境：development | test | production。

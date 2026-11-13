@@ -51,7 +51,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 
 | 字段 | 默认值 |
 |---|---|
-| `app.name` | `yang-system` |
+| `app.name` | `易行` |
 | `http.bind` | `127.0.0.1:8080` |
 | `http.max_body_bytes` | `17825792`（17 MiB，包含 multipart 封装） |
 | `http.max_json_body_bytes` | `16777216`（16 MiB，不得超过总请求上限） |
