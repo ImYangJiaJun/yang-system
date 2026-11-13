@@ -4253,6 +4253,38 @@ async fn settle_group(
         .await
         .unwrap_or(false)
     {
+        // 传输层没拿到确认时会把任务改成 review 并禁止自动重放，执行权失效
+        // 只是这个结果的表现；再报「执行权已失效/待重试」会把人引去重复点击。
+        let mut state = None;
+        if let Ok(query) = runner
+            .context
+            .approval_tasks()
+            .query()
+            .select_fields(&["state"])
+        {
+            if let Ok(query) = query.where_eq("id", serde_json::json!(task.id)) {
+                state = query
+                    .optional()
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.optional::<String>("state").ok().flatten());
+            }
+        }
+        if state.as_deref() == Some("review") {
+            tracing::warn!(
+                task_id = task.id,
+                "聚合组创建结果未知，已转人工核查，拒绝通知与结果写回"
+            );
+            return TaskOutcome {
+                result: DispatchResult::Terminal {
+                    message: "创建结果未知，已转人工核查（飞书侧可能已建单，请勿重复点击）".into(),
+                },
+                creator_open_id: None,
+                persisted: true,
+                group_size: Some(member_count),
+            };
+        }
         tracing::warn!(task_id = task.id, "聚合组执行权已失效，拒绝通知与结果写回");
         return TaskOutcome {
             result: DispatchResult::Retryable {

@@ -37,8 +37,14 @@ use super::outbound::{
 };
 use super::tenant_token::{TenantTokenProvider, FEISHU_OPEN_BASE};
 
-/// 创建实例的请求超时（秒）。比拉取宽松：单次调用要写库并触发审批流。
+/// 审批读接口的请求超时（秒）。
 pub(crate) const APPROVAL_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// 创建实例的请求超时（秒）。
+///
+/// 聚合批量一次写上百条明细，飞书侧建单耗时经常超过 20 秒；超时会把
+/// 「已经建单、只是响应没回来」误判成结果未知并转人工核查。
+pub(crate) const APPROVAL_CREATE_TIMEOUT_SECS: u64 = 60;
 
 /// 路径段长度上限，与 `bitable` 同源。
 const MAX_PATH_SEGMENT_LEN: usize = 128;
@@ -145,7 +151,7 @@ pub(crate) async fn create_instance(
         json_body: Some(body),
         raw_body: None,
         binary_limit: None,
-        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        timeout_secs: Some(APPROVAL_CREATE_TIMEOUT_SECS),
         // **必须为 true**：唯一依据是 uuid 的服务端幂等（官方明文「同一个 uuid
         // 只能用于创建一个审批实例，如果冲突则创建失败并返回错误码 60012」）。
         //
