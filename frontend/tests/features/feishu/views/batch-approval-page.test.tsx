@@ -30,8 +30,15 @@ vi.mock("pdfjs-dist", () => {
   };
 });
 
-// Ant Design 的表格在 jsdom 中首屏渲染较慢（rc-table + CSS-in-JS），单测给足时间。
-vi.setConfig({ testTimeout: 15_000 });
+vi.mock("docx-preview", () => ({
+  renderAsync: vi.fn(async (_blob: Blob, container: HTMLElement) => {
+    container.textContent = "Word 文档正文";
+  }),
+}));
+
+// Ant Design 的表格在 jsdom 中首屏渲染较慢（rc-table + CSS-in-JS），
+// 全量测试并行时更慢；单测给足时间，避免偶发超时。
+vi.setConfig({ testTimeout: 30_000 });
 
 /// 批量审批页：分组、可操作性、动作确认、job 轮询、详情与重新授权引导。
 
@@ -307,7 +314,7 @@ describe("BatchApprovalPage", () => {
       await screen.findByRole(
         "heading",
         { name: "批量审批" },
-        { timeout: 15_000 },
+        { timeout: 30_000 },
       ),
     ).toBeInTheDocument();
     expect(await screen.findByText("报销单 A")).toBeInTheDocument();
@@ -847,6 +854,45 @@ describe("BatchApprovalPage", () => {
     expect(await within(dialog).findByText("差旅")).toBeInTheDocument();
     expect(within(dialog).getByText("金额")).toBeInTheDocument();
     expect(within(dialog).getByText("100")).toBeInTheDocument();
+  });
+
+  it("Word 附件在弹窗内渲染，旧版 doc 提示下载", async () => {
+    const attachmentTask = {
+      ...TASKS[0],
+      form_fields: [
+        {
+          id: "attachments",
+          name: "附件",
+          value: [
+            "https://files.example.com/合同.docx",
+            "https://files.example.com/旧合同.doc",
+          ],
+          field_type: "attachmentV2",
+          ext: "'合同.docx','旧合同.doc'",
+        },
+      ],
+    };
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: { tasks: [attachmentTask], truncated: false },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "预览 合同.docx" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("Word 文档正文")).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "下一个附件" }),
+    );
+    expect(
+      await within(dialog).findByText(/旧版 \.doc 暂不支持在线预览/),
+    ).toBeInTheDocument();
   });
 
   it("凭证失效时显示重新授权入口", async () => {

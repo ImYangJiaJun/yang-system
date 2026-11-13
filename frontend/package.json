@@ -37,6 +37,7 @@
     "antd": "6.7.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "docx-preview": "0.4.1",
     "lucide-react": "^1.40.0",
     "pdfjs-dist": "^6.5.438",
     "qrcode": "^1.5.4",

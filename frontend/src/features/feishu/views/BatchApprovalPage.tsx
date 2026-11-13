@@ -181,7 +181,7 @@ function fieldValueText(value: unknown): string {
   return String(value);
 }
 
-type AttachmentKind = "image" | "pdf" | "office" | "other";
+type AttachmentKind = "image" | "pdf" | "office" | "word" | "other";
 
 type AttachmentFile = {
   name: string;
@@ -266,6 +266,7 @@ function fileKind(name: string, url: string): AttachmentKind {
   }
   if (extension === "pdf") return "pdf";
   if (extension && ["xls", "xlsx", "csv"].includes(extension)) return "office";
+  if (extension && ["doc", "docx"].includes(extension)) return "word";
   return "other";
 }
 
@@ -431,6 +432,49 @@ function SpreadsheetPreview({ blob }: { blob: Blob }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function WordPreview({ blob }: { blob: Blob }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let cancelled = false;
+    container.innerHTML = "";
+    setLoading(true);
+    setError("");
+    void import("docx-preview")
+      .then(({ renderAsync }) =>
+        renderAsync(blob, container, undefined, {
+          inWrapper: true,
+          ignoreHeight: true,
+          breakPages: true,
+        }),
+      )
+      .then(() => {
+        if (!cancelled) setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError("Word 文档解析失败，请下载后查看。");
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      container.innerHTML = "";
+    };
+  }, [blob]);
+
+  return (
+    <div className="bg-muted/30 min-h-0 flex-1 overflow-auto rounded border p-3">
+      {loading && <Skeleton className="h-64 w-full" />}
+      {error && <p className="text-destructive text-sm">{error}</p>}
+      <div ref={containerRef} className="docx-preview bg-white" />
     </div>
   );
 }
@@ -703,6 +747,14 @@ function AttachmentPreview({
           <PdfPreview blob={blob} />
         ) : file.kind === "office" ? (
           <SpreadsheetPreview blob={blob} />
+        ) : file.kind === "word" ? (
+          /\.doc$/i.test(file.name) ? (
+            <p className="text-muted-foreground text-sm">
+              旧版 .doc 暂不支持在线预览，请下载后在 Word 中查看。
+            </p>
+          ) : (
+            <WordPreview blob={blob} />
+          )
         ) : (
           <p className="text-muted-foreground text-sm">
             该格式不支持在线预览。
@@ -756,7 +808,8 @@ function AttachmentCell({ files }: { files: AttachmentFile[] }) {
           </span>
           {(file.kind === "image" ||
             file.kind === "pdf" ||
-            file.kind === "office") && (
+            file.kind === "office" ||
+            file.kind === "word") && (
             <Button
               type="button"
               variant="link"
