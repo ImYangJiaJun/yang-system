@@ -180,6 +180,13 @@ fn retry(message: &str) -> OutboundFailure {
     }
 }
 
+/// 搬运一个成员的全部媒体文件。
+///
+/// `cache` 是**跨成员、跨轮次**的「源文件 token → 审批文件 code」映射：
+/// 同一个文件在多行出现时只上传一次；聚合组重试/重启时复用已上传的 code，
+/// 不再把几十分钟的下载上传重做一遍（2026-11-13：193 条明细跑了 35 分钟后
+/// 因租约过期放弃，重启后全部重来）。单条派发传一个空 map 即可。
+#[allow(clippy::too_many_arguments)] // 8 个：调用方按依赖逐个平铺；收结构体只是挪字段。
 pub(crate) async fn transfer(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
@@ -188,6 +195,7 @@ pub(crate) async fn transfer(
     record_id: &str,
     widgets: &[WidgetMap],
     cells: &Map<String, Value>,
+    cache: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, Vec<String>>, OutboundFailure> {
     let mut codes = BTreeMap::new();
     for widget in widgets.iter().filter(|w| is_media(&w.widget_type)) {
@@ -196,6 +204,15 @@ pub(crate) async fn transfer(
         let limit = max_upload_bytes(&widget.widget_type);
         let mut uploaded = Vec::new();
         for file in files {
+            // 已搬运过同一个源文件：复用审批文件 code，跳过下载与上传。
+            // key 带上上传类型：同一个 token 理论上可能以 image/attachment 两种
+            // 形态出现，两种 code 不能混用。
+            let cache_key = format!("{file_type}:{}", file.file_token);
+            if let Some(code) = cache.get(&cache_key) {
+                metrics::counter!("feishu_approval_attachment_cache_hit_total").increment(1);
+                uploaded.push(code.clone());
+                continue;
+            }
             // 官方下载配额 5 QPS；单条内串行，跨请求仍以服务端 429 退避兜底。
             sleeper.sleep(Duration::from_millis(200)).await;
             let extra = json!({"bitablePerm":{"tableId":coordinates.table_id,"attachments":{&widget.bitable_field:{record_id:[&file.file_token]}}}}).to_string();
@@ -251,6 +268,7 @@ pub(crate) async fn transfer(
                     value.get("code").and_then(Value::as_i64) == Some(0) && !c.trim().is_empty()
                 })
                 .ok_or_else(|| retry("审批附件/图片上传响应缺少成功标记或 file code"))?;
+            cache.insert(cache_key, code.to_string());
             uploaded.push(code.to_string());
         }
         if !uploaded.is_empty() {

@@ -774,6 +774,7 @@ pub(crate) async fn dispatch_one(
 
     let form = if requires_media_transfer(input.widgets) {
         tracing::debug!(stage = "attachments", "开始搬运审批附件/图片");
+        let mut attachment_cache = BTreeMap::new();
         let codes = match approval_attachment::transfer(
             transport,
             sleeper,
@@ -782,6 +783,7 @@ pub(crate) async fn dispatch_one(
             input.record_id,
             &widgets,
             cells,
+            &mut attachment_cache,
         )
         .await
         {
@@ -3472,7 +3474,8 @@ mod tests {
             &COORDINATES,
             "rec001",
             &widgets,
-            &cells
+            &cells,
+            &mut BTreeMap::new()
         )
         .await
         .unwrap_or_else(|e| panic!("{e}"))
@@ -3492,6 +3495,38 @@ mod tests {
         assert_eq!(
             bodies[1].as_ref().unwrap_or_else(|| panic!("缺请求"))["form"],
             "[]"
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_cache_hit_skips_download_and_upload() {
+        // 同一源文件已在上一轮/上一行搬过时，必须直接复用审批 file code：
+        // 重新下载+上传既慢，又会在断点续跑时把几十分钟的工作全部重做。
+        let transport = ScriptedTransport::new(Vec::new());
+        let widgets = [attachment_widget()];
+        let cells = attachment_cells();
+        let mut cache = BTreeMap::new();
+        cache.insert("attachment:TokenA".to_string(), "CODE-A".to_string());
+        cache.insert("attachment:TokenB".to_string(), "CODE-B".to_string());
+        let codes = approval_attachment::transfer(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &COORDINATES,
+            "rec001",
+            &widgets,
+            &cells,
+            &mut cache,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            codes.get("w1"),
+            Some(&vec!["CODE-A".to_string(), "CODE-B".to_string()])
+        );
+        assert!(
+            transport.requests().is_empty(),
+            "命中缓存不应产生任何出站请求"
         );
     }
 

@@ -370,6 +370,49 @@ pub(crate) async fn load_group(
     Ok(row)
 }
 
+/// 读组准备阶段的附件上传缓存（`file_token → 审批文件 code`）。
+///
+/// 缓存是**可丢弃的加速数据**：解析失败/为空都按空缓存继续，不能因为它让整组
+/// 失败。它只用于断点续跑，不参与组身份或表单一致性判定。
+pub(crate) async fn load_prepare_cache(
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    // tenant-boundary: raw-sql feishu-approval-group-prepare-cache-read
+    let raw: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT prepare_cache FROM feishu_approval_group WHERE config_id=? AND group_key=?",
+    )
+    .bind(config_id)
+    .bind(group_key)
+    .fetch_optional(context.approval_groups().pool())
+    .await?;
+    let Some(Some(json)) = raw else {
+        return Ok(Default::default());
+    };
+    Ok(serde_json::from_str(&json).unwrap_or_default())
+}
+
+/// 落组准备阶段的附件上传缓存；每一批成员写一次，重启后从这里续跑。
+pub(crate) async fn save_prepare_cache(
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+    cache: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(cache)?;
+    // tenant-boundary: raw-sql feishu-approval-group-prepare-cache-write
+    sqlx::query(
+        "UPDATE feishu_approval_group SET prepare_cache=?,updated_at=UNIX_TIMESTAMP() WHERE config_id=? AND group_key=?",
+    )
+    .bind(json)
+    .bind(config_id)
+    .bind(group_key)
+    .execute(context.approval_groups().pool())
+    .await?;
+    Ok(())
+}
+
 /// 按实例编码读组行：事件 worker **先查组表**，避免 leader 行截获组实例的事件。
 pub(crate) async fn load_group_by_instance(
     context: &FeishuContext,

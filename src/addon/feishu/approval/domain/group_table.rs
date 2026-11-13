@@ -4,7 +4,9 @@
 //! `effect_phase` 都只落在这里，leader 任务行只承载执行簿记（租约、认领）。
 //! 设计见 `docs/architecture/2026-10-31-feishu-approval-aggregation-design.md` §4.2。
 
-use yang_base::definition::{FieldName, FieldRef, Int, Key, Str, TableName, TableSpec, Timestamp};
+use yang_base::definition::{
+    FieldName, FieldRef, Int, Key, Str, TableName, TableSpec, Text, Timestamp,
+};
 use yang_base::BaseError;
 
 fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
@@ -61,6 +63,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(128)
                 .filterable(true),
             serial_number => Str::new().title("审批单编号").max_length(64),
+            // 准备阶段的附件上传缓存（JSON：`file_token → 审批文件 code`）。
+            //
+            // 大批量组的准备可能持续几十分钟；重启/重试没有断点时会从第一个成员
+            // 重新下载、重新上传（2026-11-13：193 条明细跑了 35 分钟后因租约过期
+            // 放弃，重启后全部重来）。这份缓存让下一轮直接复用已上传的文件 code。
+            // 只写业务字段，不参与组身份判定。
+            prepare_cache => Text::new().title("准备阶段续跑缓存"),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
         })

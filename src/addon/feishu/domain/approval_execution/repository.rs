@@ -329,6 +329,35 @@ pub(crate) async fn claim_ready(
     Ok(claims)
 }
 
+/// 准备阶段续租：只允许**仍持有有效租约**的当前代执行者顺延。
+///
+/// 聚合组的准备（逐成员读记录、搬附件）可能远超 [`LEASE_SECONDS`]；没有续租时
+/// `begin_group_effect` 的 `lease_until>NOW()` 条件必然失败，组永远提交不了
+/// （2026-11-13 真机：193 条明细准备 35 分钟，create 前被判「执行权已失效」，
+/// 任务无限重认领）。租约过期即返回 `false`，调用方必须放弃本轮，不能把本地
+/// 结果写回。
+///
+/// # 为什么带 `lease_until>NOW()` 条件
+///
+/// 续租不是复活：租约一旦过期，可能已有别的 worker 认领（`generation` 不同），
+/// 这时无条件延长只会制造两个执行者。条件不成立就失败关闭。
+pub(crate) async fn renew_lease(
+    context: &FeishuContext,
+    claim: &TaskClaim,
+) -> anyhow::Result<bool> {
+    // tenant-boundary: raw-sql feishu-approval-execution-renew
+    let result = sqlx::query(
+        "UPDATE feishu_approval_task SET lease_until=UNIX_TIMESTAMP()+?,updated_at=UNIX_TIMESTAMP() WHERE id=? AND worker_id=? AND generation=? AND lease_until>UNIX_TIMESTAMP() AND state<>'review'",
+    )
+    .bind(LEASE_SECONDS)
+    .bind(claim.id)
+    .bind(&claim.owner)
+    .bind(claim.generation)
+    .execute(context.approval_tasks().pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// 副作用开始前与提交前都要检查；失去租约的旧调用只能丢弃本地结果。
 pub(crate) async fn is_owned(context: &FeishuContext, claim: &TaskClaim) -> anyhow::Result<bool> {
     // tenant-boundary: raw-sql feishu-approval-execution-4

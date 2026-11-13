@@ -7,7 +7,7 @@ mod transport;
 pub(crate) use repository::{
     admit, attach_initiator, begin_effect, begin_group_effect, claim_ready, confirm_effect,
     confirm_group_effect, detach_from_group, facts, finish, finish_group, is_owned, mark_unknown,
-    refresh_initiator, reopen, DetachOutcome, TaskClaim,
+    refresh_initiator, renew_lease, reopen, DetachOutcome, TaskClaim,
 };
 // `GroupExecutionTransport` 由 worker 的组处理接入（Task 9）；先随组派发落地。
 #[allow(unused_imports)]

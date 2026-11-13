@@ -134,6 +134,16 @@ const PROGRESS_WATCH_INTERVAL: Duration = Duration::from_secs(30);
 /// 之间只有秒级；3 分钟没有推进已经不是慢，而是卡在某个 await 上。
 const PROGRESS_STALL_AFTER: Duration = Duration::from_secs(180);
 
+/// 聚合组准备阶段每处理这么多成员，落一次检查点：
+/// 顺延执行租约、推进心跳、持久化附件上传缓存。
+///
+/// 193 条明细的准备可能持续几十分钟，必须远小于 `LEASE_SECONDS`（300 秒）——
+/// 2026-11-13 真机：整组准备 35 分钟，创建前被判「执行权已失效」，任务无限重认领。
+const GROUP_PREPARE_CHECKPOINT_EVERY: usize = 20;
+
+/// 聚合组准备阶段的进度通知最小间隔；避免每个检查点都发一条 IM。
+const GROUP_PREPARE_NOTIFY_INTERVAL: Duration = Duration::from_secs(120);
+
 /// 上一轮处理到的记录游标。
 ///
 /// # 为什么需要它
@@ -3524,7 +3534,66 @@ async fn run_group_dispatch(
     let mut signature_hashes: Vec<String> = Vec::with_capacity(members.len());
     // 旧口径摘要（含顶层 formula），只用于升级兼容（见 verify_group_signature）。
     let mut legacy_signature_hashes: Vec<String> = Vec::with_capacity(members.len());
-    for member in members.iter() {
+
+    // 成员记录预取：`records/batch_get` 单次最多 100 个 id（`bitable.rs` 的
+    // `ensure_ids`）。193 条明细 = 2 次请求；逐条取会多出 193 次 RTT。
+    // 任意一批失败就整体退回逐条读——错误处置（摘成员/暂停）是按成员粒度设计的，
+    // 不能因为一条坏记录改变整批的处置语义。
+    const RECORD_BATCH_LIMIT: usize = 100;
+    let mut prefetched: std::collections::HashMap<String, bitable::RecordItem> =
+        std::collections::HashMap::with_capacity(members.len());
+    let mut prefetch_failed = false;
+    let member_records: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.optional::<String>("record_id").ok().flatten())
+        .collect();
+    for chunk in member_records.chunks(RECORD_BATCH_LIMIT) {
+        match bitable::get_records_by_ids(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            &coordinates,
+            chunk,
+        )
+        .await
+        {
+            Ok(items) => {
+                for item in items {
+                    prefetched.insert(item.record_id.clone(), item);
+                }
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    kind = ?failure.kind,
+                    "聚合组成员记录批量读取失败，退回逐条读取"
+                );
+                prefetch_failed = true;
+                break;
+            }
+        }
+    }
+
+    // 准备阶段的附件上传缓存（源 file_token → 审批文件 code）。断点续跑用：
+    // 没有它，重启/重试会把已经搬过的文件全部重新下载、重新上传。
+    let mut attachment_cache: std::collections::BTreeMap<String, String> =
+        if instance_code.is_none() && task.effect_phase == "ready" {
+            approval_aggregation::repository::load_prepare_cache(
+                &runner.context,
+                task.config_id,
+                group_key,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "聚合组准备缓存读取失败，按空缓存继续");
+                Default::default()
+            })
+        } else {
+            Default::default()
+        };
+    let prepare_started = std::time::Instant::now();
+    let mut last_progress_notified = std::time::Instant::now();
+
+    for (index, member) in members.iter().enumerate() {
         let task_id: i64 = match member.require("id") {
             Ok(id) => id,
             Err(error) => {
@@ -3551,14 +3620,22 @@ async fn run_group_dispatch(
                 .await
             }
         };
-        let found = bitable::get_records_by_ids(
-            runner.transport(),
-            runner.sleeper.as_ref(),
-            &runner.tokens,
-            &coordinates,
-            std::slice::from_ref(&record_id),
-        )
-        .await;
+        let found = if prefetch_failed {
+            bitable::get_records_by_ids(
+                runner.transport(),
+                runner.sleeper.as_ref(),
+                &runner.tokens,
+                &coordinates,
+                std::slice::from_ref(&record_id),
+            )
+            .await
+        } else {
+            Ok(prefetched
+                .get(&record_id)
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>())
+        };
         let record = match found {
             Ok(items) => items.into_iter().next(),
             Err(failure) => {
@@ -3688,6 +3765,7 @@ async fn run_group_dispatch(
                         &record_id,
                         &widgets,
                         &cells,
+                        &mut attachment_cache,
                     )
                     .await
                     {
@@ -3725,6 +3803,63 @@ async fn run_group_dispatch(
             cells,
             attachment_codes,
         });
+
+        // 检查点：顺延执行租约 + 推进心跳 + 落一次附件缓存。
+        //
+        // 193 条明细的准备可能远超 `LEASE_SECONDS`；不续租就会在 dispatch_group
+        // 的 `begin_group_effect` 处被判「执行权已失效」，整组白跑（2026-11-13
+        // 真机：35 分钟准备完，创建前被拒，任务无限重认领）。
+        let done = index + 1;
+        let total = members.len();
+        if done % GROUP_PREPARE_CHECKPOINT_EVERY == 0 || done == total {
+            runner.heartbeat.mark("group_member", Some(task.id));
+            let renewed = approval_execution::renew_lease(&runner.context, &task.claim).await;
+            if !matches!(renewed, Ok(true)) {
+                match renewed {
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        task_id = task.id,
+                        group_key,
+                        done,
+                        total,
+                        "聚合组准备阶段续租失败，本轮放弃"
+                    ),
+                    _ => tracing::warn!(
+                        task_id = task.id,
+                        group_key,
+                        done,
+                        total,
+                        "聚合组执行权已失效，本轮放弃（下一轮从检查点继续）"
+                    ),
+                }
+                metrics::counter!("feishu_approval_group_prepare_aborted_total").increment(1);
+                return TaskOutcome {
+                    result: DispatchResult::Retryable {
+                        message: "聚合组准备超时，执行权已失效，稍后自动重试".to_string(),
+                    },
+                    creator_open_id: None,
+                    persisted: true,
+                    group_size: Some(member_count),
+                };
+            }
+            if instance_code.is_none() {
+                if let Err(error) = approval_aggregation::repository::save_prepare_cache(
+                    &runner.context,
+                    task.config_id,
+                    group_key,
+                    &attachment_cache,
+                )
+                .await
+                {
+                    tracing::warn!(error = %error, "聚合组准备缓存保存失败");
+                }
+            }
+            metrics::gauge!("feishu_approval_group_prepare_progress").set(done as f64);
+            if last_progress_notified.elapsed() >= GROUP_PREPARE_NOTIFY_INTERVAL {
+                last_progress_notified = std::time::Instant::now();
+                group_progress_notification(runner, task, done, total).await;
+            }
+        }
     }
 
     // 记录被删：已建实例 → 摘出成员并落终态（上面已逐个处理）；未建实例 → 整组暂停。
@@ -3761,6 +3896,10 @@ async fn run_group_dispatch(
             "聚合组处理前摘出了不可读的成员"
         );
     }
+
+    metrics::histogram!("feishu_approval_group_prepare_seconds")
+        .record(prepare_started.elapsed().as_secs_f64());
+    metrics::counter!("feishu_approval_group_members_prepared_total").increment(rows.len() as u64);
 
     let guarded = approval_execution::GroupExecutionTransport {
         inner: runner.transport(),
@@ -4253,6 +4392,44 @@ async fn group_notification(
             );
             false
         }
+    }
+}
+
+/// 聚合组准备阶段的进度反馈：让点击人看见「还在跑、跑到哪了」。
+///
+/// 只在检查点且距上次通知超过 [`GROUP_PREPARE_NOTIFY_INTERVAL`] 时调用；
+/// 发送失败只记日志，不影响准备流程——进度是体验，不是正确性。
+async fn group_progress_notification(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    done: usize,
+    total: usize,
+) {
+    let Some(open_id) = task.applicant_open_id.as_deref() else {
+        return;
+    };
+    let (names, _) = notification_names(runner, task).await;
+    let text = format!(
+        "【批量派发准备中】\n{names}\n已准备 {done}/{total} 条明细，全部完成后会自动提交审批，无需重复点击。"
+    );
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+    let result = crate::addon::feishu::domain::approval_notification::send_feedback(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &recipient,
+        &text,
+        &[],
+    )
+    .await;
+    if !matches!(
+        result.status,
+        crate::addon::feishu::domain::approval_notification::NotificationStatus::Sent
+    ) {
+        tracing::warn!(task_id = task.id, done, total, "批量派发进度通知未送达");
     }
 }
 
