@@ -170,6 +170,40 @@ describe("派发记录页 · 行展开", () => {
     expect(screen.getByText("SN-2026-0001")).toBeInTheDocument();
   });
 
+  it("review/retry 任务可人工重试表单同步", async () => {
+    const calls = stubApprovalApi({
+      requestList: () =>
+        listPage([
+          requestWire({ id: 3, outcome: "accepted", record_id: null }),
+        ]),
+      taskList: () =>
+        listPage([
+          taskWire({
+            form_sync_state: "review",
+            form_sync_error: "bitable_write: 写台账失败",
+          }),
+        ]),
+    });
+    renderRequests();
+    await screen.findAllByText("张三");
+    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
+    const retry = await screen.findByRole("button", {
+      name: "重试任务 1 的表单同步",
+    });
+    await userEvent.click(retry);
+    await waitFor(() => {
+      expect(
+        calls.some(
+          (call) =>
+            call.method === "POST" &&
+            call.url.endsWith(
+              "/api/v1/feishu/approval/tasks/1/form-sync/retry",
+            ),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("批量行展开自动下钻 list_tasks（按 config_id 过滤），展示任务字段", async () => {
     const calls = stubApprovalApi({
       requestList: () => listPage(fourOutcomeRows()),

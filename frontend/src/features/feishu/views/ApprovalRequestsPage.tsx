@@ -12,7 +12,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { hasOperation, useUiCatalog } from "@/engine";
-import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Search } from "lucide-react";
+
+import { useToast } from "@/shared/lib/toast";
 
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
@@ -37,6 +39,7 @@ import {
   APPROVAL_OPERATION_IDS,
   useApprovalRequestList,
   useApprovalTasks,
+  useRetryApprovalFormSync,
 } from "../api";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge, type ToneName } from "../components/StatusBadge";
@@ -106,6 +109,7 @@ export default function ApprovalRequestsPage() {
   const listQuery = useApprovalRequestList(query);
   // 「查看任务」下钻：只在展开行是批量受理（configId 非空）时才发请求。
   const tasksQuery = useApprovalTasks(expanded?.configId ?? null);
+  const retryFormSync = useRetryApprovalFormSync();
 
   const items = useMemo(() => listQuery.data?.items ?? [], [listQuery.data]);
   const total = listQuery.data?.total ?? null;
@@ -240,6 +244,7 @@ export default function ApprovalRequestsPage() {
                     item={item}
                     open={open}
                     tasksQuery={tasksQuery}
+                    retryFormSync={retryFormSync}
                     onToggle={() => toggleExpanded(item)}
                   />
                 );
@@ -267,11 +272,13 @@ function FragmentRow({
   item,
   open,
   tasksQuery,
+  retryFormSync,
   onToggle,
 }: {
   item: ApprovalRequestItem;
   open: boolean;
   tasksQuery: ReturnType<typeof useApprovalTasks>;
+  retryFormSync: ReturnType<typeof useRetryApprovalFormSync>;
   onToggle: () => void;
 }) {
   return (
@@ -349,6 +356,7 @@ function FragmentRow({
                     <TasksTable
                       tasks={tasksQuery.data.items}
                       total={tasksQuery.data.total}
+                      retryFormSync={retryFormSync}
                     />
                   ) : null}
                 </div>
@@ -417,10 +425,21 @@ function formSyncStateLabel(state: string): string {
 function TasksTable({
   tasks,
   total,
+  retryFormSync,
 }: {
   tasks: ApprovalTaskItem[];
   total: number | null;
+  retryFormSync: ReturnType<typeof useRetryApprovalFormSync>;
 }) {
+  const toast = useToast();
+  async function retry(task: ApprovalTaskItem) {
+    try {
+      await retryFormSync.retry(task.id);
+      toast.success(`任务 ${task.id} 的表单同步已重新排队`);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
   return (
     <Table>
       <TableHeader>
@@ -431,6 +450,7 @@ function TasksTable({
           <TableHead>单号</TableHead>
           <TableHead>表单同步</TableHead>
           <TableHead>最近错误</TableHead>
+          <TableHead>操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -459,6 +479,24 @@ function TasksTable({
               title={task.lastError ?? undefined}
             >
               {task.lastError ?? "—"}
+            </TableCell>
+            <TableCell>
+              {retryFormSync.canRetry &&
+              (task.formSyncState === "review" ||
+                task.formSyncState === "retry") ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={retryFormSync.pendingTaskId === task.id}
+                  aria-label={`重试任务 ${task.id} 的表单同步`}
+                  onClick={() => void retry(task)}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  重试
+                </Button>
+              ) : (
+                "—"
+              )}
             </TableCell>
           </TableRow>
         ))}

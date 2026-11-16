@@ -43,6 +43,7 @@ export type ApprovalApiStubOptions = {
   widgets?: Handler;
   requestList?: Handler;
   taskList?: Handler;
+  retryFormSync?: Handler;
   bitableTables?: Handler;
   bitableFields?: Handler;
 };
@@ -58,14 +59,25 @@ function envelope(data: unknown, message = "成功"): Response {
   return jsonResponse({ code: 0, message, data });
 }
 
-function action(operationId: string, method: string, path: string) {
+function action(
+  operationId: string,
+  method: string,
+  path: string,
+  params: Array<{
+    name: string;
+    source: "path" | "body" | "query";
+    required: boolean;
+    title: string;
+    description: string;
+  }> = [],
+) {
   return {
     operation_id: operationId,
     title: operationId,
     description: "",
     method,
     path,
-    params: [],
+    params,
     input_schema: {},
     output_schema: {},
     request_media_type: "json",
@@ -128,6 +140,20 @@ function catalogFor(options: ApprovalApiStubOptions) {
         "feishu.approval.list_widgets",
         "POST",
         "/api/v1/feishu/approval/definitions/widgets",
+      ),
+      action(
+        "feishu.approval.retry_form_sync",
+        "POST",
+        "/api/v1/feishu/approval/tasks/{task_id}/form-sync/retry",
+        [
+          {
+            name: "task_id",
+            source: "path",
+            required: true,
+            title: "任务 ID",
+            description: "",
+          },
+        ],
       ),
     );
   }
@@ -276,6 +302,12 @@ export function taskWire(
     serial_number: "SN-2026-0001",
     attempts: 1,
     last_error: null,
+    form_sync_state: "disabled",
+    form_sync_last_rollback_ms: null,
+    form_synced_at: null,
+    form_sync_next_at: null,
+    form_sync_attempts: 0,
+    form_sync_error: null,
     created_at: 1758000000,
     updated_at: 1758000000,
     ...overrides,
@@ -362,6 +394,15 @@ export function stubApprovalApi(
       }
       if (url.endsWith("/api/v1/feishu/approval/requests/query")) {
         return respond(options.requestList, payload, emptyPage());
+      }
+      if (
+        /\/api\/v1\/feishu\/approval\/tasks\/\d+\/form-sync\/retry$/.test(url)
+      ) {
+        return respond(options.retryFormSync, payload, {
+          task_id: Number(url.match(/tasks\/(\d+)\/form-sync/)?.[1] ?? 0),
+          requeued: true,
+          previous_state: "review",
+        });
       }
       if (url.endsWith("/api/v1/feishu/approval/tasks/query")) {
         return respond(options.taskList, payload, emptyPage());

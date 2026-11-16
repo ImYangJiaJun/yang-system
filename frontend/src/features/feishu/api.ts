@@ -14,6 +14,7 @@
 
 import {
   keepPreviousData,
+  useMutation,
   useQueries,
   useQuery,
   useQueryClient,
@@ -144,6 +145,8 @@ export const APPROVAL_OPERATION_IDS = {
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
   listTasks: "feishu.approval.list_tasks",
+  /// 表单反向同步人工重试（写权限）；只接受 review / retry 状态。
+  retryFormSync: "feishu.approval.retry_form_sync",
   /// 审批事件查询（`terminal_only` 过滤失败终态）。读权限。
   listEvents: "feishu.approval.list_events",
   /// 把失败终态事件重置回待处理队列。写权限；成功事件拒绝重放。
@@ -2919,6 +2922,33 @@ export function useApprovalTasks(
       ),
     staleTime: 15_000,
   });
+}
+
+/// 表单反向同步人工重试：只把 `review` / `retry` 行重新排队，真正的映射与
+/// 写台账仍由 worker 执行；成功后刷新展开行里的任务列表。
+export function useRetryApprovalFormSync() {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: async (taskId: number) => {
+      await invokeFeishuAction(
+        { catalog: catalog.data, session },
+        APPROVAL_OPERATION_IDS.retryFormSync,
+        { task_id: taskId },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: [FEISHU_QUERY_ROOT, "approval-tasks"],
+      });
+    },
+  });
+  return {
+    canRetry: hasOperation(catalog.data, APPROVAL_OPERATION_IDS.retryFormSync),
+    retry: mutation.mutateAsync,
+    pendingTaskId: mutation.isPending ? (mutation.variables ?? null) : null,
+  };
 }
 
 /// 配置页与向导要用的「已绑定目录与会话」的审批写操作入口。
