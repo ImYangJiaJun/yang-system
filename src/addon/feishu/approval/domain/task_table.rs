@@ -194,6 +194,15 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 field_ref(&table_name, "config_id")?,
                 field_ref(&table_name, "record_id")?,
             ],
+        )
+        // 周期对账每 tick 按 `(state, next_at)` 取到期行；没有这条索引就会
+        // 对整张任务表做全表扫描（任务行随派发量线性增长）。
+        .index_named(
+            "idx_feishu_approval_task_form_sync_due",
+            [
+                field_ref(&table_name, "form_sync_state")?,
+                field_ref(&table_name, "form_sync_next_at")?,
+            ],
         ))
 }
 

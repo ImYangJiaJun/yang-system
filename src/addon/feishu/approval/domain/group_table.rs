@@ -116,6 +116,14 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 field_ref(&table_name, "config_id")?,
                 field_ref(&table_name, "group_key")?,
             ],
+        )
+        // 与任务表同口径：周期对账按 `(state, next_at)` 扫到期组行。
+        .index_named(
+            "idx_feishu_approval_group_form_sync_due",
+            [
+                field_ref(&table_name, "form_sync_state")?,
+                field_ref(&table_name, "form_sync_next_at")?,
+            ],
         ))
 }
 
