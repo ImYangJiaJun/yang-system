@@ -143,11 +143,26 @@ export function TableView({
   };
 
   return (
-    <section aria-label={view.title || view.table}>
+    <section
+      aria-label={
+        view.title ||
+        (view.datasource && view.datasource !== "default"
+          ? `${view.datasource}.${view.table}`
+          : view.table)
+      }
+    >
       <header className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold">{view.title || view.table}</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+            {view.datasource && view.datasource !== "default" ? (
+              <span
+                className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+                title="逻辑数据源"
+              >
+                {view.datasource}
+              </span>
+            ) : null}
             共 {query.total} 项 · 支持搜索、筛选、排序和批量处理
           </p>
         </div>

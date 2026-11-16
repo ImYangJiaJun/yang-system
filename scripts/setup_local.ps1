@@ -55,8 +55,8 @@ $nodeVersion = (& node --version).Trim()
 Assert-LastExitCode "无法读取 Node.js 版本。"
 $nodeMajorText = $nodeVersion.TrimStart([char]"v").Split(".")[0]
 $nodeMajor = 0
-if (-not [int]::TryParse($nodeMajorText, [ref]$nodeMajor) -or $nodeMajor -lt 24) {
-    throw "Node.js 版本必须为 24 或更高，当前版本: $nodeVersion"
+if (-not [int]::TryParse($nodeMajorText, [ref]$nodeMajor) -or $nodeMajor -ne 24) {
+    throw "Node.js 版本必须为 24.x（Node 25+ 的全局 Web Storage 会破坏 jsdom 测试环境），当前版本: $nodeVersion"
 }
 
 docker info *> $null
@@ -82,7 +82,7 @@ try {
     Assert-LastExitCode "pnpm 10.33.1 安装失败。"
 
     docker compose -f $composePath up -d --wait
-    Assert-LastExitCode "MySQL 或 Redis 启动失败。"
+    Assert-LastExitCode "MySQL、Redis 或 PostgreSQL 启动失败。"
     Get-Content -Raw -LiteralPath $databaseInitPath |
         docker compose -f $composePath exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"'
     Assert-LastExitCode "本地 MySQL 数据库初始化失败。"

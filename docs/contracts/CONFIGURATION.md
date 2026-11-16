@@ -21,6 +21,8 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `http.max_concurrency` | `YANG_SYSTEM_HTTP_MAX_CONCURRENCY` |
 | `http.max_json_body_bytes` | `YANG_SYSTEM_HTTP_MAX_JSON_BODY_BYTES` |
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
+| `postgres.url` | `YANG_SYSTEM_POSTGRES_URL` |
+| `postgres.datasource` | `YANG_SYSTEM_POSTGRES_DATASOURCE` |
 | `email.password_reset.link_base_url` | `YANG_SYSTEM_EMAIL_PASSWORD_RESET_LINK_BASE_URL` |
 | `token.active_secret` | `YANG_SYSTEM_TOKEN_ACTIVE_SECRET` |
 | `security.trusted_proxy_cidrs` | `YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS` |
@@ -60,6 +62,10 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `mysql.max_connections` / `min_connections` | `20` / `2` |
 | `mysql.connect_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `10` / `600` / `1800` |
 | `mysql.test_before_acquire` | `true` |
+| `postgres.max_connections` / `min_connections` | `20` / `2` |
+| `postgres.connect_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `10` / `600` / `1800` |
+| `postgres.test_before_acquire` | `true` |
+| `postgres.datasource` | `pg_main` |
 | `redis.max_connections` | `20`（`min_connections` 仅为兼容字段，deadpool 0.12 不支持，应用忽略） |
 | `redis.connect_timeout_seconds` / `wait_timeout_seconds` / `idle_timeout_seconds` | `5` / `10` / `300` |
 | `redis.max_lifetime_seconds` / `test_before_acquire` | 仅为兼容字段，deadpool 0.12 不支持，应用忽略 |
@@ -106,6 +112,30 @@ Router 克隆共享，满载立即返回 503；总超时保持 408，取消 Futu
 [{"key_id":"2026-06","secret":"at-least-32-bytes-retiring-secret"}]
 ```
 
+## 多数据源（PostgreSQL）
+
+`[postgres]` 可选；未配置时应用保持单 MySQL 后端。配置后默认源仍是 `[mysql]`，
+PostgreSQL 以 `postgres.datasource`（默认 `pg_main`，不能使用保留名 `default`）
+注册为具名逻辑源。模块与表
+通过 `ModuleSpec::datasource` / `TableSpec::datasource` 绑定到具名源；未声明的表
+继续落在默认源。新建模块可以使用 PG，存量模块继续使用 MySQL，两边并存。
+
+- 表级事务只能落在单一数据源（`ensure_same_source` 强校验）；跨源一致性必须走
+  outbox/saga，框架不提供跨源事务、外键或 JOIN。
+- 启动同步按数据源分组执行，逐源返回结果；某个源失败不会回滚其它源已提交的变更。
+- 同步器在默认 schema 维护 `_yang_schema_binding` 所有权登记表：框架新建的表为
+  `managed`，接管存量表的首次登记为 `adopted`，被框架实际演进后升级为 `managed`。
+  该表名保留，模块不得声明。
+- PostgreSQL 原生枚举通过 `Radio::native_enum("type_name")` 声明；同步器创建缺失
+  类型并追加缺失取值（要求 PostgreSQL 12+）。类型名按当前 schema 解析，必须与
+  表位于同一 schema。既有类型中多于声明的取值不会被删除（应用层校验仍只接受声明值）。
+  从早期 `VARCHAR + CHECK` 表示切换到原生枚举时，需要人工
+  删除旧的隐式 CHECK（同步器只增不删）。部分索引/表达式索引通过
+  `TableSpec::partial_index` / `partial_unique_named` / `expression_index` 声明。
+- 同步器只做附加演进，不删除数据库中的未知表、列、索引或约束；存量自定义类型列
+  可以保留在库中但不声明为字段，或用 `TableSpec::opaque_column("addr", "inet")`
+  显式登记（仅校验已存在且类型匹配，不进入通用 CRUD/UI，框架不会改写它们）。
+
 ## Secret provider
 
 设置 `YANG_SYSTEM_SECRET_DIR` 后，加载器会从该目录读取下列可选 UTF-8
@@ -114,6 +144,7 @@ Router 克隆共享，满载立即返回 503；总超时保持 408，取消 Futu
 | 文件名 | 目标字段 |
 |---|---|
 | `mysql_url` | `mysql.url` |
+| `postgres_url` | `postgres.url` |
 | `redis_url` | `redis.url` |
 | `token_active_secret` | `token.active_secret` |
 | `token_retiring_keys_json` | `token.retiring_keys`（JSON 对象数组） |
@@ -170,9 +201,9 @@ keyring 最多 8 把密钥，`key_id` 必须唯一。生产 Token 强制携带 `
 
 模板在 SMTP 投递器构建时加载一次，修改配置或文件后需重启。非 UTF-8、读取失败、空模板、未知变量、缺少必需变量或变量未闭合会使启动失败；运行期缺少变量时拒绝投递，不发送不完整邮件。
 
-## 服务凭据轮换（MySQL / Redis / SMTP）
+## 服务凭据轮换（MySQL / PostgreSQL / Redis / SMTP）
 
-Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
+Token 与 Step-up keyring 之外的凭据（`mysql.url`、`postgres.url`、`redis.url`、
 `email.smtp.username` / `email.smtp.password`）没有 keyring 机制：新值只在
 **进程启动期**合成一次，不支持热更新。轮换的通用步骤固定为：
 

@@ -4,11 +4,13 @@
 //! 本模块声明。启动时统一预检并同步，不维护版本号、历史 SQL 或 `_migrations` 表。
 
 use std::sync::Arc;
-use yang_base::database::{DatabaseInitializer, SchemaSyncReport};
+use yang_base::database::{sync_table_definitions_grouped_outcomes, SchemaSyncReport};
+use yang_base::datasource::DatasourceId;
 use yang_base::definition::BuiltApp;
 use yang_base::table::{Field, Table, TableDefinition};
 use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
+use yang_db::postgres::{Database as PgDatabase, DatabaseConfig as PgDatabaseConfig};
 use yang_db::{Database, DatabaseConfig};
 
 use crate::config::SecuritySettings;
@@ -78,14 +80,20 @@ pub(crate) async fn ensure_legacy_task_record_index_absent(
 /// 在已经连接的测试或离线作业数据库上应用与应用启动完全相同的声明式 Schema。
 pub async fn sync_with_database(
     database: Database,
-    database_config: DatabaseConfig,
+    _database_config: DatabaseConfig,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<SchemaSyncReport> {
-    let initializer_database = Database::from_pool(database.pool().clone(), database_config)
-        .map_err(anyhow::Error::from)?;
-    let initializer = DatabaseInitializer::new(initializer_database);
     let guard_pool = database.pool().clone();
-    let tools = Arc::new(ToolsBuilder::new().mysql(database).build()?);
+    let mut builder = ToolsBuilder::new().mysql(database);
+    // 测试/离线同步可选接入 PG：设置 YANG_SYSTEM_TEST_POSTGRES_URL 后，
+    // 声明 pg_main 的模块会在同一个入口完成 PG schema 同步。
+    if let Ok(url) = std::env::var("YANG_SYSTEM_TEST_POSTGRES_URL") {
+        let postgres = PgDatabase::connect_with_config(&url, PgDatabaseConfig::default()).await?;
+        let source = std::env::var("YANG_SYSTEM_TEST_POSTGRES_DATASOURCE")
+            .unwrap_or_else(|_| "pg_main".to_string());
+        builder = builder.postgres_named(DatasourceId::new(source)?, postgres);
+    }
+    let tools = Arc::new(builder.build()?);
     let result = async {
         ensure_legacy_task_record_index_absent(&guard_pool)
             .await
@@ -93,10 +101,19 @@ pub async fn sync_with_database(
         let application = crate::app::build_schema_app(Arc::clone(&tools), security)?;
         let definitions = definitions(&application.runtime)?;
         let references = definitions.iter().collect::<Vec<_>>();
-        initializer
-            .sync_table_definitions(&references)
-            .await
-            .map_err(anyhow::Error::from)
+        let outcomes = sync_table_definitions_grouped_outcomes(&tools, &references).await;
+        let mut merged = SchemaSyncReport::default();
+        for (_, outcome) in outcomes {
+            let report = outcome.map_err(anyhow::Error::from)?;
+            merged.tables.extend(report.tables);
+            merged.changes.extend(report.changes);
+            merged.statements.extend(report.statements);
+            merged
+                .deferred_statements
+                .extend(report.deferred_statements);
+            merged.bindings.extend(report.bindings);
+        }
+        Ok(merged)
     }
     .await;
     tools.close().await;

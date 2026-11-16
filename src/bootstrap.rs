@@ -26,10 +26,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use yang_base::database::DatabaseInitializer;
+use yang_base::database::{
+    preflight_table_definitions_grouped_outcomes, sync_table_definitions_grouped_outcomes,
+};
+use yang_base::datasource::DatasourceId;
 use yang_base::http::HttpClient;
 use yang_base::tools::{Tools, ToolsBuilder};
 use yang_base::transport::axum::{serve_listener_with_shutdown, AxumTransportConfig};
+use yang_db::postgres::Database as PgDatabase;
 use yang_db::{Database, RedisClient};
 use yang_runtime::observability::{LogIdentity, TelemetryRuntime};
 use yang_runtime::shutdown::ShutdownBudget;
@@ -132,8 +136,22 @@ async fn run_after_telemetry_initialized(
     let mysql = Database::connect_with_config(&settings.mysql.url, settings.mysql_config())
         .await
         .context("连接 MySQL 失败")?;
-    let initializer_mysql = Database::from_pool(mysql.pool().clone(), settings.mysql_config())
-        .context("构造 schema 初始化数据库失败")?;
+    // 可选的 PG 具名源：新模块可绑定 `pg_main`，旧模块继续使用默认 MySQL。
+    let postgres = match settings.postgres.as_ref() {
+        Some(postgres) => Some(
+            PgDatabase::connect_with_config(&postgres.url, postgres.database_config())
+                .await
+                .context("连接 PostgreSQL 失败")?,
+        ),
+        None => None,
+    };
+    let pg_source = DatasourceId::new(
+        settings
+            .postgres
+            .as_ref()
+            .map_or("pg_main", |postgres| postgres.datasource.as_str()),
+    )
+    .context("构造 PG 数据源名失败")?;
     let cache = RedisClient::connect_with_config(&settings.redis.url, settings.redis_config())
         .await
         .context("连接 Redis 失败")?;
@@ -225,6 +243,10 @@ async fn run_after_telemetry_initialized(
     if let Some(totp) = settings.security.totp.as_ref() {
         tools_builder = tools_builder.config(totp.clone());
     }
+    // 可选的 PG 具名源：默认源仍是 MySQL，旧模块零改动。
+    if let Some(postgres) = postgres {
+        tools_builder = tools_builder.postgres_named(pg_source, postgres);
+    }
     // 飞书集成配置；未配置时飞书 Addon 仍装配（表要参与 Schema 同步），
     // 但对外路由不注册。用 `Arc` 包一层是为了让这个槽位与其它同类型配置区分开
     // （`ToolsBuilder::config` 按具体 Rust 类型索引）。
@@ -236,7 +258,6 @@ async fn run_after_telemetry_initialized(
     run_then_cleanup(
         run_after_tools_created(
             settings,
-            initializer_mysql,
             Arc::clone(&tools),
             shutdown_budget.clone(),
             telemetry,
@@ -278,7 +299,6 @@ fn combine_operation_and_cleanup<T>(
 #[allow(clippy::too_many_arguments)] // 启动期资源与通道按所有权传递，不引入进程级容器。
 async fn run_after_tools_created(
     settings: &Settings,
-    initializer_mysql: Database,
     tools: Arc<Tools>,
     shutdown_budget: ShutdownBudget,
     telemetry: Option<&mut TelemetryRuntime>,
@@ -295,19 +315,32 @@ async fn run_after_tools_created(
     // 旧版全局唯一索引（record_id 单列）会让复制 Base 后的同 record_id 无法在另一
     // 配置下派发，而 schema 同步只增不删——所以在同步/预检之前 fail-closed。
     // 只读冒烟同样 fail-fast：它要证明的正是「这个库能安全跑新版本」。
-    crate::schema::ensure_legacy_task_record_index_absent(initializer_mysql.pool())
+    crate::schema::ensure_legacy_task_record_index_absent(tools.mysql()?.pool())
         .await
         .context("启动前检查旧版审批任务唯一索引失败")?;
-    let initializer = DatabaseInitializer::new(initializer_mysql);
     let definitions =
         crate::schema::definitions(&application.runtime).context("构建完整数据库 schema 失败")?;
     let schema = definitions.iter().collect::<Vec<_>>();
     if mode == StartupMode::ReadOnlySmoke {
-        let report = initializer
-            .preflight_table_definitions(&schema)
-            .await
-            .context("只读 schema 预检失败")?;
-        anyhow::ensure!(report.is_safe(), "只读 schema 预检发现旧数据冲突");
+        let outcomes = preflight_table_definitions_grouped_outcomes(&tools, &schema).await;
+        let mut changes = 0usize;
+        let mut safe = true;
+        for (source, outcome) in &outcomes {
+            match outcome {
+                Ok(report) => {
+                    changes += report.plan.changes.len();
+                    if !report.is_safe() {
+                        safe = false;
+                        tracing::error!(datasource = %source, violations = ?report.violations, "只读 schema 预检发现旧数据冲突");
+                    }
+                }
+                Err(error) => {
+                    safe = false;
+                    tracing::error!(datasource = %source, error = %error, "只读 schema 预检失败");
+                }
+            }
+        }
+        anyhow::ensure!(safe, "只读 schema 预检发现旧数据冲突或数据源不可用");
         let health = tools.health_check().await;
         anyhow::ensure!(health.is_healthy(), "只读冒烟依赖检查失败");
         println!(
@@ -316,25 +349,38 @@ async fn run_after_tools_created(
                 "interface": "yang-system-smoke-v1",
                 "mode": "read_only",
                 "status": "ok",
-                "schema_changes": report.plan.changes.len(),
+                "schema_changes": changes,
             })
         );
         return Ok(());
     }
     let telemetry = telemetry.context("正常启动缺少 telemetry 运行时")?;
-    let report = initializer
-        .sync_table_definitions(&schema)
-        .await
-        .context("启动期同步数据库 schema 失败；请按错误中的表名、约束名和主键修复旧数据后重启")?;
-    tracing::info!(
-        tables = ?report.tables,
-        changes = report.changes.len(),
-        "数据库 schema 同步完成"
-    );
+    let outcomes = sync_table_definitions_grouped_outcomes(&tools, &schema).await;
+    for (source, outcome) in &outcomes {
+        match outcome {
+            Ok(report) => tracing::info!(
+                datasource = %source,
+                tables = ?report.tables,
+                changes = report.changes.len(),
+                bindings = report.bindings.len(),
+                "数据库 schema 同步完成"
+            ),
+            Err(error) => {
+                tracing::error!(datasource = %source, error = %error, "数据库 schema 同步失败")
+            }
+        }
+    }
+    if let Some((source, error)) = outcomes
+        .iter()
+        .find_map(|(source, outcome)| outcome.as_ref().err().map(|error| (source, error)))
+    {
+        return Err(anyhow::anyhow!(
+            "数据源 {source} 同步数据库 schema 失败：{error}；请按错误中的表名、约束名和主键修复旧数据后重启"
+        ));
+    }
     crate::audit::validate_schema(tools.mysql()?.pool())
         .await
         .context("启动期校验高权限审计表失败")?;
-    drop(initializer);
 
     let bind = settings.bind_addr()?;
     let listener = tokio::net::TcpListener::bind(bind)
@@ -806,7 +852,6 @@ mod tests {
                 .connect_with(options.database(&scratch))
                 .await?;
             let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())?;
-            let initializer = Database::from_pool(pool.clone(), DatabaseConfig::default())?;
             let token = TokenManager::new_symmetric(
                 "smoke-test-token-key-0123456789abcdef",
                 jsonwebtoken::Algorithm::HS256,
@@ -825,7 +870,6 @@ mod tests {
             let (_, approvals) = ApprovalDispatchHandle::new();
             let result = run_after_tools_created(
                 &settings,
-                initializer,
                 Arc::clone(&tools),
                 ShutdownBudget::new(Duration::from_secs(1)),
                 None,

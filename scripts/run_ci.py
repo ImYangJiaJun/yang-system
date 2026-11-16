@@ -626,6 +626,34 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "PostgreSQL 模块数据源集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "pg_module_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    # 反向自检发现的历史漏登记：真实 MySQL 上的飞书双身份槽位隔离。
+    Command(
+        "飞书用户令牌身份槽位集成测试",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "addon::feishu::domain::user_token::tests::real_mysql_identity_slots_are_independent",
+            "--",
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 

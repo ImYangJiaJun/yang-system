@@ -126,6 +126,43 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "test_before_acquire",
         Boolean
     ),
+    environment_binding!("YANG_SYSTEM_POSTGRES_URL", "postgres", "url", Text),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_MAX_CONNECTIONS",
+        "postgres",
+        "max_connections",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_MIN_CONNECTIONS",
+        "postgres",
+        "min_connections",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_CONNECT_TIMEOUT_SECONDS",
+        "postgres",
+        "connect_timeout_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_IDLE_TIMEOUT_SECONDS",
+        "postgres",
+        "idle_timeout_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_MAX_LIFETIME_SECONDS",
+        "postgres",
+        "max_lifetime_seconds",
+        OptionalInteger
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_POSTGRES_TEST_BEFORE_ACQUIRE",
+        "postgres",
+        "test_before_acquire",
+        Boolean
+    ),
     environment_binding!("YANG_SYSTEM_REDIS_URL", "redis", "url", Text),
     environment_binding!(
         "YANG_SYSTEM_REDIS_MAX_CONNECTIONS",
@@ -431,6 +468,7 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SecretKey {
     MysqlUrl,
+    PostgresUrl,
     RedisUrl,
     TokenActiveSecret,
     TokenRetiringKeys,
@@ -452,6 +490,7 @@ impl SecretKey {
     fn file_name(self) -> &'static str {
         match self {
             Self::MysqlUrl => "mysql_url",
+            Self::PostgresUrl => "postgres_url",
             Self::RedisUrl => "redis_url",
             Self::TokenActiveSecret => "token_active_secret",
             Self::TokenRetiringKeys => "token_retiring_keys_json",
@@ -473,6 +512,7 @@ impl SecretKey {
 #[cfg(test)]
 const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::MysqlUrl,
+    SecretKey::PostgresUrl,
     SecretKey::RedisUrl,
     SecretKey::TokenActiveSecret,
     SecretKey::TokenRetiringKeys,
@@ -491,6 +531,7 @@ const SECRET_KEYS: &[SecretKey] = &[
 
 const SECRET_BINDINGS: &[SecretBinding] = &[
     SecretBinding::text("mysql_url", "mysql", "url"),
+    SecretBinding::text("postgres_url", "postgres", "url"),
     SecretBinding::text("redis_url", "redis", "url"),
     SecretBinding::text("token_active_secret", "token", "active_secret"),
     SecretBinding::json("token_retiring_keys_json", "token", "retiring_keys"),
