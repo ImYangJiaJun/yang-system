@@ -2382,6 +2382,17 @@ function parseApprovalConfigItem(
     batchScopeField: asNullableString(raw.batch_scope_field),
     batchScopeFieldName: asNullableString(raw.batch_scope_field_name),
     aggregateBatch: raw.aggregate_batch === true,
+    formSyncMode:
+      raw.form_sync_mode === "shadow" || raw.form_sync_mode === "live"
+        ? raw.form_sync_mode
+        : "off",
+    formSyncAllowClear: raw.form_sync_allow_clear === true,
+    formSyncRowKeyWidget: asNullableString(raw.form_sync_row_key_widget),
+    formSyncAggregateDerivedMode:
+      raw.form_sync_aggregate_derived_mode === "all_members" ||
+      raw.form_sync_aggregate_derived_mode === "skip"
+        ? raw.form_sync_aggregate_derived_mode
+        : "leader",
     statusField: asNullableString(raw.status_field),
     flowField: asNullableString(raw.flow_field),
     startTimeField: asNullableString(raw.start_time_field),
@@ -2471,6 +2482,12 @@ function parseApprovalTaskItem(
     serialNumber: asNullableString(raw.serial_number),
     attempts: asNumber(raw.attempts, 0),
     lastError: asNullableString(raw.last_error),
+    formSyncState: asString(raw.form_sync_state) || "disabled",
+    formSyncLastRollbackMs: asNullableNumber(raw.form_sync_last_rollback_ms),
+    formSyncedAt: asNullableNumber(raw.form_synced_at),
+    formSyncNextAt: asNullableNumber(raw.form_sync_next_at),
+    formSyncAttempts: asNumber(raw.form_sync_attempts, 0),
+    formSyncError: asNullableString(raw.form_sync_error),
     createdAt: asNumber(raw.created_at, 0),
     updatedAt: asNumber(raw.updated_at, 0),
   };
@@ -2506,6 +2523,14 @@ export type CreateApprovalConfigInput = {
   batchScopeField?: string;
   /// 同批聚合派发开关；默认关闭（省略等价于 `false`），开启时必须已配范围列。
   aggregateBatch?: boolean;
+  /// 表单反向同步模式；省略 = off。
+  formSyncMode?: "off" | "shadow" | "live";
+  /// 是否允许清空台账字段；省略 = false。
+  formSyncAllowClear?: boolean;
+  /// 聚合明细行键子控件 id；省略 = 未配置。
+  formSyncRowKeyWidget?: string;
+  /// 聚合顶层派生值写入方式；省略 = leader。
+  formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";
   /// 六个可选回填扩展列（field_id 或列名）；留空 = 不回填该列。
   statusField?: string;
   flowField?: string;
@@ -2573,6 +2598,22 @@ export async function createApprovalConfig(
         : {}),
       // 后端 `#[serde(default)] bool`：省略就是关闭，所以只在打开时发。
       ...(input.aggregateBatch === true ? { aggregate_batch: true } : {}),
+      ...(input.formSyncMode && input.formSyncMode !== "off"
+        ? { form_sync_mode: input.formSyncMode }
+        : {}),
+      ...(input.formSyncAllowClear === true
+        ? { form_sync_allow_clear: true }
+        : {}),
+      ...(input.formSyncRowKeyWidget?.trim()
+        ? { form_sync_row_key_widget: input.formSyncRowKeyWidget.trim() }
+        : {}),
+      ...(input.formSyncAggregateDerivedMode &&
+      input.formSyncAggregateDerivedMode !== "leader"
+        ? {
+            form_sync_aggregate_derived_mode:
+              input.formSyncAggregateDerivedMode,
+          }
+        : {}),
       base_timezone: input.baseTimezone.trim(),
       ...extendedBackfillFields(input),
       ...(input.maps === undefined
@@ -2610,6 +2651,14 @@ export type UpdateApprovalConfigPatch = {
   batchScopeField?: string;
   /// 同批聚合派发开关；未给 = 不改。后端把它与「本次修改 + 库内现值」合并校验。
   aggregateBatch?: boolean;
+  /// 表单反向同步模式；未给 = 不改。
+  formSyncMode?: "off" | "shadow" | "live";
+  /// 是否允许清空台账字段；未给 = 不改。
+  formSyncAllowClear?: boolean;
+  /// 聚合明细行键子控件 id；空串 = 清空。
+  formSyncRowKeyWidget?: string;
+  /// 聚合顶层派生值写入方式；未给 = 不改。
+  formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";
   /// 六个可选回填扩展列；未给 = 不改（空串同样不改）。
   statusField?: string;
   flowField?: string;
@@ -2638,6 +2687,15 @@ export async function updateApprovalConfig(
     body.batch_scope_field = patch.batchScopeField.trim();
   if (patch.aggregateBatch !== undefined)
     body.aggregate_batch = patch.aggregateBatch;
+  if (patch.formSyncMode !== undefined)
+    body.form_sync_mode = patch.formSyncMode;
+  if (patch.formSyncAllowClear !== undefined)
+    body.form_sync_allow_clear = patch.formSyncAllowClear;
+  // 空串要发：后端把它当「清空」；省略才是「不改」。
+  if (patch.formSyncRowKeyWidget !== undefined)
+    body.form_sync_row_key_widget = patch.formSyncRowKeyWidget.trim();
+  if (patch.formSyncAggregateDerivedMode !== undefined)
+    body.form_sync_aggregate_derived_mode = patch.formSyncAggregateDerivedMode;
   Object.assign(body, extendedBackfillFields(patch));
   if (patch.maps !== undefined)
     body.maps = patch.maps.map((map) => ({

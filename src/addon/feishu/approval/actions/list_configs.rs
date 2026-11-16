@@ -45,6 +45,10 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "base_timezone",
     "enabled",
     "aggregate_batch",
+    "form_sync_mode",
+    "form_sync_allow_clear",
+    "form_sync_row_key_widget",
+    "form_sync_aggregate_derived_mode",
     "config_key",
     "token_rotated_at",
     "form_snapshot_at",
@@ -162,6 +166,14 @@ pub(super) struct ConfigItem {
     enabled: bool,
     /// 同批聚合派发开关（默认关闭）。
     aggregate_batch: bool,
+    /// 表单反向同步模式：off / shadow / live。
+    form_sync_mode: String,
+    /// 是否允许清空台账字段。
+    form_sync_allow_clear: bool,
+    /// 聚合明细行键子控件 id；空 = 未配置。
+    form_sync_row_key_widget: Option<String>,
+    /// 聚合顶层派生值写入方式：leader / all_members / skip。
+    form_sync_aggregate_derived_mode: String,
     /// 工作流接入用的配置标识（进派发 URL 路径段）；未签发过则为 `None`。
     config_key: Option<String>,
     /// 最近一次轮换/签发访问 Token 的时间（unix 秒）；从未签发过则为 `None`。
@@ -351,6 +363,16 @@ pub(super) async fn handle(
             base_timezone: record.require("base_timezone")?,
             enabled: record.require("enabled")?,
             aggregate_batch: record.require("aggregate_batch")?,
+            form_sync_mode: record
+                .optional::<String>("form_sync_mode")?
+                .unwrap_or_else(|| "off".to_string()),
+            form_sync_allow_clear: record
+                .optional::<bool>("form_sync_allow_clear")?
+                .unwrap_or(false),
+            form_sync_row_key_widget: record.optional::<String>("form_sync_row_key_widget")?,
+            form_sync_aggregate_derived_mode: record
+                .optional::<String>("form_sync_aggregate_derived_mode")?
+                .unwrap_or_else(|| "leader".to_string()),
             config_key: record.optional("config_key")?,
             token_rotated_at: record.optional("token_rotated_at")?,
             form_snapshot_at: record.optional("form_snapshot_at")?,
@@ -471,6 +493,10 @@ mod tests {
             base_timezone: "Asia/Shanghai".to_string(),
             enabled: true,
             aggregate_batch: true,
+            form_sync_mode: "off".to_string(),
+            form_sync_allow_clear: false,
+            form_sync_row_key_widget: None,
+            form_sync_aggregate_derived_mode: "leader".to_string(),
             config_key: Some("cfgkeytest".to_string()),
             token_rotated_at: Some(1_700_000_002),
             form_snapshot_at: Some(1_700_000_000),

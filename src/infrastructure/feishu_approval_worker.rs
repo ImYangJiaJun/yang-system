@@ -68,6 +68,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
     GroupDispatchInput, GroupMemberInput,
 };
 use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
+use crate::addon::feishu::domain::approval_export::form::text_of_value;
 use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
     approval_reference, FeedbackReference, NotificationRecipient, ReceiveIdType,
@@ -1005,6 +1006,8 @@ struct ClaimedTask {
     timezone_offset: FixedOffset,
     widgets: Vec<WidgetMap>,
     form_snapshot: String,
+    /// 聚合明细行键控件 id；建组前把它对应的台账单元格冻结进 `member_row_keys`。
+    form_sync_row_key_widget: Option<String>,
     /// 上一轮处理结论的原因（`feishu_approval_task.last_error`）。
     ///
     /// 通知去重的判据：中间态（waiting / retryable）每轮重扫都会产生**同一个**
@@ -3026,6 +3029,10 @@ async fn load_task(
         timezone_offset,
         widgets,
         form_snapshot,
+        form_sync_row_key_widget: config
+            .optional::<String>("form_sync_row_key_widget")?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         last_error: row.optional("last_error")?,
         existing_serial: row
             .optional::<String>("serial_number")?
@@ -4084,6 +4091,45 @@ async fn run_group_dispatch(
             attachment_codes: row.attachment_codes.clone(),
         })
         .collect();
+    // 冻结反向同步的成员行序：只在第一次创建前写；写失败只降级（同步时回退到
+    // 当前成员顺序），不阻断建单。行键控件配置了时一并冻结每个成员的键值，
+    // 重提后表单明细被重排也能按业务键找回对应台账行。
+    let row_key_field = task
+        .form_sync_row_key_widget
+        .as_deref()
+        .and_then(|widget_id| pooled.iter().find(|widget| widget.widget_id == widget_id))
+        .map(|widget| widget.bitable_field.as_str());
+    if instance_code.is_none() {
+        let snapshot = serde_json::json!({
+            "v": 1,
+            "rows": rows
+                .iter()
+                .map(|row| {
+                    let mut entry = serde_json::json!({ "record_id": row.record_id.as_str() });
+                    if let Some(key) = row_key_field
+                        .and_then(|field| row.cells.get(field))
+                        .map(text_of_value)
+                        .map(|text| text.trim().to_string())
+                        .filter(|text| !text.is_empty())
+                    {
+                        entry["row_key"] = serde_json::json!(key);
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>(),
+        })
+        .to_string();
+        if let Err(error) = approval_aggregation::repository::save_member_row_keys(
+            &runner.context,
+            task.config_id,
+            group_key,
+            &snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %error, group_key, "冻结聚合组成员行序失败");
+        }
+    }
     let result = dispatch_group(
         &guarded,
         runner.sleeper.as_ref(),
@@ -5876,6 +5922,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}")),
             widgets: Vec::new(),
             form_snapshot: String::new(),
+            form_sync_row_key_widget: None,
             last_error: last_error.map(str::to_string),
             existing_serial: None,
             group_id: None,

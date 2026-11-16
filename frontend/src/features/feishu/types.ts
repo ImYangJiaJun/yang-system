@@ -1169,6 +1169,14 @@ export type ApprovalConfigItem = {
   /// 同批聚合派发开关：开启后同一次批量勾选内、除明细外转换值完全一致的记录
   /// 合成一个审批实例（明细每条记录一行）。后端声明必填且默认 `false`。
   aggregateBatch: boolean;
+  /// 表单反向同步模式：off / shadow / live。
+  formSyncMode: "off" | "shadow" | "live";
+  /// 是否允许清空台账字段；P0 确认清空语义前保持关闭。
+  formSyncAllowClear: boolean;
+  /// 聚合明细行键子控件 id；空 = 按成员快照下标匹配。
+  formSyncRowKeyWidget?: string | null;
+  /// 聚合顶层派生值（公式求和/附件并集/多选并集）写入方式。
+  formSyncAggregateDerivedMode: "leader" | "all_members" | "skip";
   /// 六个可选回填扩展列（设计 §5.1）：存目标列 `field_id`，空 = 不回填该列。
   /// 后端 `list_configs` 尚未投影这六列时为 null，等其落地自然填充。
   statusField?: string | null;
@@ -1305,6 +1313,18 @@ export type ApprovalTaskItem = {
   serialNumber: string | null;
   attempts: number;
   lastError: string | null;
+  /// 表单反向同步状态：disabled / awaiting_resubmit / observed / synced / retry / review / closed。
+  formSyncState: string;
+  /// 最近一次「退回给发起人」的毫秒时间。
+  formSyncLastRollbackMs: number | null;
+  /// 最近一次表单同步时间（unix 秒）。
+  formSyncedAt: number | null;
+  /// 下次表单同步时间（unix 秒）。
+  formSyncNextAt: number | null;
+  /// 表单同步已尝试次数。
+  formSyncAttempts: number;
+  /// 表单同步错误（只含结果码与说明，不含表单值）。
+  formSyncError: string | null;
   createdAt: number;
   updatedAt: number;
 };

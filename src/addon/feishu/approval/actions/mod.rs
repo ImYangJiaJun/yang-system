@@ -38,6 +38,7 @@ pub(super) mod oauth_callback;
 pub(super) mod oauth_status;
 pub(super) mod refresh_names;
 pub(super) mod retry_event;
+pub(super) mod retry_form_sync;
 pub(super) mod reveal_config_token;
 pub(super) mod rotate_config_token;
 pub(super) mod update_config;
@@ -70,6 +71,7 @@ pub(super) fn register_all(
     // 事件排查与人工重试只读写本库，不打飞书，因此不过 `can_pull()` 门禁。
     let module = list_events::register(module, Arc::clone(&context));
     let module = retry_event::register(module, Arc::clone(&context));
+    let module = retry_form_sync::register(module, Arc::clone(&context));
     // 飞书用户身份（OAuth）：状态与授权链接是控制台 Action，无条件注册
     // （授权链接在缺配置时按业务码 50302 失败，而不是让按钮凭空消失）。
     let module = oauth_status::register(module, Arc::clone(&context));

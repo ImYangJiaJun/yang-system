@@ -247,6 +247,25 @@ export default function ApprovalConfigsPage() {
       setPending(false);
     }
   }
+  /// 审批表单反向同步设置：同样走 `update_config`，成功后回读详情。
+  async function changeFormSync(patch: {
+    formSyncMode?: "off" | "shadow" | "live";
+    formSyncAllowClear?: boolean;
+    formSyncRowKeyWidget?: string;
+    formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";
+  }) {
+    if (!detail) return;
+    setPending(true);
+    try {
+      await actions.updateConfig(detail.id, patch);
+      toast.success("表单回写设置已更新");
+      await refreshList();
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      setPending(false);
+    }
+  }
   const filtered = search.trim() !== "" || status !== "all";
   if (!actions.canRead)
     return (
@@ -295,6 +314,7 @@ export default function ApprovalConfigsPage() {
               onOpenConfig={openDetail}
               onRequests={() => changeParams({ tab: "requests" })}
               onAggregateChange={(next) => void changeAggregate(next)}
+              onFormSyncChange={(patch) => void changeFormSync(patch)}
             />
           )}
         </>

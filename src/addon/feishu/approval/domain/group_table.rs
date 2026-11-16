@@ -5,7 +5,7 @@
 //! 设计见 `docs/architecture/2026-10-31-feishu-approval-aggregation-design.md` §4.2。
 
 use yang_base::definition::{
-    FieldName, FieldRef, Int, Key, Str, TableName, TableSpec, Text, Timestamp,
+    FieldName, FieldRef, Int, Key, Radio, Str, TableName, TableSpec, Text, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -63,6 +63,42 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(128)
                 .filterable(true),
             serial_number => Str::new().title("审批单编号").max_length(64),
+            // --- 表单反向同步 ---
+            //
+            // create 前冻结的成员行序；反向明细按它匹配成员，恢复路径不得重建。
+            member_row_keys => Text::new().title("成员行序快照"),
+            form_sync_state => Radio::<String>::new()
+                .title("表单同步状态")
+                .require(true)
+                .varchar(32)
+                .options([
+                    ("disabled", "未启用"),
+                    ("awaiting_resubmit", "等待重提"),
+                    ("observed", "已观察"),
+                    ("synced", "已同步"),
+                    ("retry", "重试中"),
+                    ("review", "待人工核查"),
+                    ("closed", "已结束"),
+                ])
+                .default("disabled")
+                .filterable(true),
+            form_sync_last_rollback_ms => Int::new()
+                .title("最近退回时间(毫秒)")
+                .filterable(true),
+            form_sync_hash => Str::new().title("表单同步哈希").max_length(64),
+            form_synced_at => Timestamp::new().title("最近表单同步时间"),
+            form_sync_next_at => Timestamp::new()
+                .title("下次表单同步时间")
+                .filterable(true)
+                .sortable(true),
+            form_sync_attempts => Int::new()
+                .title("表单同步尝试次数")
+                .require(true)
+                .default(0),
+            form_sync_error => Text::new().title("表单同步错误"),
+            // 预留：当前部署形态是单实例、轮次串行，表单同步尚未使用租约。
+            form_sync_lease_until => Timestamp::new().title("表单同步租约到期时间"),
+            form_sync_worker => Str::new().title("表单同步租约持有者").max_length(128),
             // 准备阶段的附件上传缓存（JSON：`file_token → 审批文件 code`）。
             //
             // 大批量组的准备可能持续几十分钟；重启/重试没有断点时会从第一个成员

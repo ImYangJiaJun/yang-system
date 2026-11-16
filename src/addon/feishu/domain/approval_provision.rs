@@ -66,6 +66,13 @@ pub(crate) struct ProvisionInput<'a> {
     /// 批量范围复选框列（可选）。`field_id` **或**列名都接受；`None`/空 = 不启用，
     /// 播种仍按旧行为（只处理回填列为空的记录）。给了就必须是复选框（type=7）。
     pub(crate) batch_scope_field: Option<&'a str>,
+    /// 表单反向同步模式：off / shadow / live。
+    pub(crate) form_sync_mode: &'a str,
+    pub(crate) form_sync_allow_clear: bool,
+    /// 聚合明细行键子控件 id；空 = 未配置。
+    pub(crate) form_sync_row_key_widget: Option<&'a str>,
+    /// 聚合顶层派生值写入方式：leader / all_members / skip。
+    pub(crate) form_sync_aggregate_derived_mode: &'a str,
 }
 
 /// 建配置失败。
@@ -139,6 +146,11 @@ pub(crate) struct ProvisionPlan {
     /// 批量范围复选框列的 `field_id` 与展示名（可选）。`None` = 未启用。
     pub(crate) batch_scope_field_id: Option<String>,
     pub(crate) batch_scope_field_name: Option<String>,
+    /// 表单反向同步配置。
+    pub(crate) form_sync_mode: String,
+    pub(crate) form_sync_allow_clear: bool,
+    pub(crate) form_sync_row_key_widget: Option<String>,
+    pub(crate) form_sync_aggregate_derived_mode: String,
     pub(crate) base_timezone: String,
     /// 审批定义的 `form` 原文快照。
     ///
@@ -490,6 +502,14 @@ fn plan(
         handler_field_id,
         batch_scope_field_id,
         batch_scope_field_name,
+        form_sync_mode: input.form_sync_mode.trim().to_string(),
+        form_sync_allow_clear: input.form_sync_allow_clear,
+        form_sync_row_key_widget: input
+            .form_sync_row_key_widget
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        form_sync_aggregate_derived_mode: input.form_sync_aggregate_derived_mode.trim().to_string(),
         base_timezone: input.base_timezone.trim().to_string(),
         approval_name: approval_name.trim().to_string(),
         form_snapshot: form_snapshot.to_string(),
@@ -753,6 +773,19 @@ pub(crate) async fn insert_plan(
     );
     config_row.insert("handler_field", serde_json::json!(&plan.handler_field_id));
     config_row.insert("base_timezone", serde_json::json!(&plan.base_timezone));
+    config_row.insert("form_sync_mode", serde_json::json!(&plan.form_sync_mode));
+    config_row.insert(
+        "form_sync_allow_clear",
+        serde_json::json!(plan.form_sync_allow_clear),
+    );
+    config_row.insert(
+        "form_sync_row_key_widget",
+        serde_json::json!(&plan.form_sync_row_key_widget),
+    );
+    config_row.insert(
+        "form_sync_aggregate_derived_mode",
+        serde_json::json!(&plan.form_sync_aggregate_derived_mode),
+    );
     config_row.insert("enabled", serde_json::json!(true));
     // 定义原文快照。存原文而不是 `FormWidget` 序列化回去的结果——后者只保留本服务
     // 要读的字段，会把 `printable` / `display_condition` 丢掉，而快照的价值正在于
@@ -1850,6 +1883,10 @@ mod tests {
             department_field: None,
             handler_field: None,
             batch_scope_field: None,
+            form_sync_mode: "off",
+            form_sync_allow_clear: false,
+            form_sync_row_key_widget: None,
+            form_sync_aggregate_derived_mode: "leader",
         }
     }
 
@@ -2651,6 +2688,10 @@ mod tests {
         let result = plan(
             &ProvisionInput {
                 batch_scope_field: Some("批量范围"),
+                form_sync_mode: "off",
+                form_sync_allow_clear: false,
+                form_sync_row_key_widget: None,
+                form_sync_aggregate_derived_mode: "leader",
                 ..input("fldP", "fldB")
             },
             "t",

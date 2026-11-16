@@ -399,6 +399,21 @@ function taskStateLabel(state: string): string {
   return TASK_STATE_LABELS[state] ?? state;
 }
 
+/// 表单反向同步状态的中文标签。
+const FORM_SYNC_STATE_LABELS: Record<string, string> = {
+  disabled: "—",
+  awaiting_resubmit: "等待重新提交",
+  observed: "已观测（影子）",
+  synced: "已同步",
+  retry: "等待重试",
+  review: "待人工核查",
+  closed: "已结束",
+};
+
+function formSyncStateLabel(state: string): string {
+  return FORM_SYNC_STATE_LABELS[state] ?? state;
+}
+
 function TasksTable({
   tasks,
   total,
@@ -414,6 +429,7 @@ function TasksTable({
           <TableHead>状态</TableHead>
           <TableHead>实例 Code</TableHead>
           <TableHead>单号</TableHead>
+          <TableHead>表单同步</TableHead>
           <TableHead>最近错误</TableHead>
         </TableRow>
       </TableHeader>
@@ -427,6 +443,16 @@ function TasksTable({
             </TableCell>
             <TableCell className="font-mono text-xs">
               {task.serialNumber ?? "—"}
+            </TableCell>
+            <TableCell
+              className="max-w-40 truncate text-xs"
+              title={
+                [task.formSyncError, task.formSyncState]
+                  .filter(Boolean)
+                  .join(" / ") || undefined
+              }
+            >
+              {formSyncStateLabel(task.formSyncState)}
             </TableCell>
             <TableCell
               className="max-w-48 truncate text-xs text-muted-foreground"

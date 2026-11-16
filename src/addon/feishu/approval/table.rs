@@ -3,7 +3,7 @@
 //! 一条配置表达「**这张多维表格**的这批行要创建**哪个审批定义**的实例」。
 
 use yang_base::definition::{
-    FieldName, FieldRef, Key, Str, Switch, TableName, TableSpec, Text, Timestamp,
+    FieldName, FieldRef, Key, Radio, Str, Switch, TableName, TableSpec, Text, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -125,6 +125,43 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             handler_field => Str::new()
                 .title("当前处理人回填列 ID")
                 .max_length(128),
+            // --- 表单反向同步（退回重提后把审批值写回台账） ---
+            //
+            // 默认关闭：打开前必须先跑 P0 真机验证（form 最新性、台账锁可写、
+            // 附件/外部选项回读形态）。shadow 只计算 diff、不写台账。
+            form_sync_mode => Radio::<String>::new()
+                .title("表单回写模式")
+                .require(true)
+                .varchar(16)
+                .options([
+                    ("off", "关闭"),
+                    ("shadow", "影子"),
+                    ("live", "启用"),
+                ])
+                .default("off")
+                .filterable(true),
+            // 用户清空审批字段时是否允许清空台账；P0 确认各类型清空语义前保持关闭。
+            form_sync_allow_clear => Switch::new()
+                .title("允许清空台账字段")
+                .require(true)
+                .default(false),
+            // 聚合明细的行键子控件：它的值在组内唯一时按值匹配成员，容忍重排。
+            // 为空时按 member_row_keys 的行下标匹配。
+            form_sync_row_key_widget => Str::new()
+                .title("聚合明细行键控件")
+                .max_length(128),
+            // 聚合顶层派生值（公式求和/附件并集/多选并集）无法归因到成员：
+            // leader = 只写 leader 行；all_members = 镜像到全部成员；skip = 不写。
+            form_sync_aggregate_derived_mode => Radio::<String>::new()
+                .title("聚合派生值写入方式")
+                .require(true)
+                .varchar(16)
+                .options([
+                    ("leader", "写 leader"),
+                    ("all_members", "写全部成员"),
+                    ("skip", "不写"),
+                ])
+                .default("leader"),
             // 多维表格日期的时区。多维表格给毫秒时间戳（不含时区），而审批 date 控件
             // 要带偏移量的 RFC3339，所以必须显式指定，不能猜。
             base_timezone => Str::new()

@@ -27,6 +27,12 @@ pub(super) const TASK_ITEM_COLUMNS: &[&str] = &[
     "serial_number",
     "attempts",
     "last_error",
+    "form_sync_state",
+    "form_sync_last_rollback_ms",
+    "form_synced_at",
+    "form_sync_next_at",
+    "form_sync_attempts",
+    "form_sync_error",
     "created_at",
     "updated_at",
 ];
@@ -52,6 +58,18 @@ pub(super) struct TaskItem {
     attempts: i64,
     /// 落库的失败原因（不回灌多维表格）。
     last_error: Option<String>,
+    /// 表单反向同步状态：disabled / awaiting_resubmit / observed / synced / retry / review / closed。
+    form_sync_state: String,
+    /// 最近一次「退回给发起人」的毫秒时间。
+    form_sync_last_rollback_ms: Option<i64>,
+    /// 最近一次表单同步时间（unix 秒）。
+    form_synced_at: Option<i64>,
+    /// 下次表单同步时间（unix 秒）。
+    form_sync_next_at: Option<i64>,
+    /// 表单同步已尝试次数。
+    form_sync_attempts: i64,
+    /// 表单同步错误（只含结果码与说明，不含表单值）。
+    form_sync_error: Option<String>,
     /// 创建时间（unix 秒）。
     created_at: i64,
     /// 更新时间（unix 秒）。
@@ -119,6 +137,14 @@ pub(super) async fn handle(
                 serial_number: record.optional("serial_number")?,
                 attempts: record.require("attempts")?,
                 last_error: record.optional("last_error")?,
+                form_sync_state: record
+                    .optional::<String>("form_sync_state")?
+                    .unwrap_or_else(|| "disabled".to_string()),
+                form_sync_last_rollback_ms: record.optional("form_sync_last_rollback_ms")?,
+                form_synced_at: record.optional("form_synced_at")?,
+                form_sync_next_at: record.optional("form_sync_next_at")?,
+                form_sync_attempts: record.optional("form_sync_attempts")?.unwrap_or(0),
+                form_sync_error: record.optional("form_sync_error")?,
                 created_at: record.require("created_at")?,
                 updated_at: record.require("updated_at")?,
             })
@@ -152,6 +178,12 @@ mod tests {
             serial_number: Some("202609280001".to_string()),
             attempts: 1,
             last_error: None,
+            form_sync_state: "disabled".to_string(),
+            form_sync_last_rollback_ms: None,
+            form_synced_at: None,
+            form_sync_next_at: None,
+            form_sync_attempts: 0,
+            form_sync_error: None,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_100,
         };

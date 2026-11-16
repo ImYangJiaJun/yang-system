@@ -37,6 +37,12 @@ use crate::config::FeishuSettings;
 /// 每轮最多处理多少条事件。
 const EVENT_BATCH: usize = 50;
 
+/// 每轮周期对账最多处理多少条表单同步任务。
+const FORM_SYNC_BATCH: usize = 20;
+
+/// 周期对账在「同步函数执行之前」失败时的短退避，避免每 tick 重打远端。
+const PERIODIC_DEFER_SECONDS: i64 = 60;
+
 /// 编译期守护：批量不超框架上限。
 const _: () = assert!(EVENT_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
 
@@ -174,7 +180,12 @@ async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch:
                 }
             }
             _ = ticker.tick() => {
-                let round = run_round(&runner, "poll");
+                let round = async {
+                    run_round(&runner, "poll").await;
+                    // 周期对账放在 run_round 的「无事件提前 return」之外：
+                    // 退回/重提事件丢失时，这里仍是最终一致的兜底。
+                    run_form_sync_due(&runner).await;
+                };
                 if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
                     tracing::info!("飞书事件处理 Worker 收到关闭信号，已取消进行中的轮次");
                     return;
@@ -331,6 +342,272 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
     );
 }
 
+/// 周期对账扫到的一条到期行。
+///
+/// 任务行与聚合组行都必须覆盖：`sync_group` 会把组行写成 `awaiting_resubmit` /
+/// `retry`，只扫任务行会让组事件丢失后永远等不到自愈。
+#[derive(Debug, Clone)]
+enum DueFormSync {
+    Task {
+        task_id: i64,
+        instance_code: String,
+    },
+    Group {
+        config_id: i64,
+        group_key: String,
+        instance_code: String,
+    },
+}
+
+impl DueFormSync {
+    fn instance_code(&self) -> &str {
+        match self {
+            Self::Task { instance_code, .. } | Self::Group { instance_code, .. } => instance_code,
+        }
+    }
+
+    /// 周期对账没有事件身份；id=0 只用于日志区分。
+    fn as_event(&self) -> PendingEvent {
+        PendingEvent {
+            id: 0,
+            instance_code: self.instance_code().to_string(),
+            retry_count: 0,
+        }
+    }
+
+    /// 同步函数执行前失败：把调度时间往后推，避免每 tick 重打。
+    async fn defer(&self, runner: &RoundRunner, seconds: i64) {
+        let next_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + seconds;
+        let mut row = Record::new();
+        row.insert("form_sync_next_at", serde_json::json!(next_at));
+        let result = match self {
+            Self::Task { task_id, .. } => runner
+                .context
+                .approval_tasks()
+                .query()
+                .where_eq("id", serde_json::json!(task_id))
+                .map(|query| query.update(row)),
+            Self::Group {
+                config_id,
+                group_key,
+                ..
+            } => runner
+                .context
+                .approval_groups()
+                .query()
+                .where_eq("config_id", serde_json::json!(config_id))
+                .and_then(|query| query.where_eq("group_key", serde_json::json!(group_key)))
+                .map(|query| query.update(row)),
+        };
+        match result {
+            Ok(future) => {
+                if let Err(error) = future.await {
+                    tracing::warn!(error = %error, "推迟表单同步到期时间失败");
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "构造表单同步推迟查询失败"),
+        }
+    }
+
+    /// 远端明确拒绝（Fatal）：转人工核查，停止周期重试。
+    async fn mark_review(&self, runner: &RoundRunner) {
+        let mut row = Record::new();
+        row.insert("form_sync_state", serde_json::json!("review"));
+        row.insert("form_sync_next_at", serde_json::Value::Null);
+        row.insert("form_sync_error", serde_json::json!("periodic_terminal"));
+        let result = match self {
+            Self::Task { task_id, .. } => runner
+                .context
+                .approval_tasks()
+                .query()
+                .where_eq("id", serde_json::json!(task_id))
+                .map(|query| query.update(row)),
+            Self::Group {
+                config_id,
+                group_key,
+                ..
+            } => runner
+                .context
+                .approval_groups()
+                .query()
+                .where_eq("config_id", serde_json::json!(config_id))
+                .and_then(|query| query.where_eq("group_key", serde_json::json!(group_key)))
+                .map(|query| query.update(row)),
+        };
+        match result {
+            Ok(future) => {
+                if let Err(error) = future.await {
+                    tracing::warn!(error = %error, "表单同步转人工核查失败");
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "构造表单同步转核查查询失败"),
+        }
+    }
+}
+
+/// 周期对账：扫描 `awaiting_resubmit` / `retry` 且到期的任务与聚合组，
+/// 复用事件处理链路。
+///
+/// 不经过 `claim_events`/`mark_processed`：这些不是事件，状态由
+/// `form_sync_next_at` 与 `form_sync_state` 自行调度。
+async fn run_form_sync_due(runner: &RoundRunner) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut due = scan_due_tasks(runner, now).await;
+    due.extend(scan_due_groups(runner, now).await);
+    if due.is_empty() {
+        return;
+    }
+    tracing::info!(count = due.len(), "表单同步周期对账认领到到期行");
+    for target in due {
+        let event = target.as_event();
+        let outcome = process_event_inner(runner, &event).await;
+        match outcome {
+            EventOutcome::Processed => {}
+            EventOutcome::Skipped(message) => {
+                tracing::warn!(
+                    instance_code = %event.instance_code,
+                    reason = %message,
+                    "表单同步周期对账跳过，稍后再试"
+                );
+                target.defer(runner, PERIODIC_DEFER_SECONDS).await;
+            }
+            EventOutcome::Failed(message) => {
+                tracing::warn!(
+                    instance_code = %event.instance_code,
+                    error = %message,
+                    "表单同步周期对账本轮失败，稍后重试"
+                );
+                target.defer(runner, PERIODIC_DEFER_SECONDS).await;
+            }
+            EventOutcome::Terminal(message) => {
+                tracing::warn!(
+                    instance_code = %event.instance_code,
+                    error = %message,
+                    "表单同步周期对账遇到不可重试错误，转人工核查"
+                );
+                target.mark_review(runner).await;
+            }
+        }
+    }
+}
+
+/// 到期任务行。
+async fn scan_due_tasks(runner: &RoundRunner, now: i64) -> Vec<DueFormSync> {
+    let query = match runner.context.approval_tasks().query().where_in(
+        "form_sync_state",
+        vec![
+            serde_json::json!("awaiting_resubmit"),
+            serde_json::json!("retry"),
+        ],
+    ) {
+        Ok(query) => query,
+        Err(error) => {
+            tracing::warn!(error = %error, "构造表单同步到期查询失败");
+            return Vec::new();
+        }
+    };
+    let query = match query.where_lte("form_sync_next_at", serde_json::json!(now)) {
+        Ok(query) => query,
+        Err(error) => {
+            tracing::warn!(error = %error, "构造表单同步到期时间条件失败");
+            return Vec::new();
+        }
+    };
+    let rows = match query
+        .order_by("form_sync_next_at", SortOrder::Asc)
+        .and_then(|query| query.page(1, FORM_SYNC_BATCH))
+        .and_then(|query| query.select_fields(&["id", "instance_code"]))
+    {
+        Ok(query) => match query.all().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "读取表单同步到期任务失败");
+                return Vec::new();
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "构造表单同步到期任务查询失败");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let task_id: i64 = row.optional("id").ok().flatten()?;
+            let instance_code = nonempty_string(row.optional("instance_code").ok().flatten())?;
+            Some(DueFormSync::Task {
+                task_id,
+                instance_code,
+            })
+        })
+        .collect()
+}
+
+/// 到期聚合组行。
+async fn scan_due_groups(runner: &RoundRunner, now: i64) -> Vec<DueFormSync> {
+    let query = match runner.context.approval_groups().query().where_in(
+        "form_sync_state",
+        vec![
+            serde_json::json!("awaiting_resubmit"),
+            serde_json::json!("retry"),
+        ],
+    ) {
+        Ok(query) => query,
+        Err(error) => {
+            tracing::warn!(error = %error, "构造聚合组表单同步到期查询失败");
+            return Vec::new();
+        }
+    };
+    let query = match query.where_lte("form_sync_next_at", serde_json::json!(now)) {
+        Ok(query) => query,
+        Err(error) => {
+            tracing::warn!(error = %error, "构造聚合组表单同步到期时间条件失败");
+            return Vec::new();
+        }
+    };
+    let rows = match query
+        .order_by("form_sync_next_at", SortOrder::Asc)
+        .and_then(|query| query.page(1, FORM_SYNC_BATCH))
+        .and_then(|query| query.select_fields(&["config_id", "group_key", "instance_code"]))
+    {
+        Ok(query) => match query.all().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "读取聚合组表单同步到期行失败");
+                return Vec::new();
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "构造聚合组表单同步到期行查询失败");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let config_id: i64 = row.optional("config_id").ok().flatten()?;
+            let group_key = nonempty_string(row.optional("group_key").ok().flatten())?;
+            let instance_code = nonempty_string(row.optional("instance_code").ok().flatten())?;
+            Some(DueFormSync::Group {
+                config_id,
+                group_key,
+                instance_code,
+            })
+        })
+        .collect()
+}
+
+fn nonempty_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// 取未处理事件（`processed_at IS NULL`），按 id 升序，限制 `EVENT_BATCH` 条。
 async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>> {
     tracing::debug!("开始查询未处理事件（processed_at IS NULL）");
@@ -375,6 +652,7 @@ struct TaskIdentity {
     task_id: i64,
     record_id: String,
     config_id: i64,
+    group_id: Option<String>,
 }
 
 /// 提取 task 身份；失败时保持既有日志与文案。
@@ -404,6 +682,11 @@ fn require_task_identity(row: &Record) -> Result<TaskIdentity, String> {
         task_id,
         record_id,
         config_id,
+        group_id: row
+            .optional::<String>("group_id")
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -575,6 +858,13 @@ struct EventConfig {
     end_time_field: Option<String>,
     department_field: Option<String>,
     handler_field: Option<String>,
+    /// 表单反向同步模式：off / shadow / live。
+    form_sync_mode: String,
+    form_sync_allow_clear: bool,
+    form_sync_aggregate_derived_mode: String,
+    /// 聚合明细行键控件 id；用于重排后把表单行匹配回成员台账行。
+    form_sync_row_key_widget: Option<String>,
+    form_snapshot: String,
 }
 
 impl EventConfig {
@@ -670,6 +960,32 @@ async fn load_event_config(
     let end_time_field = optional_nonempty(&config, "end_time_field");
     let department_field = optional_nonempty(&config, "department_field");
     let handler_field = optional_nonempty(&config, "handler_field");
+    let form_sync_mode = config
+        .optional::<String>("form_sync_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "off".to_string());
+    let form_sync_allow_clear = config
+        .optional::<bool>("form_sync_allow_clear")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    let form_snapshot = config
+        .optional::<String>("form_snapshot")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let form_sync_aggregate_derived_mode = config
+        .optional::<String>("form_sync_aggregate_derived_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "leader".to_string());
+    let form_sync_row_key_widget = config
+        .optional::<String>("form_sync_row_key_widget")
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     tracing::debug!(
         config_id,
@@ -696,6 +1012,11 @@ async fn load_event_config(
         end_time_field,
         department_field,
         handler_field,
+        form_sync_mode,
+        form_sync_allow_clear,
+        form_sync_aggregate_derived_mode,
+        form_sync_row_key_widget,
+        form_snapshot,
     })
 }
 
@@ -964,6 +1285,50 @@ async fn fan_out_group_event(
             }
         }
     }
+    let sync_outcome = crate::addon::feishu::domain::approval_form_sync::runtime::sync_group(
+        crate::addon::feishu::domain::approval_form_sync::runtime::GroupRuntimeInput {
+            context: runner.context.as_ref(),
+            transport: runner.transport(),
+            sleeper: runner.sleeper.as_ref(),
+            tokens: runner.tokens.as_ref(),
+            coordinates: &coordinates,
+            config_id,
+            group_key: &group_key,
+            group,
+            members: &members,
+            form_snapshot: &config.form_snapshot,
+            backfill_field_id: &config.backfill_field,
+            mode: &config.form_sync_mode,
+            allow_clear: config.form_sync_allow_clear,
+            derived_mode: &config.form_sync_aggregate_derived_mode,
+            row_key_widget: config.form_sync_row_key_widget.as_deref(),
+            timezone_offset: runner.timezone_offset,
+            detail: &detail,
+            fields: &fields,
+        },
+    )
+    .await;
+    match sync_outcome {
+        Ok(outcome) => {
+            tracing::info!(
+                config_id,
+                group_key,
+                members = members.len(),
+                ?outcome,
+                "聚合组表单反向同步完成"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                config_id,
+                group_key,
+                error = %error,
+                "聚合组表单同步状态写库失败，事件下一轮重试"
+            );
+            return EventOutcome::Failed(format!("保存聚合组表单同步状态失败: {error}"));
+        }
+    }
+
     tracing::info!(
         config_id,
         group_key,
@@ -1129,6 +1494,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         task_id,
         record_id,
         config_id,
+        group_id,
     } = identity;
 
     tracing::debug!(
@@ -1243,11 +1609,53 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     }
 
-    tracing::debug!(
-        event_id = event.id,
-        instance_code = %event.instance_code,
-        "=== 事件处理完成 ==="
-    );
+    // 9. 表单反向同步：退回给发起人且已重提时，把审批表单值写回台账。
+    //    业务失败只落 form_sync_state/error，不消耗事件的重试预算；只有同步状态
+    //    写库失败才让事件重试。
+    let sync_outcome = crate::addon::feishu::domain::approval_form_sync::runtime::sync_task(
+        crate::addon::feishu::domain::approval_form_sync::runtime::RuntimeInput {
+            context: runner.context.as_ref(),
+            transport: runner.transport(),
+            sleeper: runner.sleeper.as_ref(),
+            tokens: runner.tokens.as_ref(),
+            coordinates: &coordinates,
+            config_id,
+            record_id: &record_id,
+            task_id,
+            form_snapshot: &config.form_snapshot,
+            backfill_field_id: &config.backfill_field,
+            mode: &config.form_sync_mode,
+            allow_clear: config.form_sync_allow_clear,
+            timezone_offset: runner.timezone_offset,
+            detail: &detail,
+            fields: &fields,
+            group_id: group_id.as_deref(),
+        },
+    )
+    .await;
+    match sync_outcome {
+        Ok(outcome) => {
+            tracing::info!(
+                event_id = event.id,
+                task_id,
+                record_id = %record_id,
+                ?outcome,
+                "审批表单反向同步完成"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                event_id = event.id,
+                task_id,
+                record_id = %record_id,
+                error = %error,
+                "审批表单反向同步状态写库失败，事件下一轮重试"
+            );
+            return EventOutcome::Failed(format!("保存表单同步状态失败: {error}"));
+        }
+    }
+
+    tracing::debug!("=== 事件处理完成 ===");
     EventOutcome::Processed
 }
 
