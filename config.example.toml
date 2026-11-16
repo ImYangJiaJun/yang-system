@@ -19,6 +19,11 @@ bind = "127.0.0.1:8080"
 # 复制为 config.toml 后，直接填写当前环境的连接信息。
 url = "mysql://root:password@127.0.0.1:3306/yang_system"
 
+# 可选：新模块如需使用 PostgreSQL，取消注释并填写；默认源仍是 [mysql]。
+# [postgres]
+# url = "postgres://user:password@127.0.0.1:5432/yang_system"
+# datasource = "pg_main"
+
 [redis]
 url = "redis://127.0.0.1:6379"
 

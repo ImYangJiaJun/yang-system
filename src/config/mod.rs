@@ -32,6 +32,9 @@ pub struct Settings {
     #[serde(default)]
     pub http: HttpSettings,
     pub mysql: MysqlSettings,
+    /// 可选的 PostgreSQL 数据源；`None` 表示只使用 MySQL。
+    #[serde(default)]
+    pub postgres: Option<PostgresSettings>,
     pub redis: RedisSettings,
     pub token: TokenSettings,
     pub step_up: StepUpSettings,
@@ -1072,6 +1075,20 @@ impl Settings {
             bail!("http.max_concurrency 必须在 1..=100000 范围内");
         }
         self.mysql_config().validate().context("mysql 配置无效")?;
+        if let Some(postgres) = &self.postgres {
+            postgres
+                .database_config()
+                .validate()
+                .context("postgres 配置无效")?;
+            if postgres.url.trim().is_empty() {
+                bail!("postgres.url 不能为空");
+            }
+            yang_base::datasource::DatasourceId::new(&postgres.datasource)
+                .context("postgres.datasource 无效")?;
+            if postgres.datasource == "default" {
+                bail!("postgres.datasource 不能使用保留名 default；MySQL 已注册为默认源");
+            }
+        }
         self.redis_config().validate().context("redis 配置无效")?;
         if self.token.issuer.trim().is_empty() || self.token.audience.trim().is_empty() {
             bail!("token.issuer 与 token.audience 不能为空");
@@ -1692,6 +1709,45 @@ impl MysqlSettings {
             .with_max_lifetime(self.max_lifetime_seconds)
             .with_test_before_acquire(self.test_before_acquire)
     }
+}
+
+/// 可选的 PostgreSQL 数据源配置。
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresSettings {
+    pub url: String,
+    /// 逻辑数据源名；模块通过它绑定 PostgreSQL。
+    #[serde(default = "default_postgres_datasource")]
+    pub datasource: String,
+    #[serde(default = "default_mysql_max_connections")]
+    pub max_connections: u32,
+    #[serde(default = "default_mysql_min_connections")]
+    pub min_connections: u32,
+    #[serde(default = "default_mysql_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    #[serde(default = "default_mysql_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
+    #[serde(default = "default_pool_max_lifetime_seconds")]
+    pub max_lifetime_seconds: Option<u64>,
+    #[serde(default = "default_test_before_acquire")]
+    pub test_before_acquire: bool,
+}
+
+impl PostgresSettings {
+    pub(crate) fn database_config(&self) -> yang_db::postgres::DatabaseConfig {
+        let mut config = yang_db::postgres::DatabaseConfig::default();
+        config.max_connections = self.max_connections;
+        config.min_connections = self.min_connections;
+        config.connect_timeout = self.connect_timeout_seconds;
+        config.idle_timeout = self.idle_timeout_seconds;
+        config.max_lifetime = self.max_lifetime_seconds;
+        config.test_before_acquire = self.test_before_acquire;
+        config
+    }
+}
+
+fn default_postgres_datasource() -> String {
+    "pg_main".to_string()
 }
 
 impl SecuritySettings {
@@ -3018,6 +3074,34 @@ link_base_url = "http://localhost:5273"
             Err(error) => error,
         };
         assert!(error.to_string().contains("解析配置文件失败"));
+    }
+
+    #[test]
+    fn postgres_section_is_optional_and_parsed() {
+        let without = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("无 postgres 段应可解析: {error:#}"));
+        assert!(without.postgres.is_none());
+
+        let raw = format!(
+            "{}\n[postgres]\nurl = \"postgres://user:pass@pg/db\"\nmax_connections = 4\n",
+            valid_config()
+        );
+        let settings =
+            Settings::parse(&raw).unwrap_or_else(|error| panic!("postgres 段应可解析: {error:#}"));
+        let postgres = settings
+            .postgres
+            .unwrap_or_else(|| panic!("postgres 段应存在"));
+        assert_eq!(postgres.url, "postgres://user:pass@pg/db");
+        assert_eq!(postgres.max_connections, 4);
+
+        let reserved = format!(
+            "{}\n[postgres]\nurl = \"postgres://user:pass@pg/db\"\ndatasource = \"default\"\n",
+            valid_config()
+        );
+        assert!(
+            Settings::parse(&reserved).is_err(),
+            "postgres.datasource 不能复用 default 源名"
+        );
     }
 
     #[test]

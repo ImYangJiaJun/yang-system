@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const SUPPORTED_UI_SCHEMA_VERSIONS = ["2.2", "2.3", "2.4"] as const;
+export const SUPPORTED_UI_SCHEMA_VERSIONS = [
+  "2.2",
+  "2.3",
+  "2.4",
+  "2.5",
+] as const;
 type SupportedUiSchemaVersion = (typeof SUPPORTED_UI_SCHEMA_VERSIONS)[number];
 
 const jsonSchema = z.record(z.string(), z.unknown());
@@ -240,6 +245,7 @@ export const modulePresentationSchema = z.object({
 export const tableViewSchema = z.object({
   view_id: z.string().min(1),
   title: z.string(),
+  datasource: z.string().min(1).optional(),
   table: z.string().min(1),
   data_action: z.string().min(1),
   columns: z.array(tableColumnSchema),
