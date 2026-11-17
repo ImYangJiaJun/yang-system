@@ -2,8 +2,13 @@
 //!
 //! 飞书没有「重新提交」timeline 类型；可判定的证据是：
 //! 1. `timeline` 出现 `ROLLBACK` / `ROLLBACK_SELECTED`；
-//! 2. 被退回的任务/节点能证明是**发起人**（`START` 或发起人 open_id）；
-//! 3. 退回之后 `task_list` 出现新任务（`start_time > 退回时间`），或实例已终态。
+//! 2. 被退回的任务/节点能证明目标**发起人**（退回后新建的任务属于发起人，或 `ext` 指向 START）；
+//! 3. 退回之后**发起人任务完成**（`task_list[].end_time > 退回时间`），或实例已终态。
+//!
+//! 不能用「退回后出现新任务」当重提证据：真实飞书在 `ROLLBACK_SELECTED` 之后
+//! 十几毫秒就创建发起人任务，它的 `start_time` 只比退回时间晚一点，但 `end_time`
+//! 仍是 0，用户还没有重提。把它当成重提会提前同步离线表单，并把真正的重提事件
+//! 全部按 `rollback_already_handled` 跳过（2026-11-17 真机实测）。
 //!
 //! 所有时间统一成毫秒；入站事件的 `operate_time` 存的是秒，不能直接混用。
 
@@ -14,10 +19,12 @@ use super::super::approval::{InstanceDetail, TaskNode, TimelineRecord};
 pub(crate) struct RollbackWindow {
     /// 最近一次「退回给发起人」的毫秒时间。
     pub(crate) last_initiator_rollback_ms: Option<i64>,
-    /// 退回之后是否出现新任务（或实例已终态）。
+    /// 退回之后是否出现发起人任务完成（或实例已终态）。
     pub(crate) resubmitted: bool,
     /// 最近一次任务开始时间（毫秒）。
     pub(crate) last_task_start_ms: Option<i64>,
+    /// 最近一次任务完成时间（毫秒）。
+    pub(crate) last_task_end_ms: Option<i64>,
     /// 有退回，但目标不是发起人（例如退回给前一个审批人）。
     pub(crate) non_initiator_rollback: bool,
 }
@@ -43,6 +50,10 @@ pub(crate) fn inspect(detail: &InstanceDetail) -> RollbackWindow {
     window.last_task_start_ms = tasks
         .iter()
         .filter_map(|task| task.start_time.as_deref().and_then(parse_millis))
+        .max();
+    window.last_task_end_ms = tasks
+        .iter()
+        .filter_map(|task| task.end_time.as_deref().and_then(parse_millis))
         .max();
 
     let mut latest_initiator_rollback = None;
@@ -71,8 +82,8 @@ pub(crate) fn inspect(detail: &InstanceDetail) -> RollbackWindow {
     window.resubmitted = latest_initiator_rollback.is_some_and(|rollback_ms| {
         terminal
             || window
-                .last_task_start_ms
-                .is_some_and(|start_ms| start_ms > rollback_ms)
+                .last_task_end_ms
+                .is_some_and(|end_ms| end_ms > rollback_ms)
     });
     window
 }
@@ -95,6 +106,19 @@ fn rollback_targets_initiator(
     tasks: &[TaskNode],
     detail: &InstanceDetail,
 ) -> bool {
+    // 退回后新建的任务才指向真正的退回目标。`timeline.task_id` 是**被退回**的
+    // 审批任务，审批人和发起人不同时，直接用它的 open_id 判断会漏掉发起人退回。
+    if let Some(rollback_ms) = entry.create_time.as_deref().and_then(parse_millis) {
+        if tasks.iter().any(|task| {
+            task.start_time
+                .as_deref()
+                .and_then(parse_millis)
+                .is_some_and(|start| start > rollback_ms)
+                && is_initiator_task(task, detail)
+        }) {
+            return true;
+        }
+    }
     if let Some(target) = entry.task_id.as_deref().and_then(|task_id| {
         tasks
             .iter()
@@ -198,11 +222,10 @@ mod tests {
 
     #[test]
     fn initiator_rollback_with_new_task_triggers_sync() {
+        let mut initiator = task("t1", "ou_initiator", 1_000);
+        initiator.end_time = Some("2500".into());
         let detail = make_detail(
-            vec![
-                task("t1", "ou_initiator", 1_000),
-                task("t2", "ou_approver", 3_000),
-            ],
+            vec![initiator, task("t2", "ou_approver", 3_000)],
             vec![rollback("t1", 2_000)],
             "PENDING",
         );
@@ -210,6 +233,7 @@ mod tests {
         assert!(window.should_sync());
         assert_eq!(window.last_initiator_rollback_ms, Some(2_000));
         assert_eq!(window.last_task_start_ms, Some(3_000));
+        assert_eq!(window.last_task_end_ms, Some(2_500));
     }
 
     #[test]
@@ -222,6 +246,58 @@ mod tests {
         let window = inspect(&detail);
         assert!(!window.should_sync());
         assert!(window.awaiting_resubmit());
+    }
+
+    /// 真实飞书行为：`ROLLBACK_SELECTED` 之后十几毫秒就创建发起人任务，
+    /// 该任务 `start_time > 退回时间` 但 `end_time = 0`。它不是重提证据。
+    #[test]
+    fn rollback_created_initiator_task_without_completion_is_not_resubmit() {
+        let mut original = task("t1", "ou_initiator", 1_000);
+        original.end_time = Some("2000".into());
+        let mut initiator = task("t2", "ou_initiator", 2_019);
+        initiator.end_time = Some("0".into());
+        let detail = make_detail(
+            vec![original, initiator],
+            vec![rollback("t1", 2_000)],
+            "PENDING",
+        );
+        let window = inspect(&detail);
+        assert_eq!(window.last_task_start_ms, Some(2_019));
+        assert!(!window.should_sync());
+        assert!(window.awaiting_resubmit());
+    }
+
+    #[test]
+    fn initiator_task_completion_is_resubmit_evidence() {
+        let mut original = task("t1", "ou_initiator", 1_000);
+        original.end_time = Some("2000".into());
+        let mut initiator = task("t2", "ou_initiator", 2_019);
+        initiator.end_time = Some("3000".into());
+        let detail = make_detail(
+            vec![original, initiator],
+            vec![rollback("t1", 2_000)],
+            "PENDING",
+        );
+        assert!(inspect(&detail).should_sync());
+    }
+
+    /// `timeline.task_id` 指向被退回的审批任务；真正的目标是退回后新建的发起人任务。
+    /// 审批人和发起人不是同一个人时，只看退回任务的 `open_id` 会漏判。
+    #[test]
+    fn rollback_target_is_initiator_when_new_task_belongs_to_initiator() {
+        let mut approver = task("t1", "ou_approver", 1_000);
+        approver.end_time = Some("2000".into());
+        let mut initiator = task("t2", "ou_initiator", 2_019);
+        initiator.end_time = Some("0".into());
+        let detail = make_detail(
+            vec![approver, initiator],
+            vec![rollback("t1", 2_000)],
+            "PENDING",
+        );
+        let window = inspect(&detail);
+        assert_eq!(window.last_initiator_rollback_ms, Some(2_000));
+        assert!(window.awaiting_resubmit());
+        assert!(!window.should_sync());
     }
 
     #[test]
@@ -243,6 +319,7 @@ mod tests {
     fn start_node_or_ext_proves_initiator_target() {
         let mut start = task("t1", "", 1_000);
         start.node_id = Some("START".into());
+        start.end_time = Some("2500".into());
         let detail = make_detail(
             vec![start, task("t2", "ou_approver", 3_000)],
             vec![rollback("t1", 2_000)],
@@ -252,8 +329,10 @@ mod tests {
 
         let mut ext_rollback = rollback("t9", 2_000);
         ext_rollback.ext = Some(r#"{"rollback_node_ids":["START"]}"#.into());
+        let mut done = task("t3", "ou_initiator", 2_019);
+        done.end_time = Some("2500".into());
         let detail = make_detail(
-            vec![task("t2", "ou_approver", 3_000)],
+            vec![task("t2", "ou_approver", 3_000), done],
             vec![ext_rollback],
             "PENDING",
         );

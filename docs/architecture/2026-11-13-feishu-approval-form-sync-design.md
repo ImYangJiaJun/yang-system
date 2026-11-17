@@ -138,10 +138,14 @@
 
 1. `last_rollback_ms` = `timeline` 中 `type in {ROLLBACK, ROLLBACK_SELECTED}` 的最大 `create_time`（毫秒）。
 2. 退回目标是否为发起人：
-   - 通过 `timeline[].task_id → task_list[].id → node_id` 映射；
-   - 发起人节点通常是 `START` 或首节点；也可用退回目标任务的 `open_id == detail.open_id` 判断；
+   - `timeline[].task_id` 指向的是**被退回**的审批任务，不是退回目标；审批人与发起人不同时不能只看它的 `open_id`；
+   - 退回后新建的任务（`start_time > last_rollback_ms`）才指向目标节点：该任务的 `open_id == detail.open_id` 或节点是 `START` 即发起人退回；
+   - `timeline.ext` 的 `rollback_node_ids` 含 `START` 也成立；
    - 不能证明时记 `rollback_target_unknown`，不同步。
-3. 重提证据：`last_rollback_ms` 之后 `task_list` 出现新任务（`start_time > last_rollback_ms`），或实例已进入终态。
+3. 重提证据：退回之后**发起人任务完成**（`task_list[].end_time > last_rollback_ms`），或实例已进入终态。
+   **不能**用「出现新任务」（`start_time > last_rollback_ms`）：真实飞书在 `ROLLBACK_SELECTED` 之后十几毫秒就创建发起人任务，
+   它的 `start_time` 只比退回时间晚一点、`end_time` 仍是 0，用户还没有重提（2026-11-17 真机实测）；
+   按新任务判断会提前同步离线表单并标记 `synced`，真正的重提事件随后全部被 `rollback_already_handled` 跳过。
 4. 若 `last_rollback_ms > task.form_sync_last_rollback_ms` 且有重提证据 → 执行同步。
 5. 同期内重复事件、乱序事件：只接受更大的 `last_rollback_ms`；旧事件不改变已同步状态。
 6. 若事件只看到退回、尚未重提：写 `form_sync_state='awaiting_resubmit'`，`form_sync_next_at=now+复扫间隔`，交给周期对账。
