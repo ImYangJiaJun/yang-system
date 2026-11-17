@@ -99,7 +99,7 @@ fn clear_cell(field_type: i32) -> Result<Value, SyncError> {
     }
 }
 
-fn text_for_text_column(value: &SyncValue) -> Result<String, SyncError> {
+pub(crate) fn text_for_text_column(value: &SyncValue) -> Result<String, SyncError> {
     match value {
         SyncValue::Text(text) => Ok(text.clone()),
         SyncValue::Number(number) => Ok(number.to_json_value().to_string()),

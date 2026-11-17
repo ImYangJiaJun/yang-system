@@ -13,6 +13,7 @@ use super::super::approval::InstanceDetail;
 use super::super::approval_convert::{amount_currency, FixedOffset};
 use super::super::approval_dispatch::widget_maps_from_rows;
 use super::super::approval_export::form::InstanceForm;
+use super::super::approval_notification::{send_feedback, NotificationRecipient, ReceiveIdType};
 use super::super::bitable::{self, BitableCoordinates, FieldItem};
 use super::super::context::FeishuContext;
 use super::super::outbound::{OutboundTransport, Sleeper};
@@ -425,6 +426,12 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
             } else {
                 "review"
             };
+            let alert_errors: Vec<SyncError> = report
+                .reviews
+                .iter()
+                .filter(|error| should_alert(error))
+                .cloned()
+                .collect();
             let error = report
                 .reviews
                 .first()
@@ -446,6 +453,22 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
                 ],
             )
             .await?;
+            if let Some(error) = alert_errors.first() {
+                send_sync_alert(
+                    input.transport,
+                    input.sleeper,
+                    input.tokens,
+                    SyncAlert {
+                        config_id: input.config_id,
+                        detail: input.detail,
+                        record_label: input.record_id,
+                        fields: input.fields,
+                        error,
+                        count: alert_errors.len(),
+                    },
+                )
+                .await;
+            }
             Ok(SyncOutcome::Synced {
                 written: report.written.len(),
                 reviews: report.reviews.len(),
@@ -555,6 +578,14 @@ fn plan_hash(plan: &RecordPlan) -> String {
         text.push_str(&patch.value.hash());
         text.push(';');
     }
+    let mut verifications = plan.verifications.clone();
+    verifications.sort_by(|left, right| left.field_id.cmp(&right.field_id));
+    for verify in verifications {
+        text.push_str(&verify.field_id);
+        text.push('~');
+        text.push_str(&verify.expected.hash());
+        text.push(';');
+    }
     SyncValue::Text(text).hash()
 }
 
@@ -564,6 +595,7 @@ fn log_plan(plan: &RecordPlan) {
         patches = plan.patches.len(),
         skipped = plan.skipped.len(),
         reviews = plan.reviews.len(),
+        verifications = plan.verifications.len(),
         "表单反向映射完成"
     );
     for skipped in &plan.skipped {
@@ -595,6 +627,89 @@ fn now_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// 需要主动通知发起人的非致命校验问题。
+fn should_alert(error: &SyncError) -> bool {
+    matches!(
+        error,
+        SyncError::OptionNotFound { .. } | SyncError::ReadOnlyMismatch { .. }
+    )
+}
+
+fn alert_message(
+    config_id: i64,
+    approval_label: &str,
+    record_label: &str,
+    field_name: &str,
+    error: &SyncError,
+    count: usize,
+) -> String {
+    let code = error.code();
+    format!(
+        "【台账同步校验告警】\n配置：{config_id}\n审批：{approval_label}\n记录：{record_label}\n字段：{field_name}\n结果：{code}: {error}\n数量：{count}\n处理：请核对审批表单与多维表台账；如为公式/查找列，请确认可写字段已更新"
+    )
+}
+
+struct SyncAlert<'a> {
+    config_id: i64,
+    detail: &'a InstanceDetail,
+    record_label: &'a str,
+    fields: &'a [FieldItem],
+    error: &'a SyncError,
+    count: usize,
+}
+
+async fn send_sync_alert(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    alert: SyncAlert<'_>,
+) {
+    let Some(open_id) = alert
+        .detail
+        .open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|open_id| open_id.starts_with("ou_"))
+    else {
+        return;
+    };
+    let field_id = match alert.error {
+        SyncError::OptionNotFound { field_id } | SyncError::ReadOnlyMismatch { field_id } => {
+            field_id.as_str()
+        }
+        _ => return,
+    };
+    let field_name = bitable::resolve_field_name(alert.fields, field_id)
+        .unwrap_or_else(|_| field_id.to_string());
+    let approval_label = alert
+        .detail
+        .serial_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(alert.detail.instance_code.as_str());
+    let text = alert_message(
+        alert.config_id,
+        approval_label,
+        alert.record_label,
+        &field_name,
+        alert.error,
+        alert.count,
+    );
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+    let result = send_feedback(transport, sleeper, tokens, &recipient, &text, &[]).await;
+    if result.message_id.is_none() {
+        tracing::warn!(
+            config_id = alert.config_id,
+            count = alert.count,
+            "台账同步校验告警未送达"
+        );
+    }
 }
 
 /// 聚合组同步输入。
@@ -905,6 +1020,11 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         }
     }
 
+    let alert_errors: Vec<SyncError> = review_errors
+        .iter()
+        .filter(|error| should_alert(error))
+        .cloned()
+        .collect();
     let hash = SyncValue::Text(hashes.join(";")).hash();
     let shadow = matches!(input.mode.trim(), "shadow");
     let (state, attempts, next_at, error_value, outcome) = if shadow {
@@ -979,6 +1099,24 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         ],
     )
     .await?;
+    if !shadow {
+        if let Some(error) = alert_errors.first() {
+            send_sync_alert(
+                input.transport,
+                input.sleeper,
+                input.tokens,
+                SyncAlert {
+                    config_id: input.config_id,
+                    detail: input.detail,
+                    record_label: input.group_key,
+                    fields: input.fields,
+                    error,
+                    count: alert_errors.len(),
+                },
+            )
+            .await;
+        }
+    }
     Ok(outcome)
 }
 
@@ -1318,6 +1456,12 @@ mod tests {
                 field_id: "f".into(),
                 field_type: Some(19),
             },
+            SyncError::OptionNotFound {
+                field_id: "f".into(),
+            },
+            SyncError::ReadOnlyMismatch {
+                field_id: "f".into(),
+            },
             SyncError::OptionUnresolved {
                 widget_id: "w".into(),
             },
@@ -1626,5 +1770,44 @@ mod tests {
                 reason: "row_key_snapshot_incomplete"
             })
         );
+    }
+
+    #[test]
+    fn alerts_only_for_mapping_verification_errors() {
+        assert!(should_alert(&SyncError::OptionNotFound {
+            field_id: "fld_bank".into(),
+        }));
+        assert!(should_alert(&SyncError::ReadOnlyMismatch {
+            field_id: "fld_total".into(),
+        }));
+        assert!(!should_alert(&SyncError::UnsupportedTarget {
+            field_id: "fld".into(),
+            field_type: Some(19),
+        }));
+        assert!(!should_alert(&SyncError::Review { reason: "drift" }));
+    }
+
+    #[test]
+    fn alert_message_has_location_but_no_field_values() {
+        let text = alert_message(
+            25,
+            "SP-001",
+            "rec1",
+            "汇率/Exchange Rate",
+            &SyncError::ReadOnlyMismatch {
+                field_id: "fld_rate".into(),
+            },
+            2,
+        );
+        assert!(text.contains("【台账同步校验告警】"), "{text}");
+        assert!(text.contains("配置：25"), "{text}");
+        assert!(text.contains("审批：SP-001"), "{text}");
+        assert!(text.contains("记录：rec1"), "{text}");
+        assert!(text.contains("汇率/Exchange Rate"), "{text}");
+        assert!(text.contains("readonly_mismatch"), "{text}");
+        assert!(text.contains("只读列"), "{text}");
+        assert!(text.contains("数量：2"), "{text}");
+        assert!(!text.contains("1.5"), "报警正文不能带字段值：{text}");
+        assert!(!text.contains("100"), "报警正文不能带字段值：{text}");
     }
 }

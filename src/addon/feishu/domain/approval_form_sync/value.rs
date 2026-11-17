@@ -8,6 +8,30 @@ use sha2::{Digest, Sha256};
 
 use super::super::approval_export::form::FixedNumber;
 
+/// 解析“1,234.00 / ￥1,234.00 / 1 234.00”这类展示文本。
+///
+/// 只用于比较和单选→数字转换；不改变写文本列的原始文案。
+pub(crate) fn parse_numeric_text(text: &str) -> Option<FixedNumber> {
+    let cleaned: String = text
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                ',' | '，' | ' ' | '\u{00a0}' | '¥' | '￥' | '$' | '€' | '£'
+            )
+        })
+        .collect();
+    let unsigned = cleaned
+        .strip_prefix('-')
+        .or_else(|| cleaned.strip_prefix('+'))
+        .unwrap_or(&cleaned);
+    // 带前导零的编码（如 00123）不能和数字 123 混为一谈。
+    if unsigned.len() > 1 && unsigned.starts_with('0') && !unsigned.starts_with("0.") {
+        return None;
+    }
+    FixedNumber::parse(&cleaned)
+}
+
 /// 已经上传到多维表、可直接写附件列的附件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedAttachment {
@@ -192,6 +216,17 @@ mod tests {
         assert_ne!(SyncValue::Bool(false).hash(), SyncValue::Empty.hash());
         assert_ne!(number("0").hash(), SyncValue::Empty.hash());
         assert!(!SyncValue::Bool(false).is_empty());
+    }
+
+    #[test]
+    fn numeric_text_preserves_leading_zero_codes() {
+        assert!(parse_numeric_text("1,234.00").is_some());
+        assert!(parse_numeric_text("￥1,234.00").is_some());
+        assert!(parse_numeric_text("0.5").is_some());
+        assert!(
+            parse_numeric_text("00123").is_none(),
+            "带前导零的编码不能当成数字 123"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::addon::feishu::domain::bitable::FieldItem;
 use crate::addon::feishu::domain::widget_rules;
 
 use super::error::SyncError;
-use super::value::{PreparedAttachment, SyncValue};
+use super::value::{parse_numeric_text, PreparedAttachment, SyncValue};
 
 /// 外部选项反查。
 #[async_trait]
@@ -90,6 +90,13 @@ pub(crate) struct ReviewField {
     pub(crate) error: SyncError,
 }
 
+/// 只读列（公式/查找）的期望值；不写入，写后回读比对。
+#[derive(Debug, Clone)]
+pub(crate) struct VerifyField {
+    pub(crate) field_id: String,
+    pub(crate) expected: SyncValue,
+}
+
 /// 一条记录的反向映射结果。
 #[derive(Debug, Clone)]
 pub(crate) struct RecordPlan {
@@ -98,6 +105,7 @@ pub(crate) struct RecordPlan {
     pub(crate) patches: Vec<FieldPatch>,
     pub(crate) skipped: Vec<SkippedField>,
     pub(crate) reviews: Vec<ReviewField>,
+    pub(crate) verifications: Vec<VerifyField>,
 }
 
 impl RecordPlan {
@@ -125,6 +133,7 @@ pub(crate) async fn build_single(input: PlanInput<'_>) -> RecordPlan {
         patches: Vec::new(),
         skipped: Vec::new(),
         reviews: Vec::new(),
+        verifications: Vec::new(),
     };
 
     let duplicates = duplicate_targets(input.widgets);
@@ -167,7 +176,8 @@ pub(crate) async fn build_single(input: PlanInput<'_>) -> RecordPlan {
             });
             continue;
         };
-        if !target_supported(&widget.widget_type, field_type) {
+        let read_only = matches!(field_type, 19 | 20);
+        if !read_only && !target_supported(&widget.widget_type, field_type) {
             plan.reviews.push(ReviewField {
                 field_id: widget.bitable_field.clone(),
                 error: SyncError::UnsupportedTarget {
@@ -216,6 +226,41 @@ pub(crate) async fn build_single(input: PlanInput<'_>) -> RecordPlan {
                 });
                 continue;
             }
+        };
+
+        // 公式/查找列是只读派生值：不写，只记录期望值，由 apply 层回读比对。
+        if read_only {
+            plan.verifications.push(VerifyField {
+                field_id: widget.bitable_field.clone(),
+                expected: value,
+            });
+            continue;
+        }
+
+        // 单选控件的文案形态是 Number 时按十进制解析；解析不了再转 review。
+        let value = if field_type == 2
+            && matches!(widget.widget_type.as_str(), "radio" | "radioV2" | "select")
+        {
+            match &value {
+                SyncValue::Labels(labels) if labels.len() == 1 => {
+                    match parse_numeric_text(labels[0].trim()) {
+                        Some(number) => SyncValue::Number(number),
+                        None => {
+                            plan.reviews.push(ReviewField {
+                                field_id: widget.bitable_field.clone(),
+                                error: SyncError::InvalidValue {
+                                    widget_id: widget.widget_id.clone(),
+                                    reason: "单选选项不是十进制数字",
+                                },
+                            });
+                            continue;
+                        }
+                    }
+                }
+                _ => value,
+            }
+        } else {
+            value
         };
 
         // 日期区间：配了结束列就拆成两个日期补丁；没配就把对象交给 encode
@@ -297,6 +342,49 @@ pub(crate) async fn build_single(input: PlanInput<'_>) -> RecordPlan {
             });
             continue;
         }
+
+        // 自由文本写单选列：只接受目标列已有的选项，绝不自动新增选项。
+        if field_type == 3
+            && matches!(widget.widget_type.as_str(), "input" | "textarea")
+            && !value.is_empty()
+        {
+            let SyncValue::Text(text) = &value else {
+                plan.reviews.push(ReviewField {
+                    field_id: widget.bitable_field.clone(),
+                    error: SyncError::InvalidValue {
+                        widget_id: widget.widget_id.clone(),
+                        reason: "单选列的值不是文本",
+                    },
+                });
+                continue;
+            };
+            let matched = field
+                .option_names()
+                .iter()
+                .any(|option| option.trim() == text.trim());
+            if !matched {
+                plan.reviews.push(ReviewField {
+                    field_id: widget.bitable_field.clone(),
+                    error: SyncError::OptionNotFound {
+                        field_id: widget.bitable_field.clone(),
+                    },
+                });
+                continue;
+            }
+        }
+
+        // 写单选列时按选项名去空格，避免“匹配成功但写入带空格文案”。
+        let value = if field_type == 3
+            && matches!(widget.widget_type.as_str(), "input" | "textarea")
+            && !value.is_empty()
+        {
+            match value {
+                SyncValue::Text(text) => SyncValue::Text(text.trim().to_string()),
+                other => other,
+            }
+        } else {
+            value
+        };
 
         // 超链接列只能放一个实例 Code；多个时写第一个并留一条跳过记录。
         if field_type == 15 {
@@ -430,13 +518,25 @@ async fn extract_value(
     let widget_id = widget.widget_id.clone();
     match widget.widget_type.as_str() {
         "input" | "textarea" => Ok(SyncValue::Text(node.display_text())),
-        "number" | "amount" | "formula" => {
+        "number" | "amount" => {
             node.number()
                 .map(SyncValue::Number)
                 .ok_or(SyncError::InvalidValue {
                     widget_id,
                     reason: "数字控件不是十进制数字",
                 })
+        }
+        "formula" => {
+            if let Some(number) = node.number() {
+                Ok(SyncValue::Number(number))
+            } else {
+                let text = node.display_text();
+                if text.trim().is_empty() {
+                    Ok(SyncValue::Empty)
+                } else {
+                    Ok(SyncValue::Text(text))
+                }
+            }
         }
         "date" => {
             let text = node.display_text();
@@ -645,10 +745,10 @@ fn target_field<'a>(fields: &'a [FieldItem], field_id: &str) -> Option<&'a Field
 
 fn target_supported(widget_type: &str, field_type: i32) -> bool {
     match widget_type {
-        "input" | "textarea" => field_type == 1,
+        "input" | "textarea" => matches!(field_type, 1 | 3),
         "number" | "amount" | "formula" => field_type == 2,
         "date" | "dateInterval" => field_type == 5,
-        "radio" | "radioV2" | "select" => matches!(field_type, 1 | 3),
+        "radio" | "radioV2" | "select" => matches!(field_type, 1..=3),
         "checkbox" | "checkboxV2" | "multiSelect" => matches!(field_type, 1 | 4),
         "telephone" => matches!(field_type, 1 | 13),
         "contact" => matches!(field_type, 1 | 11),
@@ -688,7 +788,7 @@ fn duplicate_targets(widgets: &[WidgetMap]) -> BTreeSet<String> {
 mod tests {
     use super::*;
     use crate::addon::feishu::domain::approval_convert::Converter;
-    use crate::addon::feishu::domain::bitable::FieldItem;
+    use crate::addon::feishu::domain::bitable::{FieldItem, FieldProperty, PropertyOption};
 
     struct FakeOptions {
         by_id: BTreeMap<(String, String), String>,
@@ -759,6 +859,28 @@ mod tests {
             ui_type: None,
             property: None,
         }
+    }
+
+    fn field_with_options(field_id: &str, field_type: i32, options: &[&str]) -> FieldItem {
+        FieldItem {
+            property: Some(FieldProperty {
+                options: options
+                    .iter()
+                    .map(|name| PropertyOption {
+                        name: (*name).to_string(),
+                    })
+                    .collect(),
+                table_id: None,
+            }),
+            ..field(field_id, field_type)
+        }
+    }
+
+    fn number(text: &str) -> SyncValue {
+        SyncValue::Number(
+            crate::addon::feishu::domain::approval_export::form::FixedNumber::parse(text)
+                .unwrap_or_else(|| panic!("{text}")),
+        )
     }
 
     fn widget(
@@ -1019,5 +1141,123 @@ mod tests {
         assert_eq!(plan.patches.len(), 2);
         assert_eq!(plan.patches[0].value, SyncValue::Millis(1_577_808_000_000));
         assert_eq!(plan.patches[1].value, SyncValue::Millis(1_577_980_800_000));
+    }
+
+    #[tokio::test]
+    async fn input_to_single_select_writes_when_option_exists() {
+        let form = r#"[{"id":"bank","type":"input","value":"中国建设银行"}]"#;
+        let widgets = [widget("bank", "input", "fld_bank", &[], None)];
+        let fields = [field_with_options(
+            "fld_bank",
+            3,
+            &["中国建设银行", "中信银行"],
+        )];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.reviews.is_empty(), "{:?}", plan.reviews);
+        assert_eq!(plan.patches.len(), 1);
+        assert_eq!(
+            plan.patches[0].value,
+            SyncValue::Text("中国建设银行".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn input_to_single_select_trims_matched_option() {
+        let form = r#"[{"id":"bank","type":"input","value":"中国建设银行 "}]"#;
+        let widgets = [widget("bank", "input", "fld_bank", &[], None)];
+        let fields = [field_with_options("fld_bank", 3, &["中国建设银行"])];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.reviews.is_empty(), "{:?}", plan.reviews);
+        assert_eq!(
+            plan.patches[0].value,
+            SyncValue::Text("中国建设银行".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn input_to_single_select_reviews_when_option_missing() {
+        let form = r#"[{"id":"bank","type":"input","value":"不存在银行"}]"#;
+        let widgets = [widget("bank", "input", "fld_bank", &[], None)];
+        let fields = [field_with_options("fld_bank", 3, &["中国建设银行"])];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.patches.is_empty());
+        assert_eq!(
+            plan.reviews
+                .first()
+                .map(|review| review.error.code())
+                .unwrap_or_default(),
+            "option_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn radio_to_number_parses_numeric_label() {
+        let form = r#"[
+            {"id":"rate","type":"radioV2","value":"opt1",
+             "option":{"key":"opt1","text":"1.5"}}
+        ]"#;
+        let widgets = [widget(
+            "rate",
+            "radioV2",
+            "fld_rate",
+            &[("1.5", "opt1")],
+            None,
+        )];
+        let fields = [field("fld_rate", 2)];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.reviews.is_empty(), "{:?}", plan.reviews);
+        assert_eq!(plan.patches.len(), 1);
+        assert_eq!(plan.patches[0].value, number("1.5"));
+    }
+
+    #[tokio::test]
+    async fn radio_to_number_reviews_non_numeric_label() {
+        let form = r#"[
+            {"id":"rate","type":"radioV2","value":"opt1",
+             "option":{"key":"opt1","text":"不适用"}}
+        ]"#;
+        let widgets = [widget(
+            "rate",
+            "radioV2",
+            "fld_rate",
+            &[("不适用", "opt1")],
+            None,
+        )];
+        let fields = [field("fld_rate", 2)];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.patches.is_empty());
+        assert_eq!(
+            plan.reviews
+                .first()
+                .map(|review| review.error.code())
+                .unwrap_or_default(),
+            "invalid_value"
+        );
+    }
+
+    #[tokio::test]
+    async fn formula_target_is_not_a_review() {
+        let form = r#"[{"id":"total","type":"formula","value":100}]"#;
+        let widgets = [widget("total", "formula", "fld_total", &[], None)];
+        let fields = [field("fld_total", 19)];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.reviews.is_empty(), "{:?}", plan.reviews);
+        assert!(plan.patches.is_empty());
+        assert_eq!(plan.verifications.len(), 1);
+        assert_eq!(plan.verifications[0].field_id, "fld_total");
+        assert_eq!(plan.verifications[0].expected, number("100"));
+    }
+
+    #[tokio::test]
+    async fn formula_text_target_keeps_text_for_verification() {
+        let form = r#"[{"id":"code","type":"formula","value":"办公费00005"}]"#;
+        let widgets = [widget("code", "formula", "fld_code", &[], None)];
+        let fields = [field("fld_code", 20)];
+        let plan = run_plan(form, &widgets, &fields).await;
+        assert!(plan.reviews.is_empty(), "{:?}", plan.reviews);
+        assert_eq!(
+            plan.verifications[0].expected,
+            SyncValue::Text("办公费00005".into())
+        );
     }
 }

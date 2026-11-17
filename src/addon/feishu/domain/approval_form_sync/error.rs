@@ -26,6 +26,10 @@ pub(crate) enum SyncError {
         field_id: String,
         field_type: Option<i32>,
     },
+    /// 值不在目标单选/多选列的选项里；不写入、不改选项。
+    OptionNotFound { field_id: String },
+    /// 公式/查找列写后回读与审批表单不一致。
+    ReadOnlyMismatch { field_id: String },
     /// 外部选项 ID/文案反查不到。
     OptionUnresolved { widget_id: String },
     /// 外部选项同名多 id / 固定选项多对一，无法唯一确定。
@@ -69,6 +73,8 @@ impl SyncError {
             Self::InvalidValue { .. } => "invalid_value",
             Self::UnsupportedWidget { .. } => "unsupported_widget",
             Self::UnsupportedTarget { .. } => "unsupported_target",
+            Self::OptionNotFound { .. } => "option_not_found",
+            Self::ReadOnlyMismatch { .. } => "readonly_mismatch",
             Self::OptionUnresolved { .. } => "option_unresolved",
             Self::OptionAmbiguous { .. } => "option_ambiguous",
             Self::AttachmentTooLarge { .. } => "attachment_too_large",
@@ -112,6 +118,12 @@ impl std::fmt::Display for SyncError {
                 formatter,
                 "目标列「{field_id}」（type={field_type:?}）不可写或类型不匹配"
             ),
+            Self::OptionNotFound { field_id } => {
+                write!(formatter, "目标列「{field_id}」的选项里没有表单值，未写入")
+            }
+            Self::ReadOnlyMismatch { field_id } => {
+                write!(formatter, "只读列「{field_id}」写后回读与审批表单不一致")
+            }
             Self::OptionUnresolved { widget_id } => {
                 write!(formatter, "控件「{widget_id}」的选项无法反查")
             }

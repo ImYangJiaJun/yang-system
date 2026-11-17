@@ -4,15 +4,16 @@
 //! （`batch_update` 的 `fields` 按字段名），本层不依赖列名。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use super::super::approval_export::form::{text_of_value, FixedNumber};
-use super::encode::encode_cell;
+use super::encode::{encode_cell, text_for_text_column};
 use super::error::SyncError;
-use super::plan::RecordPlan;
-use super::value::SyncValue;
+use super::plan::{RecordPlan, VerifyField};
+use super::value::{parse_numeric_text, SyncValue};
 
 /// 多维表当前记录（单元格按 `field_id` 归一）。
 #[derive(Debug, Clone)]
@@ -41,6 +42,12 @@ pub(crate) trait ConnectResolver: Send + Sync {
     async fn record_ids(&self, codes: &[String]) -> Result<Vec<String>, SyncError>;
 }
 
+/// 只读列首次回读不一致后的重读延迟；Bitable 公式/查找列可能异步重算。
+#[cfg(not(test))]
+const READONLY_RECHECK_DELAY_MS: u64 = 300;
+#[cfg(test)]
+const READONLY_RECHECK_DELAY_MS: u64 = 0;
+
 /// 一次应用的结果。
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ApplyReport {
@@ -65,7 +72,7 @@ pub(crate) async fn apply_plan(
             .collect(),
         ..ApplyReport::default()
     };
-    if plan.patches.is_empty() {
+    if plan.patches.is_empty() && plan.verifications.is_empty() {
         return Ok(report);
     }
 
@@ -79,6 +86,11 @@ pub(crate) async fn apply_plan(
             record_id: plan.record_id.clone(),
             reason: "record_not_found",
         })?;
+
+    if plan.patches.is_empty() {
+        verify_readonly(&plan.verifications, &current, &mut report);
+        return Ok(report);
+    }
 
     let mut cells = BTreeMap::new();
     for patch in &plan.patches {
@@ -120,12 +132,20 @@ pub(crate) async fn apply_plan(
             report.unchanged.push(patch.field_id.clone());
             continue;
         };
-        let current_value = current
+        let current_semantic = current
             .cells
             .get(&patch.field_id)
             .map(|value| current_value(patch.target_type, value))
             .unwrap_or(SyncValue::Empty);
-        if current_value.canonical_key() == patch.value.canonical_key() {
+        // 用已编码单元格反投影期望值：文本→单选是 `Text` vs `Labels`，
+        // 单选→数字是 `Labels` vs `Number`，直接比较 patch.value 会每次误判变化。
+        // 附件是例外：编码后的单元格只剩 file_token，名称/大小在 patch.value 里。
+        let desired = if patch.target_type == 17 {
+            patch.value.clone()
+        } else {
+            current_value(patch.target_type, &cell)
+        };
+        if current_semantic.canonical_key() == desired.canonical_key() {
             report.unchanged.push(patch.field_id.clone());
         } else {
             cells.insert(patch.field_id.clone(), cell);
@@ -134,6 +154,7 @@ pub(crate) async fn apply_plan(
     }
 
     if cells.is_empty() {
+        verify_readonly(&plan.verifications, &current, &mut report);
         return Ok(report);
     }
     store
@@ -154,6 +175,29 @@ pub(crate) async fn apply_plan(
                 record_id: plan.record_id.clone(),
                 reason: "record_disappeared_after_write",
             })?;
+        let mut readonly_mismatches = readonly_mismatch_fields(&plan.verifications, &after);
+        if !readonly_mismatches.is_empty() {
+            // 公式/查找列可能异步重算：首次不一致先等一小段再读一次，
+            // 两次都不一致才升级为 review/告警，避免每次重提都误报。
+            tokio::time::sleep(Duration::from_millis(READONLY_RECHECK_DELAY_MS)).await;
+            if let Ok(retry_records) = store
+                .get_records(std::slice::from_ref(&plan.record_id))
+                .await
+            {
+                if let Some(retry_record) = retry_records
+                    .into_iter()
+                    .find(|record| record.record_id == plan.record_id)
+                {
+                    readonly_mismatches =
+                        readonly_mismatch_fields(&plan.verifications, &retry_record);
+                }
+            }
+        }
+        for field_id in readonly_mismatches {
+            report
+                .reviews
+                .push(SyncError::ReadOnlyMismatch { field_id });
+        }
         for (field_id, expected) in cells {
             let Some(actual) = after.cells.get(&field_id) else {
                 report.reviews.push(SyncError::BitableWrite {
@@ -260,6 +304,154 @@ fn target_type_of(cell: &Value) -> i32 {
         // 否则期望值与实际值都会退化成空值，写后校验变成永远通过。
         Value::Object(map) if map.get("link_record_ids").is_some() => 18,
         _ => 1,
+    }
+}
+
+fn readonly_mismatch_fields(verifications: &[VerifyField], record: &BitableRecord) -> Vec<String> {
+    verifications
+        .iter()
+        .filter_map(|verify| {
+            let actual = record
+                .cells
+                .get(&verify.field_id)
+                .map(readonly_value)
+                .unwrap_or(SyncValue::Empty);
+            (verification_key(&verify.expected) != verification_key(&actual))
+                .then(|| verify.field_id.clone())
+        })
+        .collect()
+}
+
+fn verify_readonly(
+    verifications: &[VerifyField],
+    record: &BitableRecord,
+    report: &mut ApplyReport,
+) {
+    for field_id in readonly_mismatch_fields(verifications, record) {
+        report
+            .reviews
+            .push(SyncError::ReadOnlyMismatch { field_id });
+    }
+}
+
+/// 公式/查找列的回读形态：`{"type":2,"value":[100]}`、
+/// `{"type":3,"value":["办公费"]}` 或富文本段数组。
+fn readonly_value(cell: &Value) -> SyncValue {
+    match cell {
+        Value::Null => SyncValue::Empty,
+        Value::String(text) => text_value(text),
+        Value::Number(_) => number_cell(cell)
+            .map(SyncValue::Number)
+            .unwrap_or(SyncValue::Empty),
+        Value::Bool(flag) => SyncValue::Bool(*flag),
+        Value::Array(items) => {
+            if items
+                .iter()
+                .all(|item| item.get("text").is_some() && item.get("type").is_some())
+            {
+                let text: String = items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
+                    .collect();
+                return text_value(&text);
+            }
+            collapse_readonly(
+                items
+                    .iter()
+                    .map(readonly_value)
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+            )
+        }
+        Value::Object(map) => {
+            if let Some(value) = map.get("value") {
+                return readonly_value(value);
+            }
+            for key in ["text", "name", "label"] {
+                if let Some(Value::String(text)) = map.get(key) {
+                    return text_value(text);
+                }
+            }
+            SyncValue::Empty
+        }
+    }
+}
+
+fn collapse_readonly(mut values: Vec<SyncValue>) -> SyncValue {
+    match values.len() {
+        0 => SyncValue::Empty,
+        1 => values.remove(0),
+        _ => SyncValue::Labels(
+            values
+                .iter()
+                .map(|value| text_for_text_column(value).unwrap_or_default())
+                .filter(|text| !text.trim().is_empty())
+                .collect(),
+        ),
+    }
+}
+
+fn text_value(text: &str) -> SyncValue {
+    if text.trim().is_empty() {
+        SyncValue::Empty
+    } else {
+        SyncValue::Text(text.to_string())
+    }
+}
+
+/// 只读列比较键：数字文本（千分位/币种符号）与 Number 同形；标签/多值排序。
+fn verification_key(value: &SyncValue) -> String {
+    match value.clone().normalized() {
+        SyncValue::Empty => "empty".to_string(),
+        SyncValue::Number(number) => format!("number:{}", number.to_json_value()),
+        SyncValue::Text(text) => {
+            let trimmed = text.trim();
+            match parse_numeric_text(trimmed) {
+                Some(number) => format!("number:{}", number.to_json_value()),
+                None => format!("text:{trimmed}"),
+            }
+        }
+        SyncValue::Labels(mut labels) => {
+            labels.sort();
+            labels.dedup();
+            if labels.len() == 1 {
+                verification_key(&SyncValue::Text(labels.remove(0)))
+            } else {
+                format!("labels:{}", labels.join("\u{1f}"))
+            }
+        }
+        SyncValue::Bool(flag) => format!("bool:{flag}"),
+        SyncValue::Millis(millis) => format!("millis:{millis}"),
+        SyncValue::DateInterval { start, end } => format!("interval:{start}:{end}"),
+        SyncValue::PersonIds(mut ids) => {
+            ids.sort();
+            ids.dedup();
+            format!("person:{}", ids.join("\u{1f}"))
+        }
+        SyncValue::ConnectCodes(mut codes) => {
+            codes.sort();
+            codes.dedup();
+            format!("connect:{}", codes.join("\u{1f}"))
+        }
+        SyncValue::Attachments(mut files) => {
+            files.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then(left.size.cmp(&right.size))
+                    .then(left.file_token.cmp(&right.file_token))
+            });
+            let parts: Vec<String> = files
+                .iter()
+                .map(|file| {
+                    format!(
+                        "{}|{}",
+                        file.name,
+                        file.size.map_or("-".into(), |size| size.to_string())
+                    )
+                })
+                .collect();
+            format!("attachments:{}", parts.join("\u{1f}"))
+        }
     }
 }
 
@@ -413,7 +605,7 @@ fn link_record_ids(cell: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::addon::feishu::domain::approval_form_sync::plan::{
-        FieldPatch, RecordPlan, ReviewField,
+        FieldPatch, RecordPlan, ReviewField, VerifyField,
     };
     use std::sync::Mutex;
 
@@ -424,6 +616,9 @@ mod tests {
         fail_write: Mutex<bool>,
         corrupt_write: Mutex<bool>,
         tamper_connect: Mutex<bool>,
+        /// 模拟公式列异步重算：前两次读旧值，第三次读新值。
+        readonly_refresh: Mutex<Option<(String, Value, Value)>>,
+        readonly_reads: Mutex<usize>,
     }
 
     impl FakeStore {
@@ -451,10 +646,34 @@ mod tests {
             &self,
             record_ids: &[String],
         ) -> Result<Vec<BitableRecord>, SyncError> {
-            let records = self.records.lock().map_err(|_| SyncError::BitableRead {
+            let mut records = self.records.lock().map_err(|_| SyncError::BitableRead {
                 record_id: String::new(),
                 reason: "lock",
             })?;
+            let refresh = self
+                .readonly_refresh
+                .lock()
+                .map_err(|_| SyncError::BitableRead {
+                    record_id: String::new(),
+                    reason: "lock",
+                })?
+                .clone();
+            if let Some((field_id, stale, fresh)) = refresh {
+                let mut reads = self
+                    .readonly_reads
+                    .lock()
+                    .map_err(|_| SyncError::BitableRead {
+                        record_id: String::new(),
+                        reason: "lock",
+                    })?;
+                *reads += 1;
+                let value = if *reads >= 3 { fresh } else { stale };
+                for record_id in record_ids {
+                    if let Some(cells) = records.get_mut(record_id) {
+                        cells.insert(field_id.clone(), value.clone());
+                    }
+                }
+            }
             Ok(record_ids
                 .iter()
                 .filter_map(|record_id| {
@@ -536,6 +755,7 @@ mod tests {
             patches,
             skipped: Vec::new(),
             reviews: Vec::new(),
+            verifications: Vec::new(),
         }
     }
 
@@ -741,5 +961,216 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(report.reviews.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn readonly_verification_reports_formula_mismatch() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([(
+                "fld_total".to_string(),
+                serde_json::json!({"type": 2, "value": [99]}),
+            )]),
+        );
+        let mut plan = make_plan("rec1", Vec::new());
+        plan.verifications.push(VerifyField {
+            field_id: "fld_total".into(),
+            expected: number("100"),
+        });
+        let report = apply_plan(&store, &FakeConnects, &plan, false, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            report
+                .reviews
+                .iter()
+                .any(|error| error.code() == "readonly_mismatch"),
+            "{:?}",
+            report.reviews
+        );
+    }
+
+    #[tokio::test]
+    async fn readonly_verification_uses_post_write_readback() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([
+                ("fld_text".to_string(), serde_json::json!("旧值")),
+                (
+                    "fld_total".to_string(),
+                    serde_json::json!({"type": 2, "value": [99]}),
+                ),
+            ]),
+        );
+        let mut plan = make_plan(
+            "rec1",
+            vec![FieldPatch {
+                field_id: "fld_text".into(),
+                target_type: 1,
+                value: SyncValue::Text("新值".into()),
+            }],
+        );
+        plan.verifications.push(VerifyField {
+            field_id: "fld_total".into(),
+            expected: number("100"),
+        });
+        let report = apply_plan(&store, &FakeConnects, &plan, false, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(report.written, vec!["fld_text".to_string()]);
+        assert!(
+            report
+                .reviews
+                .iter()
+                .any(|error| error.code() == "readonly_mismatch"),
+            "写后公式仍未重算时必须报只读列不一致"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_select_text_diff_does_not_rewrite_every_time() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([("fld_bank".to_string(), serde_json::json!("中国建设银行"))]),
+        );
+        let plan = make_plan(
+            "rec1",
+            vec![FieldPatch {
+                field_id: "fld_bank".into(),
+                target_type: 3,
+                value: SyncValue::Text("中国建设银行".into()),
+            }],
+        );
+        let report = apply_plan(&store, &FakeConnects, &plan, false, false)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(report.written.is_empty(), "{:?}", report.written);
+        assert!(store.updates().is_empty());
+    }
+
+    #[test]
+    fn verification_key_normalizes_formatted_numbers_and_labels() {
+        assert_eq!(
+            verification_key(&SyncValue::Text("1,234.00".into())),
+            verification_key(&number("1234"))
+        );
+        assert_eq!(
+            verification_key(&SyncValue::Text("￥1,234.00".into())),
+            verification_key(&number("1234"))
+        );
+        assert_eq!(
+            verification_key(&SyncValue::Labels(vec!["1.5".into()])),
+            verification_key(&number("1.5"))
+        );
+        assert_ne!(
+            verification_key(&SyncValue::Text("办公费".into())),
+            verification_key(&number("1"))
+        );
+    }
+
+    #[test]
+    fn readonly_value_reads_formula_objects_and_text_segments() {
+        assert_eq!(
+            readonly_value(&serde_json::json!({"type": 2, "value": [100]})),
+            number("100")
+        );
+        assert_eq!(
+            readonly_value(&serde_json::json!({"type": 3, "value": ["办公费00005"]})),
+            SyncValue::Text("办公费00005".into())
+        );
+        assert_eq!(
+            readonly_value(&serde_json::json!([
+                {"text": "办公", "type": "text"},
+                {"text": "费", "type": "text"}
+            ])),
+            SyncValue::Text("办公费".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn readonly_verification_retries_after_formula_recalculation() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([
+                ("fld_text".to_string(), serde_json::json!("旧值")),
+                (
+                    "fld_total".to_string(),
+                    serde_json::json!({"type": 2, "value": [99]}),
+                ),
+            ]),
+        );
+        *store
+            .readonly_refresh
+            .lock()
+            .unwrap_or_else(|error| panic!("{error}")) = Some((
+            "fld_total".to_string(),
+            serde_json::json!({"type": 2, "value": [99]}),
+            serde_json::json!({"type": 2, "value": [100]}),
+        ));
+        let mut plan = make_plan(
+            "rec1",
+            vec![FieldPatch {
+                field_id: "fld_text".into(),
+                target_type: 1,
+                value: SyncValue::Text("新值".into()),
+            }],
+        );
+        plan.verifications.push(VerifyField {
+            field_id: "fld_total".into(),
+            expected: number("100"),
+        });
+        let report = apply_plan(&store, &FakeConnects, &plan, false, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(report.reviews.is_empty(), "{:?}", report.reviews);
+        assert_eq!(
+            *store
+                .readonly_reads
+                .lock()
+                .unwrap_or_else(|error| panic!("{error}")),
+            3,
+            "必须经历当前值、写后回读、延迟重读三次"
+        );
+    }
+
+    #[tokio::test]
+    async fn readonly_text_formula_matches_bitable_lookup_cell() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([(
+                "fld_code".to_string(),
+                serde_json::json!({"type": 3, "value": ["办公费00005"]}),
+            )]),
+        );
+        let mut plan = make_plan("rec1", Vec::new());
+        plan.verifications.push(VerifyField {
+            field_id: "fld_code".into(),
+            expected: SyncValue::Text("办公费00005".into()),
+        });
+        let report = apply_plan(&store, &FakeConnects, &plan, false, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(report.reviews.is_empty(), "{:?}", report.reviews);
+    }
+
+    #[tokio::test]
+    async fn connect_codes_to_text_diff_is_stable() {
+        let store = FakeStore::with(
+            "rec1",
+            BTreeMap::from([("fld_connect".to_string(), serde_json::json!("A"))]),
+        );
+        let plan = make_plan(
+            "rec1",
+            vec![FieldPatch {
+                field_id: "fld_connect".into(),
+                target_type: 1,
+                value: SyncValue::ConnectCodes(vec!["A".into()]),
+            }],
+        );
+        let report = apply_plan(&store, &FakeConnects, &plan, false, false)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(report.written.is_empty(), "{:?}", report.written);
+        assert!(store.updates().is_empty());
     }
 }
