@@ -57,6 +57,23 @@ describe("导航投影", () => {
     expect(groups[0]?.title).toBe("工作台");
   });
 
+  it("具名数据源的同名表在无标题时用数据源前缀消歧", () => {
+    const doc = catalog({
+      table_views: [
+        {
+          ...view("shared.customers", "shared.customers.list"),
+          title: "",
+          table: "customers",
+          datasource: "pg_main",
+        },
+      ],
+    });
+
+    const pages = buildNavigationPages(doc);
+
+    expect(pages[0]).toMatchObject({ title: "pg_main.customers" });
+  });
+
   it("已分配的视图不重复出现在工作台", () => {
     const doc = catalog({
       table_views: [view("account.user.main", "account.user.list")],

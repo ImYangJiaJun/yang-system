@@ -23,7 +23,11 @@ function syntheticPageForView(
   return {
     id: view.view_id,
     identity: WORKSPACE_IDENTITY,
-    title: view.title || view.table,
+    title:
+      view.title ||
+      (view.datasource && view.datasource !== "default"
+        ? `${view.datasource}.${view.table}`
+        : view.table),
     description: "",
     icon: "table",
     order: Number.MAX_SAFE_INTEGER,

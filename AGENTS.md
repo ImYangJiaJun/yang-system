@@ -18,9 +18,9 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 
 ### 技术栈
 
-- 后端：Rust 2021（`rust-version = "1.80"`；仓库没有 `rust-toolchain` 文件，1.97.1 工具链由 `scripts/setup_local.ps1` 在本地安装、由 CI 的 `RUST_VERSION` 环境变量固定），axum（经 `yang-base` 的 `transport-axum`）、tokio、sqlx (MySQL)、Redis、jsonwebtoken、argon2（框架侧密码哈希）、lettre (SMTP)、tracing、metrics。
-- 前端：React 19 / Vite 8 / Tailwind CSS 4 / shadcn/ui（组件源码入库 `frontend/src/shared/ui/`）/ TanStack Query + Table / react-router 7 / zod / Ajv（动态 JSON Schema 校验）/ react-hook-form，TypeScript ~5.9，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24+。技术选型决策见 `docs/architecture/frontend-rebuild/` ADR 组。浏览器契约：Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4。
-- 依赖服务：MySQL 8.0（`127.0.0.1:3306`）与 Redis 7（`127.0.0.1:6379`），由根目录 `compose.yaml` 提供；`docker/mysql/init/001-create-databases.sql` 会同时创建 `yang_system` 和 `yang_system_test` 两个库（utf8mb4）。注意 `docker compose down -v` 会永久删除本地数据卷。
+- 后端：Rust 2021（`rust-version = "1.80"`；仓库没有 `rust-toolchain` 文件，1.97.1 工具链由 `scripts/setup_local.ps1` 在本地安装、由 CI 的 `RUST_VERSION` 环境变量固定），axum（经 `yang-base` 的 `transport-axum`）、tokio、sqlx（MySQL/PostgreSQL）、Redis、jsonwebtoken、argon2（框架侧密码哈希）、lettre (SMTP)、tracing、metrics。
+- 前端：React 19 / Vite 8 / Tailwind CSS 4 / shadcn/ui（组件源码入库 `frontend/src/shared/ui/`）/ TanStack Query + Table / react-router 7 / zod / Ajv（动态 JSON Schema 校验）/ react-hook-form，TypeScript ~5.9，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24.x（`engines` 固定；Node 25+ 的全局 Web Storage 会破坏 jsdom 测试环境）。技术选型决策见 `docs/architecture/frontend-rebuild/` ADR 组。浏览器契约：Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4。
+- 依赖服务：MySQL 8.0（`127.0.0.1:3306`）与 Redis 7（`127.0.0.1:6379`），由根目录 `compose.yaml` 提供；可选 PostgreSQL 16（`127.0.0.1:55432`，`postgres/postgres`，库 `test`）用于 `[postgres]` 具名数据源与 PG 集成测试。`docker/mysql/init/001-create-databases.sql` 会同时创建 `yang_system` 和 `yang_system_test` 两个库（utf8mb4）。注意 `docker compose down -v` 会永久删除本地数据卷。
 - 辅助脚本：Python 3.11+（质量门禁、架构检查、Action 脚手架、本地初始化、OpenAPI 导出）。
 
 ## 目录结构
@@ -109,11 +109,12 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 
   ```powershell
   $env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:yang-local@127.0.0.1:3306/yang_system_test"
+  $env:YANG_SYSTEM_TEST_POSTGRES_URL = "postgres://postgres:postgres@127.0.0.1:55432/test"
   $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
   python scripts/run_ci.py integration
   ```
 
-  覆盖登录/MFA 邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）、首账号引导的哨兵并发仲裁，以及审批派发的全链路（`60012` 走 uuid 回捞、等待态不写字段、回写折半隔离毒记录、认领游标不原地空转、令牌桶限速与官方 100/分钟上界的不变式、告警正反演练走 `promtool`），同批聚合派发（签名排除任意深度明细与附件源标识、组键含成员集合、多行明细表单、批量认领只取组 leader、组收尾/摘组/删除配置、`60012` 按组 uuid 回捞、回填部分失败整组重试、组事件按实例码与 uuid fan-out、暂停组零认领与解散全选判定），以及审批派发控制台（配置 CRUD 闭环、delete 清全部任务行以避免全局 `record_id` 卡住重建、派发请求逐出口落记录、批量受理与失败出口、记录/任务查询过滤——`feishu_approval_dispatch_integration.rs`）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_option_index_integration.rs`、`feishu_approval_options_integration.rs`、`feishu_xlsx_import_integration.rs`、`feishu_approval_dispatch_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs`、`grant_holders_integration.rs`、`user_lookup_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十六个入口。
+  覆盖登录/MFA 邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）、首账号引导的哨兵并发仲裁，以及审批派发的全链路（`60012` 走 uuid 回捞、等待态不写字段、回写折半隔离毒记录、认领游标不原地空转、令牌桶限速与官方 100/分钟上界的不变式、告警正反演练走 `promtool`），同批聚合派发（签名排除任意深度明细与附件源标识、组键含成员集合、多行明细表单、批量认领只取组 leader、组收尾/摘组/删除配置、`60012` 按组 uuid 回捞、回填部分失败整组重试、组事件按实例码与 uuid fan-out、暂停组零认领与解散全选判定），以及审批派发控制台（配置 CRUD 闭环、delete 清全部任务行以避免全局 `record_id` 卡住重建、派发请求逐出口落记录、批量受理与失败出口、记录/任务查询过滤——`feishu_approval_dispatch_integration.rs`）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_option_index_integration.rs`、`feishu_approval_options_integration.rs`、`feishu_xlsx_import_integration.rs`、`feishu_approval_dispatch_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs`、`grant_holders_integration.rs`、`user_lookup_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十七个入口；新模块 PG 数据源混合模式见 `pg_module_integration.rs`（需要 `YANG_SYSTEM_TEST_POSTGRES_URL`）。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。**每处新增分支至少做一次「摘除式」变异**
   （把新加的那一条判断/守卫删掉，确认对应测试**变红**，再改回来），理由与做法见
