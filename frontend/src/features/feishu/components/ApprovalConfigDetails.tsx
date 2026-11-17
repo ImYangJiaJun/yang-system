@@ -90,6 +90,7 @@ export function ApprovalConfigDetails({
   onOpenConfig,
   onRequests,
   onAggregateChange,
+  onFormSyncChange,
 }: {
   item: ApprovalConfigItem;
   canWrite: boolean;
@@ -103,6 +104,13 @@ export function ApprovalConfigDetails({
   /// 「接入数据」tab 里的聚合开关：与配置详情页同一条 `update_config`，
   /// 只是把入口放到工作流接入这一页（开启后模板才该带 `aggregate: true`）。
   onAggregateChange: (next: boolean) => void;
+  /// 审批表单反向同步设置：退回重提后把审批值写回台账。
+  onFormSyncChange: (patch: {
+    formSyncMode?: "off" | "shadow" | "live";
+    formSyncAllowClear?: boolean;
+    formSyncRowKeyWidget?: string;
+    formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";
+  }) => void;
 }) {
   const [tab, setTab] = useState("maps");
   const [search, setSearch] = useState("");
@@ -666,6 +674,93 @@ export function ApprovalConfigDetails({
                   ) : null}
                 </div>
               </div>
+            </div>
+            <div className="space-y-3 rounded-md border border-border p-4">
+              <h3 className="text-sm font-medium">审批表单回写台账</h3>
+              <p className="text-xs text-muted-foreground">
+                审批被退回后，发起人在同一实例内修改并提交时，把审批表单值同步回原记录。
+                「影子」只计算差异、不写台账，用于上线前观察。
+              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <span className="w-24 shrink-0 text-muted-foreground">
+                  回写模式
+                </span>
+                <select
+                  aria-label="审批表单回写模式"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={item.formSyncMode}
+                  disabled={!canWrite || pending}
+                  onChange={(event) =>
+                    onFormSyncChange({
+                      formSyncMode: event.target.value as
+                        "off" | "shadow" | "live",
+                    })
+                  }
+                >
+                  <option value="off">关闭</option>
+                  <option value="shadow">影子（只观察）</option>
+                  <option value="live">启用</option>
+                </select>
+              </label>
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="approval-form-sync-clear"
+                  aria-label="允许清空台账字段"
+                  className="mt-0.5"
+                  checked={item.formSyncAllowClear}
+                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  onCheckedChange={(checked) =>
+                    onFormSyncChange({ formSyncAllowClear: checked === true })
+                  }
+                />
+                <div className="space-y-1">
+                  <label htmlFor="approval-form-sync-clear" className="text-sm">
+                    允许清空台账字段
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    审批里把字段清空时也清空台账；确认过飞书各类型清空语义后再打开。
+                  </p>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <span className="w-24 shrink-0 text-muted-foreground">
+                  聚合派生值
+                </span>
+                <select
+                  aria-label="聚合派生值写入方式"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={item.formSyncAggregateDerivedMode}
+                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  onChange={(event) =>
+                    onFormSyncChange({
+                      formSyncAggregateDerivedMode: event.target.value as
+                        "leader" | "all_members" | "skip",
+                    })
+                  }
+                >
+                  <option value="leader">写 leader 行</option>
+                  <option value="all_members">写全部成员</option>
+                  <option value="skip">不写</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <span className="w-24 shrink-0 text-muted-foreground">
+                  聚合行键控件
+                </span>
+                <Input
+                  key={item.formSyncRowKeyWidget ?? "none"}
+                  aria-label="聚合明细行键控件"
+                  defaultValue={item.formSyncRowKeyWidget ?? ""}
+                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  placeholder="可选：明细内唯一的子控件 id"
+                  onBlur={(event) => {
+                    const next = event.target.value.trim();
+                    if (next !== (item.formSyncRowKeyWidget ?? "")) {
+                      onFormSyncChange({ formSyncRowKeyWidget: next });
+                    }
+                  }}
+                />
+              </label>
             </div>
             <p className="text-xs text-muted-foreground">
               若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token

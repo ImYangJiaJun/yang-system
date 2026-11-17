@@ -9,6 +9,7 @@ pub(crate) mod approval_dispatch;
 pub(crate) mod approval_execution;
 pub(crate) mod approval_export;
 pub(crate) mod approval_feedback;
+pub(crate) mod approval_form_sync;
 pub(crate) mod approval_match;
 pub(crate) mod approval_notification;
 pub(crate) mod approval_provision;

@@ -253,6 +253,11 @@ impl FixedOffset {
         let total = self.seconds.unsigned_abs();
         format!("{sign}{:02}:{:02}", total / 3600, (total % 3600) / 60)
     }
+
+    /// 固定偏移的秒数；反向同步的日期解析需要它。
+    pub(crate) fn seconds(self) -> i32 {
+        self.seconds
+    }
 }
 
 /// 解析审批定义快照并校验映射表，返回定义树与「控件 id → 映射」。

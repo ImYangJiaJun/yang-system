@@ -3105,6 +3105,10 @@ mod tests {
                 department_field: None,
                 handler_field: None,
                 batch_scope_field: None,
+                form_sync_mode: "off",
+                form_sync_allow_clear: false,
+                form_sync_row_key_widget: None,
+                form_sync_aggregate_derived_mode: "leader",
             },
         )
         .await;
@@ -3228,6 +3232,10 @@ mod tests {
                 applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
                 status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
                 batch_scope_field: None,
+                form_sync_mode: "off",
+                form_sync_allow_clear: false,
+                form_sync_row_key_widget: None,
+                form_sync_aggregate_derived_mode: "leader",
             }).await?;
             let mut transaction = crate::db::begin_mysql(&database).await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
@@ -3468,6 +3476,10 @@ mod tests {
                 department_field: None,
                 handler_field: None,
                 batch_scope_field: None,
+                form_sync_mode: "off",
+                form_sync_allow_clear: false,
+                form_sync_row_key_widget: None,
+                form_sync_aggregate_derived_mode: "leader",
             },
         )
         .await
@@ -3731,6 +3743,10 @@ mod tests {
                 department_field: None,
                 handler_field: None,
                 batch_scope_field: None,
+                form_sync_mode: "off",
+                form_sync_allow_clear: false,
+                form_sync_row_key_widget: None,
+                form_sync_aggregate_derived_mode: "leader",
             },
         )
         .await

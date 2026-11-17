@@ -118,6 +118,13 @@ pub(super) async fn handle(
         let handler_field: Option<String> = row.optional("handler_field")?;
         let batch_scope_field: Option<String> = row.optional("batch_scope_field")?;
         let aggregate_batch: bool = row.optional("aggregate_batch")?.unwrap_or(false);
+        let form_sync_mode: Option<String> = row.optional("form_sync_mode")?;
+        let form_sync_allow_clear = row
+            .optional::<bool>("form_sync_allow_clear")?
+            .unwrap_or(false);
+        let form_sync_row_key_widget: Option<String> = row.optional("form_sync_row_key_widget")?;
+        let form_sync_aggregate_derived_mode: Option<String> =
+            row.optional("form_sync_aggregate_derived_mode")?;
         let config_maps = maps.remove(&config_id).unwrap_or_default();
 
         let mut reasons = check_aggregate_batch(aggregate_batch, batch_scope_field.as_deref());
@@ -142,6 +149,12 @@ pub(super) async fn handle(
                 department_field: department_field.as_deref(),
                 handler_field: handler_field.as_deref(),
                 batch_scope_field: batch_scope_field.as_deref(),
+                form_sync_mode: form_sync_mode.as_deref().unwrap_or("off"),
+                form_sync_allow_clear,
+                form_sync_row_key_widget: form_sync_row_key_widget.as_deref(),
+                form_sync_aggregate_derived_mode: form_sync_aggregate_derived_mode
+                    .as_deref()
+                    .unwrap_or("leader"),
             },
         )
         .await;

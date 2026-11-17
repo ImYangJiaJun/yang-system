@@ -888,6 +888,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/feishu/approval/tasks/{task_id}/form-sync/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重试表单反向同步
+         * @description 把待人工核查或重试中的表单同步任务重新排入队列，由 worker 执行
+         */
+        post: operations["feishu.approval.retry_form_sync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/feishu/batch-approval/attachments": {
         parameters: {
             query?: never;
@@ -6236,6 +6256,26 @@ export interface operations {
                     end_time_field?: string | null;
                     /** @default null */
                     flow_field?: string | null;
+                    /**
+                     * @description 聚合顶层派生值写入方式：leader / all_members / skip；省略 = leader。
+                     * @default null
+                     */
+                    form_sync_aggregate_derived_mode?: string | null;
+                    /**
+                     * @description 是否允许清空台账字段；省略 = false。
+                     * @default null
+                     */
+                    form_sync_allow_clear?: boolean | null;
+                    /**
+                     * @description 表单反向同步模式：off / shadow / live；省略 = off。
+                     * @default null
+                     */
+                    form_sync_mode?: string | null;
+                    /**
+                     * @description 聚合明细行键子控件 id；省略 = 未配置。
+                     * @default null
+                     */
+                    form_sync_row_key_widget?: string | null;
                     /** @default null */
                     handler_field?: string | null;
                     /** @description 显式控件到列的映射；省略时按名称自动匹配。 */
@@ -6974,6 +7014,26 @@ export interface operations {
                     end_time_field?: string | null;
                     /** @default null */
                     flow_field?: string | null;
+                    /**
+                     * @description 聚合顶层派生值写入方式：leader / all_members / skip；省略即不改。
+                     * @default null
+                     */
+                    form_sync_aggregate_derived_mode?: string | null;
+                    /**
+                     * @description 是否允许清空台账字段；省略即不改。
+                     * @default null
+                     */
+                    form_sync_allow_clear?: boolean | null;
+                    /**
+                     * @description 表单反向同步模式：off / shadow / live；省略即不改。
+                     * @default null
+                     */
+                    form_sync_mode?: string | null;
+                    /**
+                     * @description 聚合明细行键子控件 id；`Some("")` = 清空。
+                     * @default null
+                     */
+                    form_sync_row_key_widget?: string | null;
                     /** @default null */
                     handler_field?: string | null;
                     /** @description 全量替换字段映射；省略即不改。 */
@@ -8459,6 +8519,109 @@ export interface operations {
                 };
             };
         };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.retry_form_sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description 成功 */
             200: {

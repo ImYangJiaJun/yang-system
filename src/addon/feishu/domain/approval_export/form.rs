@@ -37,9 +37,24 @@ pub(crate) struct FormNode {
     /// 选项控件的回读对象：`{key, text}`（单选）或数组（多选/外部选项）。
     #[serde(default)]
     pub(crate) option: Option<Value>,
+    /// `contact` 控件的 open_id 可能与 `value` **同级**（`open_ids` 兄弟字段）。
+    /// 不声明它时 serde 会静默丢弃，反向同步会把「有人员」误判成空。
+    #[serde(default)]
+    pub(crate) open_ids: Vec<String>,
     /// 扩展信息；各控件类型不同，v1 只原样保留。
     #[serde(default)]
     pub(crate) ext: Option<Value>,
+}
+
+/// 实例表单里附件/图片控件回读出的一个文件。
+///
+/// `url` 是 12 小时签名地址，不是可写回多维表的 `file_token`；反向同步必须
+/// 重新下载并上传。`size` 在 `ext` 里不一定有，缺失时按「文件名」比较。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentRef {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) size: Option<i64>,
 }
 
 /// `fieldList` 的一行：单元格 id → 单元格。
@@ -63,6 +78,8 @@ impl FormRow {
 pub(crate) struct InstanceForm {
     top: BTreeMap<String, FormNode>,
     rows: BTreeMap<String, Vec<FormRow>>,
+    /// 位于控件组内的 `fieldList`：整单共享、按 leader 语义处理，不按成员行序匹配。
+    nested_detail_ids: std::collections::BTreeSet<String>,
     present: bool,
 }
 
@@ -80,17 +97,41 @@ impl InstanceForm {
             ..Self::default()
         };
         for node in nodes {
-            let id = node.id.trim().to_string();
-            if id.is_empty() {
-                // 说明控件（`text`）没有 id、也不参与取值；缺 id 的节点直接忽略。
-                continue;
-            }
-            if node.widget_type == "fieldList" {
-                form.rows.insert(id.clone(), parse_rows(&node.value));
-            }
-            form.top.insert(id, node);
+            form.index_node(node, false);
         }
         Ok(form)
+    }
+
+    /// 把一个节点及其控件组子节点、明细行索引进表单。
+    ///
+    /// 控件组子控件的 id 在实例内唯一，平铺进 `top` 后调用方不必知道父组；
+    /// 明细行仍按 `(detail_id, row_index, cell_id)` 访问，避免跨行串值。
+    ///
+    /// `inside_container` 标记当前节点是否在控件组内：控件组里的 `fieldList`
+    /// 是整单共享值，聚合反向同步不能按成员行序要求它每成员一行。
+    fn index_node(&mut self, node: FormNode, inside_container: bool) {
+        let id = node.id.trim().to_string();
+        if id.is_empty() {
+            // 说明控件（`text`）没有 id、也不参与取值；缺 id 的节点直接忽略。
+            return;
+        }
+        let rows = node.detail_rows();
+        let children = node.child_nodes();
+        if !rows.is_empty() {
+            self.rows.entry(id.clone()).or_insert(rows);
+            if inside_container {
+                self.nested_detail_ids.insert(id.clone());
+            }
+        }
+        let child_inside_container =
+            inside_container || super::super::widget_rules::is_control_group(&node.widget_type);
+        // 重复 id 保留第一次出现的节点；子节点仍继续索引，避免整棵组丢失。
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.top.entry(id) {
+            slot.insert(node);
+        }
+        for child in children {
+            self.index_node(child, child_inside_container);
+        }
     }
 
     /// 从 [`InstanceDetail`] 取 `form` 并解析。
@@ -129,6 +170,25 @@ impl InstanceForm {
     /// 明细行数；明细控件不存在时为 0。
     pub(crate) fn row_count(&self, detail_widget_id: &str) -> usize {
         self.rows.get(detail_widget_id).map_or(0, |rows| rows.len())
+    }
+
+    /// 已索引的明细控件 id（用于反向定位控件属于哪个明细）。
+    pub(crate) fn detail_ids(&self) -> Vec<String> {
+        self.rows.keys().cloned().collect()
+    }
+
+    /// 可作为「每成员一行」处理的明细：排除控件组内的整单共享明细。
+    pub(crate) fn member_detail_ids(&self) -> Vec<String> {
+        self.rows
+            .keys()
+            .filter(|id| !self.nested_detail_ids.contains(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// 该明细是否位于控件组内（整单共享，聚合时按 leader/派生模式处理）。
+    pub(crate) fn is_nested_detail(&self, detail_widget_id: &str) -> bool {
+        self.nested_detail_ids.contains(detail_widget_id)
     }
 }
 
@@ -323,13 +383,207 @@ impl FormNode {
     /// 人员控件里的 open_id（也接受 `open_ids` 数组与用户对象）。
     pub(crate) fn person_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
+        // `contact` 的 open_ids 在节点**顶层**，不在 `value` 里；先收它。
+        ids.extend(self.open_ids.iter().cloned());
         collect_person_ids(&self.value, &mut ids);
         dedup_keep_order(&mut ids);
         ids
     }
 
+    /// 只要 `ou_` 前缀的 open_id；user_id / 工号不能直接写多维表人员列。
+    pub(crate) fn person_open_ids(&self) -> Vec<String> {
+        self.person_ids()
+            .into_iter()
+            .filter(|id| id.starts_with("ou_"))
+            .collect()
+    }
+
+    /// 电话控件的可读文本。审批回读可能是字符串，也可能是
+    /// `{countryCode,nationalNumber}` / snake_case 形态。
+    pub(crate) fn telephone_text(&self) -> Option<String> {
+        fn as_text(value: &Value) -> Option<String> {
+            match value {
+                Value::String(text) => non_empty(text),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }
+        }
+        fn from_value(value: &Value) -> Option<String> {
+            match value {
+                Value::String(text) => non_empty(text),
+                Value::Number(number) => Some(number.to_string()),
+                Value::Array(items) => items.iter().find_map(from_value),
+                Value::Object(map) => {
+                    let country = [
+                        "countryCode",
+                        "country_code",
+                        "country",
+                        "areaCode",
+                        "area_code",
+                    ]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(as_text));
+                    let national = [
+                        "nationalNumber",
+                        "national_number",
+                        "number",
+                        "phone",
+                        "value",
+                    ]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(as_text));
+                    match (country, national) {
+                        (Some(country), Some(national)) => Some(format!("{country} {national}")),
+                        (None, Some(national)) => Some(national),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        from_value(&self.value)
+    }
+
+    /// 日期控件的 RFC3339 文本 → 绝对毫秒。
+    ///
+    /// `default_offset_seconds` 是 Base 时区；回读文本自带偏移时以文本为准，
+    /// 只有无偏移的 date-only 才用它。
+    pub(crate) fn rfc3339_millis(&self, default_offset_seconds: i32) -> Option<i64> {
+        let text = text_of_value(&self.value);
+        parse_rfc3339_millis(&text, default_offset_seconds)
+    }
+
+    /// `dateInterval` 的 `{start,end}` → 两个绝对毫秒。
+    pub(crate) fn date_interval_millis(&self, default_offset_seconds: i32) -> Option<(i64, i64)> {
+        let value = match &self.value {
+            Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+            other => other.clone(),
+        };
+        let map = value.as_object()?;
+        let start = map.get("start").and_then(value_as_text)?;
+        let end = map.get("end").and_then(value_as_text)?;
+        Some((
+            parse_rfc3339_millis(&start, default_offset_seconds)?,
+            parse_rfc3339_millis(&end, default_offset_seconds)?,
+        ))
+    }
+
+    /// 附件/图片控件的文件列表。`ext` 里的文件名与 `value` 的 URL 按顺序配对；
+    /// 数量对不上时用 URL 末段兜底，不把整个附件当成空。
+    pub(crate) fn attachment_files(&self) -> Vec<AttachmentRef> {
+        let urls = attachment_urls(&self.value);
+        if urls.is_empty() {
+            return Vec::new();
+        }
+        let names = attachment_names(self.ext.as_ref());
+        let sizes = attachment_sizes(self.ext.as_ref());
+        urls.into_iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let name = names
+                    .get(index)
+                    .or_else(|| names.first())
+                    .cloned()
+                    .unwrap_or_else(|| url_basename(&url));
+                let size = sizes.get(index).copied().or_else(|| sizes.first().copied());
+                AttachmentRef { name, url, size }
+            })
+            .collect()
+    }
+
+    /// 控件组（`leaveGroupV2` / `workGroup` / `outGroup`）的子控件。
+    ///
+    /// 官方把子控件放在 `value` 数组里（不是 `children`），每个子节点自身的
+    /// 值仍在它的 `value`。
+    pub(crate) fn child_nodes(&self) -> Vec<FormNode> {
+        if !super::super::widget_rules::is_control_group(&self.widget_type) {
+            return Vec::new();
+        }
+        let value = match &self.value {
+            Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+        match value {
+            Value::Array(items) => items
+                .into_iter()
+                .filter_map(|item| serde_json::from_value::<FormNode>(item).ok())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `fieldList` 的行；非明细控件返回空。
+    pub(crate) fn detail_rows(&self) -> Vec<FormRow> {
+        if self.widget_type != "fieldList" {
+            return Vec::new();
+        }
+        parse_rows(&self.value)
+    }
+
+    /// 选项控件的 `(option_id, 文案)` 对。
+    ///
+    /// 外部选项回读的 `option.key` 是本系统 `option_id`，文案在 `option.text`；
+    /// 只有文案时返回 `(None, Some(text))`，由调用方按目标列现有选项匹配。
+    pub(crate) fn option_pairs(&self) -> Vec<(Option<String>, Option<String>)> {
+        fn pair(value: &Value) -> (Option<String>, Option<String>) {
+            match value {
+                Value::String(text) => (None, non_empty(text)),
+                Value::Object(map) => {
+                    let id = ["key", "value", "id", "option_id"]
+                        .iter()
+                        .find_map(|key| map.get(*key).and_then(value_as_text));
+                    let text = ["text", "label", "name"]
+                        .iter()
+                        .find_map(|key| map.get(*key).and_then(value_as_text));
+                    (id, text)
+                }
+                _ => (None, None),
+            }
+        }
+        match &self.option {
+            Some(Value::Array(items)) => items.iter().map(pair).collect(),
+            Some(value) => vec![pair(value)],
+            None => Vec::new(),
+        }
+    }
+
+    /// 在自身、控件组子控件、明细行单元格里递归查找控件。
+    ///
+    /// 返回克隆而不是引用：控件组子节点是从 `value` 现解析出来的，借用无法
+    /// 穿过局部变量。实例表单很小，克隆成本可忽略。
+    pub(crate) fn find_descendant(&self, widget_id: &str) -> Option<FormNode> {
+        if self.id == widget_id {
+            return Some(self.clone());
+        }
+        for child in self.child_nodes() {
+            if let Some(found) = child.find_descendant(widget_id) {
+                return Some(found);
+            }
+        }
+        for row in self.detail_rows() {
+            for cell in row.cells.values() {
+                if let Some(found) = cell.find_descendant(widget_id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
     /// 是否有值。`false` 与数字 `0` 都算「有值」，与多维表格的「空」同口径。
     pub(crate) fn is_empty(&self) -> bool {
+        // `contact` 的 open_ids 在顶层兄弟字段；只看 value 会把「有人员」判空。
+        if !self.open_ids.is_empty() {
+            return false;
+        }
+        if self.option_pairs().iter().any(|(id, text)| {
+            id.as_deref().is_some_and(|value| !value.trim().is_empty())
+                || text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            return false;
+        }
         value_is_empty(&self.value)
     }
 }
@@ -354,7 +608,7 @@ fn numeric_value(value: &Value) -> Option<FixedNumber> {
     }
 }
 
-fn text_of_value(value: &Value) -> String {
+pub(crate) fn text_of_value(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::Bool(flag) => flag.to_string(),
@@ -382,6 +636,267 @@ fn value_is_empty(value: &Value) -> bool {
         Value::Object(map) => map.is_empty(),
         Value::Bool(_) | Value::Number(_) => false,
     }
+}
+
+fn value_as_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => non_empty(text),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// 逗号/中文逗号/分号/换行分隔的文案列表；空串返回空列表。
+fn split_text_list(text: &str) -> Vec<String> {
+    text.split([',', '，', ';', '；', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 附件/图片控件里的 URL。
+///
+/// 真机有数组形态，也有把多个 URL 塞进一个逗号串的形态；单个 URL 的查询串
+/// 也可能含逗号，所以只有出现多个 `http` 时才按逗号拆。
+fn attachment_urls(value: &Value) -> Vec<String> {
+    fn collect(value: &Value, urls: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+                let parts = if text.matches("http").count() > 1 && text.contains(',') {
+                    split_text_list(text)
+                } else {
+                    vec![text.to_string()]
+                };
+                urls.extend(parts.into_iter().filter(|part| part.starts_with("http")));
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, urls)),
+            Value::Object(map) => {
+                if let Some(url) = ["url", "link", "href", "download_url", "tmp_url", "value"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(value_as_text))
+                {
+                    collect(&Value::String(url), urls);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut urls = Vec::new();
+    collect(value, &mut urls);
+    dedup_keep_order(&mut urls);
+    urls
+}
+
+/// `ext` 里的文件名列表：字符串、逗号串、数组、`{name,text,title}` 对象都认。
+fn attachment_names(ext: Option<&Value>) -> Vec<String> {
+    fn collect(value: &Value, names: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                let parts = split_text_list(text);
+                if parts.is_empty() {
+                    if let Some(name) = non_empty(text) {
+                        names.push(name);
+                    }
+                } else {
+                    names.extend(parts);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, names)),
+            Value::Object(map) => {
+                if let Some(name) = ["name", "text", "title", "file_name"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(value_as_text))
+                {
+                    names.push(name);
+                } else if let Some(inner) = map.get("value") {
+                    collect(inner, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    if let Some(ext) = ext {
+        collect(ext, &mut names);
+    }
+    names
+}
+
+/// `ext` 里的文件大小列表；没有就返回空，比较时退化为按文件名。
+fn attachment_sizes(ext: Option<&Value>) -> Vec<i64> {
+    fn collect(value: &Value, sizes: &mut Vec<i64>) {
+        match value {
+            Value::Number(number) => {
+                if let Some(size) = number.as_i64() {
+                    sizes.push(size);
+                }
+            }
+            Value::String(text) => {
+                for part in split_text_list(text) {
+                    if let Ok(size) = part.parse::<i64>() {
+                        sizes.push(size);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, sizes)),
+            Value::Object(map) => {
+                if let Some(size) = ["size", "file_size", "fileSize"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_i64))
+                {
+                    sizes.push(size);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut sizes = Vec::new();
+    if let Some(ext) = ext {
+        collect(ext, &mut sizes);
+    }
+    sizes
+}
+
+fn url_basename(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let name = without_query.rsplit('/').next().unwrap_or("");
+    let name = name.replace("%20", " ");
+    non_empty(&name).unwrap_or_else(|| "附件".to_string())
+}
+
+/// RFC3339 → 绝对毫秒。支持 `Z`、`+08:00`、`-05:30`、小数秒与 date-only。
+///
+/// 解析失败返回 `None`；调用方把 `0`/`"0"`/空串统一按「空」处理，不写 1970。
+fn parse_rfc3339_millis(text: &str, default_offset_seconds: i32) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (date_part, time_part) = if let Some((date, time)) = text.split_once('T') {
+        (date, Some(time))
+    } else if let Some((date, time)) = text.split_once(' ') {
+        (date, Some(time))
+    } else {
+        (text, None)
+    };
+
+    let mut date = date_part.split('-');
+    let year: i64 = date.next()?.parse().ok()?;
+    let month: u32 = date.next()?.parse().ok()?;
+    let day: u32 = date.next()?.parse().ok()?;
+    if date.next().is_some()
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+    {
+        return None;
+    }
+
+    let (hour, minute, second, millis, offset) = match time_part {
+        None => (0, 0, 0, 0, default_offset_seconds),
+        Some(time) => parse_time(time, default_offset_seconds)?,
+    };
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    let utc_seconds = seconds.checked_sub(i64::from(offset))?;
+    utc_seconds
+        .checked_mul(1_000)?
+        .checked_add(i64::from(millis))
+}
+
+fn parse_time(time: &str, default_offset_seconds: i32) -> Option<(u32, u32, u32, u32, i32)> {
+    let time = time.trim();
+    let (body, offset) =
+        if let Some(body) = time.strip_suffix('Z').or_else(|| time.strip_suffix('z')) {
+            (body, 0)
+        } else if let Some(index) = time.rfind(['+', '-']) {
+            let (body, offset) = time.split_at(index);
+            (body, parse_offset(offset)?)
+        } else {
+            // 没有偏移的日期时间按 Base 时区解释；RFC3339 本应带偏移，但真机
+            // 可能给本地时间，不能默认当成 UTC（会整体偏 8 小时）。
+            (time, default_offset_seconds)
+        };
+
+    let (clock, fraction) = match body.split_once('.') {
+        Some((clock, fraction)) => (clock, Some(fraction)),
+        None => (body, None),
+    };
+    let mut parts = clock.split(':');
+    let hour: u32 = parts.next()?.parse().ok()?;
+    let minute: u32 = parts.next()?.parse().ok()?;
+    let second: u32 = parts.next().unwrap_or("0").parse().ok()?;
+    if parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let millis = match fraction {
+        None => 0,
+        Some(fraction) => {
+            let digits: String = fraction.chars().take(3).collect();
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let padded = format!("{digits:0<3}");
+            padded.parse::<u32>().ok()?
+        }
+    };
+    Some((hour, minute, second, millis, offset))
+}
+
+/// `+08:00` / `-0530` → 秒。符号与小时必填，分钟可缺省。
+fn parse_offset(text: &str) -> Option<i32> {
+    let (sign, rest) = match text.as_bytes().first()? {
+        b'+' => (1, &text[1..]),
+        b'-' => (-1, &text[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((hours, minutes)) => (hours, minutes),
+        None if rest.len() == 4 => rest.split_at(2),
+        None => (rest, "0"),
+    };
+    let hours: i32 = hours.parse().ok()?;
+    let minutes: i32 = minutes.parse().ok()?;
+    if hours > 18 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Howard Hinnant 的 `days_from_civil`：公历年月日 → 自 1970-01-01 起的天数。
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn collect_urls(value: &Value, urls: &mut Vec<String>) {
@@ -710,6 +1225,30 @@ mod tests {
     }
 
     #[test]
+    fn control_group_detail_is_shared_not_per_member() {
+        let form = form(
+            r#"[
+                {"id":"group","type":"workGroup","value":[
+                    {"id":"inner","type":"fieldList","value":[
+                        [{"id":"x","type":"input","value":"a"}]
+                    ]}
+                ]},
+                {"id":"outer","type":"fieldList","value":[
+                    [{"id":"y","type":"input","value":"b"}]
+                ]}
+            ]"#,
+        );
+        assert!(form.is_nested_detail("inner"));
+        assert!(!form.is_nested_detail("outer"));
+        assert_eq!(form.member_detail_ids(), vec!["outer".to_string()]);
+        assert_eq!(
+            form.rows("inner").map(<[FormRow]>::len),
+            Some(1),
+            "共享明细仍可按 id 读取"
+        );
+    }
+
+    #[test]
     fn numeric_value_accepts_external_datasource_shapes() {
         let form = form(
             r#"[
@@ -831,5 +1370,208 @@ mod tests {
                 2
             )
             .is_none());
+    }
+
+    // ---- 反向同步需要的解析能力 ----
+
+    #[test]
+    fn rfc3339_parses_offsets_fractions_and_date_only() {
+        let shanghai = 8 * 3_600;
+        for (text, expected) in [
+            ("2020-01-01T00:00:00Z", 1_577_836_800_000),
+            ("2020-01-01T08:00:00+08:00", 1_577_836_800_000),
+            ("2020-01-01T00:00:00.5Z", 1_577_836_800_500),
+            ("2024-02-29T12:34:56Z", 1_709_210_096_000),
+            ("2020-01-01T00:00:00-05:30", 1_577_856_600_000),
+            ("2020-01-01T00:00:00", 1_577_808_000_000),
+            ("2020-01-01", 1_577_808_000_000),
+        ] {
+            assert_eq!(
+                parse_rfc3339_millis(text, shanghai),
+                Some(expected),
+                "{text}"
+            );
+        }
+        for invalid in [
+            "2024-02-30",
+            "2020-13-01",
+            "not-a-date",
+            "2020-01-01T25:00:00Z",
+            "2020-01-01T00:00:00+19:00",
+            "0",
+            "",
+        ] {
+            assert!(
+                parse_rfc3339_millis(invalid, shanghai).is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn contact_node_keeps_top_level_open_ids() {
+        let form = form(
+            r#"[
+                {"id":"person","type":"contact","value":[],
+                 "open_ids":["ou_a","ou_b"]},
+                {"id":"nested","type":"contact",
+                 "value":{"open_ids":["ou_c"],"value":[]}},
+                {"id":"user_only","type":"contact",
+                 "value":{"value":["u_123"]}}
+            ]"#,
+        );
+        assert_eq!(
+            form.top("person")
+                .map(FormNode::person_open_ids)
+                .unwrap_or_default(),
+            vec!["ou_a".to_string(), "ou_b".to_string()]
+        );
+        assert_eq!(
+            form.top("nested")
+                .map(FormNode::person_open_ids)
+                .unwrap_or_default(),
+            vec!["ou_c".to_string()]
+        );
+        assert!(
+            form.top("user_only")
+                .map(FormNode::person_open_ids)
+                .unwrap_or_default()
+                .is_empty(),
+            "user_id 不能冒充 open_id"
+        );
+    }
+
+    #[test]
+    fn attachments_parse_arrays_comma_strings_objects_and_names() {
+        let form = form(
+            r#"[
+                {"id":"files","type":"attachmentV2",
+                 "value":["https://x/a.pdf","https://x/b.png"],
+                 "ext":["a.pdf","b.png"]},
+                {"id":"imgs","type":"imageV2",
+                 "value":"https://x/a.png,https://x/b.png",
+                 "ext":"a.png,b.png"},
+                {"id":"objs","type":"attachmentV2",
+                 "value":[{"url":"https://x/c.pdf"}],
+                 "ext":[{"name":"c.pdf","size":12}]},
+                {"id":"query","type":"attachmentV2",
+                 "value":"https://x/a.pdf?v=1,2"},
+                {"id":"none","type":"attachmentV2","value":[]}
+            ]"#,
+        );
+        let files = form
+            .top("files")
+            .map(FormNode::attachment_files)
+            .unwrap_or_default();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| (file.name.as_str(), file.size))
+                .collect::<Vec<_>>(),
+            vec![("a.pdf", None), ("b.png", None)]
+        );
+        let imgs = form
+            .top("imgs")
+            .map(FormNode::attachment_files)
+            .unwrap_or_default();
+        assert_eq!(imgs.len(), 2, "逗号串要拆成两个 URL");
+        assert_eq!(imgs[0].name, "a.png");
+        assert_eq!(imgs[1].name, "b.png");
+        let objs = form
+            .top("objs")
+            .map(FormNode::attachment_files)
+            .unwrap_or_default();
+        assert_eq!(objs.len(), 1);
+        assert_eq!(objs[0].name, "c.pdf");
+        assert_eq!(objs[0].size, Some(12));
+        let query = form
+            .top("query")
+            .map(FormNode::attachment_files)
+            .unwrap_or_default();
+        assert_eq!(query.len(), 1, "单个 URL 的逗号不能被当成多文件");
+        assert_eq!(query[0].url, "https://x/a.pdf?v=1,2");
+        assert!(form
+            .top("none")
+            .map(FormNode::attachment_files)
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[test]
+    fn control_groups_and_nested_details_are_indexed() {
+        let form = form(
+            r#"[
+                {"id":"leave","type":"leaveGroupV2","value":[
+                    {"id":"widgetLeaveGroupType","type":"radioV2","value":"annual",
+                     "option":{"text":"年假"}},
+                    {"id":"widgetLeaveGroupStartTime","type":"date",
+                     "value":"2026-09-28T00:00:00+08:00"}
+                ]},
+                {"id":"detail","type":"fieldList","value":[[
+                    {"id":"nested","type":"fieldList","value":[[
+                        {"id":"amount","type":"amount","value":1}
+                    ]]},
+                    {"id":"group","type":"outGroup","value":[
+                        {"id":"widgetOutGroupReason","type":"textarea","value":"外出"}
+                    ]}
+                ]]}
+            ]"#,
+        );
+        assert_eq!(
+            form.top("leave")
+                .map(|node| node.child_nodes().len())
+                .unwrap_or_default(),
+            2
+        );
+        assert!(form.top("widgetLeaveGroupType").is_some());
+        assert_eq!(
+            form.top("widgetLeaveGroupType")
+                .and_then(|node| node.label())
+                .as_deref(),
+            Some("年假")
+        );
+        let nested = form
+            .cell("detail", 0, "nested")
+            .unwrap_or_else(|| panic!("嵌套明细应可访问"));
+        assert_eq!(nested.detail_rows().len(), 1);
+        assert_eq!(
+            nested
+                .detail_rows()
+                .first()
+                .and_then(|row| row.cell("amount"))
+                .and_then(FormNode::number),
+            FixedNumber::parse("1")
+        );
+        assert_eq!(
+            form.cell("detail", 0, "group")
+                .and_then(|node| node.find_descendant("widgetOutGroupReason"))
+                .map(|node| node.display_text())
+                .as_deref(),
+            Some("外出")
+        );
+    }
+
+    #[test]
+    fn missing_and_empty_are_distinct_from_zero_and_false() {
+        let form = form(
+            r#"[
+                {"id":"null","type":"input","value":null},
+                {"id":"blank","type":"input","value":"  "},
+                {"id":"empty_array","type":"checkboxV2","value":[]},
+                {"id":"zero","type":"number","value":0},
+                {"id":"falsey","type":"checkboxV2","value":false}
+            ]"#,
+        );
+        assert!(form.top("missing").is_none(), "缺失必须可区分");
+        for id in ["null", "blank", "empty_array"] {
+            assert!(form.top(id).is_some_and(FormNode::is_empty), "{id} 应判空");
+        }
+        for id in ["zero", "falsey"] {
+            assert!(
+                form.top(id).is_some_and(|node| !node.is_empty()),
+                "{id} 是有值"
+            );
+        }
+        assert!(form.top("missing").is_none());
     }
 }

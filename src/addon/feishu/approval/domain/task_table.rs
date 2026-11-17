@@ -128,6 +128,47 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true),
             // 事件订阅最近一次同步时间。
             last_synced_at => Timestamp::new().title("最近同步时间"),
+            // --- 表单反向同步（退回重提后把审批值写回台账） ---
+            //
+            // `awaiting_resubmit` 有 17 个字符，必须 varchar(32)；照 state 的
+            // varchar(16) 会被静默截断。`filterable` 是周期对账按状态扫描的硬依赖。
+            form_sync_state => Radio::<String>::new()
+                .title("表单同步状态")
+                .require(true)
+                .varchar(32)
+                .options([
+                    ("disabled", "未启用"),
+                    ("awaiting_resubmit", "等待重提"),
+                    ("observed", "已观察"),
+                    ("synced", "已同步"),
+                    ("retry", "重试中"),
+                    ("review", "待人工核查"),
+                    ("closed", "已结束"),
+                ])
+                .default("disabled")
+                .filterable(true),
+            // 最近一次「退回给发起人」的毫秒时间；只增不减。
+            form_sync_last_rollback_ms => Int::new()
+                .title("最近退回时间(毫秒)")
+                .filterable(true),
+            // 最近一次映射结果的规范化哈希，供排查与对账；实际去重由逐字段差异
+            // 比较完成（附件按 name+size、标签/人员按集合），不依赖哈希。
+            form_sync_hash => Str::new().title("表单同步哈希").max_length(64),
+            form_synced_at => Timestamp::new().title("最近表单同步时间"),
+            // 周期对账/重试的唯一调度列；`updated_at` 只有 sortable，不能做扫描条件。
+            form_sync_next_at => Timestamp::new()
+                .title("下次表单同步时间")
+                .filterable(true)
+                .sortable(true),
+            form_sync_attempts => Int::new()
+                .title("表单同步尝试次数")
+                .require(true)
+                .default(0),
+            form_sync_error => Text::new().title("表单同步错误"),
+            // 预留：当前部署形态是单实例、轮次串行，表单同步尚未使用租约；
+            // 与派发 worker 同一条决策，不做跨实例单飞。
+            form_sync_lease_until => Timestamp::new().title("表单同步租约到期时间"),
+            form_sync_worker => Str::new().title("表单同步租约持有者").max_length(128),
             attempts => Int::new().title("已尝试次数").require(true).default(0),
             generation => Int::new().title("执行代次").require(true).default(0),
             effect_phase => Str::new().title("外部写入阶段").require(true).max_length(32).default("ready"),
@@ -152,6 +193,15 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             [
                 field_ref(&table_name, "config_id")?,
                 field_ref(&table_name, "record_id")?,
+            ],
+        )
+        // 周期对账每 tick 按 `(state, next_at)` 取到期行；没有这条索引就会
+        // 对整张任务表做全表扫描（任务行随派发量线性增长）。
+        .index_named(
+            "idx_feishu_approval_task_form_sync_due",
+            [
+                field_ref(&table_name, "form_sync_state")?,
+                field_ref(&table_name, "form_sync_next_at")?,
             ],
         ))
 }

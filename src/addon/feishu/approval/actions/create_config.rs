@@ -83,6 +83,18 @@ pub(super) struct CreateConfigInput {
     /// 复选框列，组合校验在 `build_plan` 之后进行。
     #[serde(default)]
     pub(super) aggregate_batch: bool,
+    /// 表单反向同步模式：off / shadow / live；省略 = off。
+    #[serde(default)]
+    pub(super) form_sync_mode: Option<String>,
+    /// 是否允许清空台账字段；省略 = false。
+    #[serde(default)]
+    pub(super) form_sync_allow_clear: Option<bool>,
+    /// 聚合明细行键子控件 id；省略 = 未配置。
+    #[serde(default)]
+    pub(super) form_sync_row_key_widget: Option<String>,
+    /// 聚合顶层派生值写入方式：leader / all_members / skip；省略 = leader。
+    #[serde(default)]
+    pub(super) form_sync_aggregate_derived_mode: Option<String>,
 }
 
 impl ParamInput for CreateConfigInput {
@@ -132,6 +144,26 @@ impl CreateConfigInput {
                 "table_id".to_string(),
                 "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
             ));
+        }
+        if let Some(mode) = self.form_sync_mode.as_deref().map(str::trim) {
+            if !matches!(mode, "" | "off" | "shadow" | "live") {
+                return Err(BaseError::ParamInvalid(
+                    "form_sync_mode".to_string(),
+                    "只支持 off / shadow / live".to_string(),
+                ));
+            }
+        }
+        if let Some(mode) = self
+            .form_sync_aggregate_derived_mode
+            .as_deref()
+            .map(str::trim)
+        {
+            if !matches!(mode, "" | "leader" | "all_members" | "skip") {
+                return Err(BaseError::ParamInvalid(
+                    "form_sync_aggregate_derived_mode".to_string(),
+                    "只支持 leader / all_members / skip".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -199,6 +231,13 @@ pub(super) async fn handle(
             department_field: input.department_field.as_deref(),
             handler_field: input.handler_field.as_deref(),
             batch_scope_field: input.batch_scope_field.as_deref(),
+            form_sync_mode: input.form_sync_mode.as_deref().unwrap_or("off"),
+            form_sync_allow_clear: input.form_sync_allow_clear.unwrap_or(false),
+            form_sync_row_key_widget: input.form_sync_row_key_widget.as_deref(),
+            form_sync_aggregate_derived_mode: input
+                .form_sync_aggregate_derived_mode
+                .as_deref()
+                .unwrap_or("leader"),
         },
     )
     .await
@@ -339,6 +378,10 @@ mod tests {
             handler_field: None,
             batch_scope_field: None,
             aggregate_batch: false,
+            form_sync_mode: None,
+            form_sync_allow_clear: None,
+            form_sync_row_key_widget: None,
+            form_sync_aggregate_derived_mode: None,
         }
     }
 

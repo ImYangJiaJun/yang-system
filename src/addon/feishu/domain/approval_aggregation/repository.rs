@@ -274,6 +274,27 @@ pub(crate) async fn save_created_in_tx(
     Ok(())
 }
 
+/// 冻结成员行序快照（只在第一次写入；已存在时保持原值）。
+///
+/// 反向同步的明细行按它匹配成员：`member_row_keys` 必须与 `build_group_form`
+/// 使用**同一份最终成员列表**，且只写一次——恢复路径不能按当前成员重建。
+pub(crate) async fn save_member_row_keys(
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+    snapshot: &str,
+) -> anyhow::Result<u64> {
+    let row = Record::new().set("member_row_keys", snapshot);
+    Ok(context
+        .approval_groups()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("group_key", serde_json::json!(group_key))?
+        .where_null("member_row_keys")?
+        .update(row)
+        .await?)
+}
+
 /// 记下组编号（回填成功后调用）。
 ///
 /// 只写 `serial_number`：阶段由 `save_created_in_tx` / [`mark_group_phase_in_tx`] 负责，

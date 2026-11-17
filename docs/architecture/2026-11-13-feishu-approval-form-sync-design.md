@@ -138,10 +138,14 @@
 
 1. `last_rollback_ms` = `timeline` 中 `type in {ROLLBACK, ROLLBACK_SELECTED}` 的最大 `create_time`（毫秒）。
 2. 退回目标是否为发起人：
-   - 通过 `timeline[].task_id → task_list[].id → node_id` 映射；
-   - 发起人节点通常是 `START` 或首节点；也可用退回目标任务的 `open_id == detail.open_id` 判断；
+   - `timeline[].task_id` 指向的是**被退回**的审批任务，不是退回目标；审批人与发起人不同时不能只看它的 `open_id`；
+   - 退回后新建的任务（`start_time > last_rollback_ms`）才指向目标节点：该任务的 `open_id == detail.open_id` 或节点是 `START` 即发起人退回；
+   - `timeline.ext` 的 `rollback_node_ids` 含 `START` 也成立；
    - 不能证明时记 `rollback_target_unknown`，不同步。
-3. 重提证据：`last_rollback_ms` 之后 `task_list` 出现新任务（`start_time > last_rollback_ms`），或实例已进入终态。
+3. 重提证据：退回之后**发起人任务完成**（`task_list[].end_time > last_rollback_ms`），或实例已进入终态。
+   **不能**用「出现新任务」（`start_time > last_rollback_ms`）：真实飞书在 `ROLLBACK_SELECTED` 之后十几毫秒就创建发起人任务，
+   它的 `start_time` 只比退回时间晚一点、`end_time` 仍是 0，用户还没有重提（2026-11-17 真机实测）；
+   按新任务判断会提前同步离线表单并标记 `synced`，真正的重提事件随后全部被 `rollback_already_handled` 跳过。
 4. 若 `last_rollback_ms > task.form_sync_last_rollback_ms` 且有重提证据 → 执行同步。
 5. 同期内重复事件、乱序事件：只接受更大的 `last_rollback_ms`；旧事件不改变已同步状态。
 6. 若事件只看到退回、尚未重提：写 `form_sync_state='awaiting_resubmit'`，`form_sync_next_at=now+复扫间隔`，交给周期对账。
@@ -178,7 +182,7 @@
    - 清空：仅当 `form_sync_allow_clear=true` 且 P0 确认语义后写。
 6. `list_all_fields` + `resolve_field_names` 把 `field_id` 解析成当前字段名。
 7. `batch_update_records` 写 patch（单记录一次；聚合按 100 条分片）。
-8. 写后回读校验（可选但推荐）：`batch_get` 确认目标列等于 `desired`；不一致重试一次，仍不一致 → `review`。
+8. 写后回读校验（可选但推荐）：`batch_get` 确认目标列等于 `desired`；不一致 → `review`。只读列（19/20）不写，但同样回读比对，不一致 → `readonly_mismatch` review + 告警。
 9. 更新 `form_sync_last_rollback_ms / form_synced_at / form_sync_hash / form_sync_error`。
 
 **幂等**：`form_sync_hash` = `desired` 的规范化哈希；相同则跳过。写成功但哈希落库失败，下一轮 `current == desired` 只补哈希，不重复写。
@@ -187,12 +191,12 @@
 
 | widget_type | 目标列 | 一期支持 | 写入规则 / 边界 |
 |---|---|---|---|
-| `input` / `textarea` | 1 文本 | ✅ | 字符串；富文本链接分段压平为纯文本 |
+| `input` / `textarea` | 1 文本 / 3 单选 | ✅ | 文本目标写字符串；单选目标只接受目标列已有选项，未命中 → `option_not_found` review + 告警，绝不自动新增选项 |
 | `number` / `amount` | 2 数字 | ✅ | `FixedNumber`；整数精确；小数做 f64 往返校验；超精度/非法格式 → 字段 `review` |
-| `formula` | 2 数字 | ✅（目标可写时） | 非聚合：写公式结果；目标 19/20 公式/查找列不可写 → 配置期拒绝；聚合顶层见 §5.4 |
+| `formula` | 2 数字 / 19/20 只读 | ✅ | 目标 2 写公式结果；目标 19/20 不写，写后回读比对，不一致 → `readonly_mismatch` review + 告警；聚合顶层见 §5.4 |
 | `date` | 5 日期 | ✅ | 严格 RFC3339 → 绝对毫秒；`0`/`"0"`/缺失 → Empty，绝不写 0 |
-| `dateInterval` | 5+5 两列 / 5 单列 / 1 文本 | ✅ | 两列：start/end 都写；单列：写 start 并记 `end_not_written`；文本：写 `"start ~ end"`；19/20 拒绝 |
-| `radio` / `radioV2` | 3 单选 / 1 文本 | ✅ | 固定选项 `option_map` 反查；外部选项 `feishu_option` 反查；目标列没有该选项时写文案（可配置是否允许自动建选项） |
+| `dateInterval` | 5+5 两列 / 5 单列 / 1 文本 / 19/20 只读 | ✅ | 两列：start/end 都写；单列：写 start 并记 `end_not_written`；文本：写 `"start ~ end"`；19/20 只读比对 |
+| `radio` / `radioV2` | 3 单选 / 2 数字 / 1 文本 | ✅ | 固定选项 `option_map` 反查；外部选项 `feishu_option` 反查；目标 2 时把选项文案按十进制解析，解析失败 → `invalid_value` review |
 | `checkbox` / `checkboxV2` | 4 多选 / 1 文本 | ✅ | 逐项映射；任一项失败整个字段 `review`；文本目标用 `、` 连接 |
 | `select` / `multiSelect` | 3 / 4 / 1 | ✅（定义出现时） | 同 radio/checkbox |
 | `telephone` | 13 电话 / 1 文本 | ✅ | `"+CC national"`；保留区号，不默认 +86 |
@@ -210,11 +214,13 @@
 
 **硬边界（不是分期，是能力边界）**：
 
-1. 目标列 19/20（查找/公式）、18/21（关联，除同表反查）、22（地理位置）、1001-1005（自动字段）不可写 → 配置期拒绝或运行期 `review`。
+1. 目标列 19/20（查找/公式）**只读校验**：不写，写后回读与审批表单同字段值做归一化比较，不一致 → `readonly_mismatch` review + 告警；18/21（关联，除同表反查）、22（地理位置）、1001-1005（自动字段）不可写 → 配置期拒绝或运行期 `review`。
 2. 聚合顶层派生值（formula 求和、附件/图片并集、多选并集）无法归因到成员 → 由 `form_sync_aggregate_derived_mode` 控制（见 §5.4）。
 3. 旧 `attachment` / `document` / `address` 正向本来就需要人工值；配置里出现时按回读形态尽力处理，处理不了 `review`。
 4. 附件超过 20MB 需要分片上传；一期可先 `review`，业务确有超大附件再补 `upload_prepare/upload_part/upload_finish`。
 5. 控件组/嵌套明细的形态必须与正向产出一致；用户新增多行嵌套明细 → `review`，不猜。
+
+**只读列校验与告警**：19/20 目标不进入 `patches`，只进入 `verifications`；有写入时在写后回读，无写入时直接比对当前记录。数字文本会去千分位/币种符号后按 `FixedNumber` 比较，文本做 trim，多值排序去重；不一致只记录稳定的 `readonly_mismatch` 结果码，不把字段值写进 `form_sync_error`/日志。告警默认发给审批发起人（`detail.open_id`），正文只带配置、审批编号、记录、字段名、错误码和数量，不带金额/姓名等字段值；发送失败只记 warning，不改变同步结论。
 
 ### 5.4 聚合组
 
@@ -222,10 +228,13 @@
 
 1. **成员与行序**：
    - 组行 `feishu_approval_group` + 成员任务行；成员顺序 = `group_seq asc, id asc`（`group_seq` 可能留洞，不能当数组下标）。
-   - 在 create 前冻结 `group.member_row_keys`（`task_id / record_id / group_seq / row_key`）；恢复路径不重建。
-   - 每个被映射的顶层 `fieldList` 独立校验 `row_count == 成员数`。
+   - 在 create 前冻结 `group.member_row_keys`（`v=1, rows[{record_id, row_key?}]`）；恢复路径不重建。
+   - 每个被映射的顶层 `fieldList` 独立校验 `row_count == 成员数`；控件组内的整单共享 `fieldList` 不参与这项校验（按 leader / 派生模式处理，多行 `review`）。
 2. **行匹配**：
    - 优先 `form_sync_row_key_widget`：明细内唯一业务键（如明细编号）→ 成员快照匹配，容忍重排。
+   - 一期实现一个成员只带一个 `row_index`，因此所有**含该行键控件**的顶层明细必须键序一致；不一致 → 整组 `review`。不含该控件的明细不参与键序匹配。
+   - 行键控件应选文本/数字类；日期控件的表单回读是 RFC3339 文案而台账单元格是毫秒数，会稳定落入 `row_key_unresolved`。
+   - 组创建时未配置行键（快照没有 `row_key`）的旧组回退下标语义。
    - 未配置行键时按行下标 `i ↔ member_row_keys[i]`；行数不等、成员集合变化 → 整组 `review`，零写入。
    - 用户增行/删行 → 不自动建/删多维表记录，整组 `review`。
    - 无行键且用户重排 → 无法检测，按原下标写；这是已知限制，控制台必须提示「聚合明细请不要重排，或配置行键」。
