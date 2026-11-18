@@ -1171,7 +1171,7 @@ export type ApprovalConfigItem = {
   aggregateBatch: boolean;
   /// 表单反向同步模式：off / shadow / live。
   formSyncMode: "off" | "shadow" | "live";
-  /// 是否允许清空台账字段；P0 确认清空语义前保持关闭。
+  /// 是否允许清空台账字段；默认开启。
   formSyncAllowClear: boolean;
   /// 聚合明细行键子控件 id；空 = 按成员快照下标匹配。
   formSyncRowKeyWidget?: string | null;

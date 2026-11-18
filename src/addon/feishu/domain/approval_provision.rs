@@ -1883,7 +1883,7 @@ mod tests {
             department_field: None,
             handler_field: None,
             batch_scope_field: None,
-            form_sync_allow_clear: false,
+            form_sync_allow_clear: true,
             form_sync_row_key_widget: None,
             form_sync_aggregate_derived_mode: "leader",
         }
@@ -2687,7 +2687,7 @@ mod tests {
         let result = plan(
             &ProvisionInput {
                 batch_scope_field: Some("批量范围"),
-                form_sync_allow_clear: false,
+                form_sync_allow_clear: true,
                 form_sync_row_key_widget: None,
                 form_sync_aggregate_derived_mode: "leader",
                 ..input("fldP", "fldB")

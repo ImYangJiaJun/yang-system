@@ -6262,12 +6262,12 @@ export interface operations {
                      */
                     form_sync_aggregate_derived_mode?: string | null;
                     /**
-                     * @description 是否允许清空台账字段；省略 = false。
+                     * @description 是否允许清空台账字段；省略 = true。
                      * @default null
                      */
                     form_sync_allow_clear?: boolean | null;
                     /**
-                     * @description 表单反向同步模式：off / shadow / live；省略 = off。
+                     * @description 历史字段：退回重提同步已全量启用，传入值被忽略；保留仅为兼容旧客户端。
                      * @default null
                      */
                     form_sync_mode?: string | null;
@@ -7025,7 +7025,7 @@ export interface operations {
                      */
                     form_sync_allow_clear?: boolean | null;
                     /**
-                     * @description 表单反向同步模式：off / shadow / live；省略即不改。
+                     * @description 历史字段：退回重提同步已全量启用，传入值被忽略；保留仅为兼容旧客户端。
                      * @default null
                      */
                     form_sync_mode?: string | null;

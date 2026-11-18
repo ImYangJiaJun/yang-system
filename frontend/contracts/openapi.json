@@ -3736,7 +3736,7 @@
                   },
                   "form_sync_allow_clear": {
                     "default": null,
-                    "description": "是否允许清空台账字段；省略 = false。",
+                    "description": "是否允许清空台账字段；省略 = true。",
                     "type": [
                       "boolean",
                       "null"

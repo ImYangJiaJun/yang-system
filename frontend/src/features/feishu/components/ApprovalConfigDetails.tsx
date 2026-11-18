@@ -695,7 +695,7 @@ export function ApprovalConfigDetails({
                     允许清空台账字段
                   </label>
                   <p className="text-xs text-muted-foreground">
-                    审批里把字段清空时也清空台账；确认过飞书各类型清空语义后再打开。
+                    审批里把字段清空时也清空台账；如需保留旧值，可以关闭。
                   </p>
                 </div>
               </div>

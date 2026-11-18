@@ -298,7 +298,7 @@ pub(super) async fn handle(
                     handler_field: None,
                     // 批量范围列同样走下面单独的轻校验（只拉一次字段）。
                     batch_scope_field: None,
-                    form_sync_allow_clear: false,
+                    form_sync_allow_clear: true,
                     form_sync_row_key_widget: None,
                     form_sync_aggregate_derived_mode: "leader",
                 },
@@ -400,7 +400,7 @@ pub(super) async fn handle(
         let old_aggregate: bool = before.require("aggregate_batch")?;
         let old_form_sync_allow_clear: bool = before
             .optional::<bool>("form_sync_allow_clear")?
-            .unwrap_or(false);
+            .unwrap_or(true);
         let old_form_sync_row_key: Option<String> =
             before.optional::<String>("form_sync_row_key_widget")?;
         let old_form_sync_derived: String = before

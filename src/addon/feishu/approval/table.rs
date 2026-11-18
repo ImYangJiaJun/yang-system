@@ -140,11 +140,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 ])
                 .default("live")
                 .filterable(true),
-            // 用户清空审批字段时是否允许清空台账；P0 确认各类型清空语义前保持关闭。
+            // 用户清空审批字段时是否同步清空台账；默认开启，需要保留旧值时再关闭。
             form_sync_allow_clear => Switch::new()
                 .title("允许清空台账字段")
                 .require(true)
-                .default(false),
+                .default(true),
             // 聚合明细的行键子控件：它的值在组内唯一时按值匹配成员，容忍重排。
             // 为空时按 member_row_keys 的行下标匹配。
             form_sync_row_key_widget => Str::new()

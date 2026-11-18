@@ -367,7 +367,7 @@ pub(super) async fn handle(
             form_sync_mode: "live".to_string(),
             form_sync_allow_clear: record
                 .optional::<bool>("form_sync_allow_clear")?
-                .unwrap_or(false),
+                .unwrap_or(true),
             form_sync_row_key_widget: record.optional::<String>("form_sync_row_key_widget")?,
             form_sync_aggregate_derived_mode: record
                 .optional::<String>("form_sync_aggregate_derived_mode")?
@@ -493,7 +493,7 @@ mod tests {
             enabled: true,
             aggregate_batch: true,
             form_sync_mode: "live".to_string(),
-            form_sync_allow_clear: false,
+            form_sync_allow_clear: true,
             form_sync_row_key_widget: None,
             form_sync_aggregate_derived_mode: "leader".to_string(),
             config_key: Some("cfgkeytest".to_string()),

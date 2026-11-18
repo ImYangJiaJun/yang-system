@@ -2389,7 +2389,7 @@ function parseApprovalConfigItem(
       raw.form_sync_mode === "shadow" || raw.form_sync_mode === "live"
         ? raw.form_sync_mode
         : "off",
-    formSyncAllowClear: raw.form_sync_allow_clear === true,
+    formSyncAllowClear: raw.form_sync_allow_clear !== false,
     formSyncRowKeyWidget: asNullableString(raw.form_sync_row_key_widget),
     formSyncAggregateDerivedMode:
       raw.form_sync_aggregate_derived_mode === "all_members" ||
@@ -2526,7 +2526,7 @@ export type CreateApprovalConfigInput = {
   batchScopeField?: string;
   /// 同批聚合派发开关；默认关闭（省略等价于 `false`），开启时必须已配范围列。
   aggregateBatch?: boolean;
-  /// 是否允许清空台账字段；省略 = false。
+  /// 是否允许清空台账字段；省略 = true。
   formSyncAllowClear?: boolean;
   /// 聚合明细行键子控件 id；省略 = 未配置。
   formSyncRowKeyWidget?: string;
@@ -2599,8 +2599,8 @@ export async function createApprovalConfig(
         : {}),
       // 后端 `#[serde(default)] bool`：省略就是关闭，所以只在打开时发。
       ...(input.aggregateBatch === true ? { aggregate_batch: true } : {}),
-      ...(input.formSyncAllowClear === true
-        ? { form_sync_allow_clear: true }
+      ...(input.formSyncAllowClear !== undefined
+        ? { form_sync_allow_clear: input.formSyncAllowClear }
         : {}),
       ...(input.formSyncRowKeyWidget?.trim()
         ? { form_sync_row_key_widget: input.formSyncRowKeyWidget.trim() }

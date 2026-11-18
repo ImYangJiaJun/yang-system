@@ -962,7 +962,7 @@ async fn load_event_config(
         .optional::<bool>("form_sync_allow_clear")
         .ok()
         .flatten()
-        .unwrap_or(false);
+        .unwrap_or(true);
     let form_snapshot = config
         .optional::<String>("form_snapshot")
         .ok()

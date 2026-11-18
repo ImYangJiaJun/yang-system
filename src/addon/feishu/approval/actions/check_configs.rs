@@ -120,7 +120,7 @@ pub(super) async fn handle(
         let aggregate_batch: bool = row.optional("aggregate_batch")?.unwrap_or(false);
         let form_sync_allow_clear = row
             .optional::<bool>("form_sync_allow_clear")?
-            .unwrap_or(false);
+            .unwrap_or(true);
         let form_sync_row_key_widget: Option<String> = row.optional("form_sync_row_key_widget")?;
         let form_sync_aggregate_derived_mode: Option<String> =
             row.optional("form_sync_aggregate_derived_mode")?;

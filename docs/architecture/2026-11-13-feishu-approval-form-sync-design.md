@@ -179,7 +179,7 @@
    - 不同 → 进入 patch；
    - 附件：按 `name + size`（或 `name`，若 size 不可得）比较；相同跳过，不同则上传并写新数组；
    - 外部选项：按目标列现有选项名比较；
-   - 清空：仅当 `form_sync_allow_clear=true` 且 P0 确认语义后写。
+   - 清空：默认开启；`form_sync_allow_clear=false` 时保留台账旧值。
 6. `list_all_fields` + `resolve_field_names` 把 `field_id` 解析成当前字段名。
 7. `batch_update_records` 写 patch（单记录一次；聚合按 100 条分片）。
 8. 写后回读校验（可选但推荐）：`batch_get` 确认目标列等于 `desired`；不一致 → `review`。只读列（19/20）不写，但同样回读比对，不一致 → `readonly_mismatch` review + 告警。
@@ -268,7 +268,7 @@
 - 当前台账附件 `[{"file_token","name","size"}]`；若 desired 的 `name+size` 集合与当前完全一致 → 不下载/不上传。
 - 文件被替换但同名同大小 → 可能漏判；P0 确认 `ext` 是否含大小，否则接受此限制。
 
-**清空**：用户删除附件 → 写空数组 `[]`；仅 `form_sync_allow_clear=true`。
+**清空**：用户删除附件 → 写空数组 `[]`；默认开启，`form_sync_allow_clear=false` 时保留旧值。
 
 ### 5.6 外部选项（一期）
 
@@ -318,7 +318,7 @@
 | 列 | 类型 | 说明 |
 |---|---|---|
 | `form_sync_mode` | `Radio<String>`，required，`varchar(16)`，default `live` | **历史列**：功能已全量启用，运行时不再读取；新建/更新落库恒为 `live`，控制台不提供开关 |
-| `form_sync_allow_clear` | `Switch`，required，default `false` | P0 确认清空语义后可开 |
+| `form_sync_allow_clear` | `Switch`，required，default `true` | 审批字段清空时同步清空台账；关闭后保留旧值 |
 | `form_sync_row_key_widget` | `Str(128)`，可空 | 聚合明细行键子控件；为空时按行下标匹配 |
 | `form_sync_aggregate_derived_mode` | `Radio<String>`，required，`varchar(16)`，default `leader` | 聚合顶层派生值（公式求和/附件并集/多选并集）写哪：`leader / all_members / skip` |
 
