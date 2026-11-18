@@ -3744,7 +3744,7 @@
                   },
                   "form_sync_mode": {
                     "default": null,
-                    "description": "表单反向同步模式：off / shadow / live；省略 = off。",
+                    "description": "历史字段：退回重提同步已全量启用，传入值被忽略；保留仅为兼容旧客户端。",
                     "type": [
                       "string",
                       "null"
@@ -5156,7 +5156,7 @@
                   },
                   "form_sync_mode": {
                     "default": null,
-                    "description": "表单反向同步模式：off / shadow / live；省略即不改。",
+                    "description": "历史字段：退回重提同步已全量启用，传入值被忽略；保留仅为兼容旧客户端。",
                     "type": [
                       "string",
                       "null"
@@ -8520,7 +8520,7 @@
                           "type": "object"
                         },
                         {
-                          "description": "原始响应体：传输层直接以 `content_type` 返回 `body`，**不套 [`ApiResponse`] 包络**。\n\n供外部系统要求固定响应形状（顶层键名、层级与框架包络不一致）时使用。 `content_type` 只允许 `application/json`；`body` 必须是该类型下的完整响应文本。\n\n请优先用 [`ResponseBody::raw`] 构造，它会校验 `content_type`。",
+                          "description": "原始响应体：传输层直接以 `content_type` 返回 `body`，**不套 [`ApiResponse`] 包络**。\n\n供外部系统要求固定响应形状（顶层键名、层级与框架包络不一致）时使用。 `content_type` 只允许 `application/json`；`body` 必须是该类型下的完整响应文本。\n\n请优先用 [`ResponseBody::raw`] 构造，它会校验 `content_type`；派发边界 `wrap_dispatch_output` 会对直接构造的本变体再执行同一白名单校验。",
                           "properties": {
                             "body": {
                               "description": "完整响应体文本（UTF-8）。",

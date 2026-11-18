@@ -249,7 +249,6 @@ export default function ApprovalConfigsPage() {
   }
   /// 审批表单反向同步设置：同样走 `update_config`，成功后回读详情。
   async function changeFormSync(patch: {
-    formSyncMode?: "off" | "shadow" | "live";
     formSyncAllowClear?: boolean;
     formSyncRowKeyWidget?: string;
     formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";

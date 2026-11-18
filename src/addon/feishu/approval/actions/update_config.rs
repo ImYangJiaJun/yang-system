@@ -69,7 +69,8 @@ pub(super) struct UpdateConfigInput {
     /// 同批聚合派发开关（设计 §4.2）；省略即不改。
     #[serde(default)]
     pub(super) aggregate_batch: Option<bool>,
-    /// 表单反向同步模式：off / shadow / live；省略即不改。
+    /// 历史字段：退回重提同步已全量启用，传入值被忽略；保留仅为兼容旧客户端。
+    #[allow(dead_code)] // 只为让旧客户端不触发 deny_unknown_fields；值不参与任何逻辑。
     #[serde(default)]
     pub(super) form_sync_mode: Option<String>,
     /// 是否允许清空台账字段；省略即不改。
@@ -115,7 +116,6 @@ impl UpdateConfigInput {
             && self.approval_id.is_none()
             && self.maps.is_none()
             && self.aggregate_batch.is_none()
-            && self.form_sync_mode.is_none()
             && self.form_sync_allow_clear.is_none()
             && self.form_sync_row_key_widget.is_none()
             && self.form_sync_aggregate_derived_mode.is_none()
@@ -137,14 +137,6 @@ impl UpdateConfigInput {
                 return Err(BaseError::ParamInvalid(
                     "approval_id".to_string(),
                     "审批定义 ID 必须是 1..=64 位数字".to_string(),
-                ));
-            }
-        }
-        if let Some(mode) = self.form_sync_mode.as_deref().map(str::trim) {
-            if !matches!(mode, "off" | "shadow" | "live") {
-                return Err(BaseError::ParamInvalid(
-                    "form_sync_mode".to_string(),
-                    "只支持 off / shadow / live".to_string(),
                 ));
             }
         }
@@ -306,7 +298,6 @@ pub(super) async fn handle(
                     handler_field: None,
                     // 批量范围列同样走下面单独的轻校验（只拉一次字段）。
                     batch_scope_field: None,
-                    form_sync_mode: "off",
                     form_sync_allow_clear: false,
                     form_sync_row_key_widget: None,
                     form_sync_aggregate_derived_mode: "leader",
@@ -392,7 +383,6 @@ pub(super) async fn handle(
                 field!("base_timezone"),
                 field!("batch_scope_field"),
                 field!("aggregate_batch"),
-                field!("form_sync_mode"),
                 field!("form_sync_allow_clear"),
                 field!("form_sync_row_key_widget"),
                 field!("form_sync_aggregate_derived_mode"),
@@ -408,9 +398,6 @@ pub(super) async fn handle(
         let old_timezone: String = before.require("base_timezone")?;
         let old_batch_scope: Option<String> = before.optional("batch_scope_field")?;
         let old_aggregate: bool = before.require("aggregate_batch")?;
-        let old_form_sync_mode: String = before
-            .optional::<String>("form_sync_mode")?
-            .unwrap_or_else(|| "off".to_string());
         let old_form_sync_allow_clear: bool = before
             .optional::<bool>("form_sync_allow_clear")?
             .unwrap_or(false);
@@ -442,7 +429,6 @@ pub(super) async fn handle(
         let mut after_enabled = old_enabled;
         let mut after_timezone = old_timezone.clone();
         let mut after_aggregate = old_aggregate;
-        let mut after_form_sync_mode = old_form_sync_mode.clone();
         let mut after_form_sync_allow_clear = old_form_sync_allow_clear;
         let mut after_form_sync_row_key = old_form_sync_row_key.clone();
         let mut after_form_sync_derived = old_form_sync_derived.clone();
@@ -463,11 +449,6 @@ pub(super) async fn handle(
         if let Some(aggregate_batch) = input.aggregate_batch {
             record.insert("aggregate_batch", serde_json::json!(aggregate_batch));
             after_aggregate = aggregate_batch;
-        }
-        if let Some(mode) = input.form_sync_mode.as_deref() {
-            let mode = mode.trim();
-            record.insert("form_sync_mode", serde_json::json!(mode));
-            after_form_sync_mode = mode.to_string();
         }
         if let Some(allow_clear) = input.form_sync_allow_clear {
             record.insert("form_sync_allow_clear", serde_json::json!(allow_clear));
@@ -630,7 +611,6 @@ pub(super) async fn handle(
                 old_maps_count,
                 old_strip_count,
                 old_aggregate,
-                &old_form_sync_mode,
                 old_form_sync_allow_clear,
                 old_form_sync_row_key.as_deref(),
                 &old_form_sync_derived,
@@ -647,7 +627,6 @@ pub(super) async fn handle(
                         .count()
                 }),
                 after_aggregate,
-                &after_form_sync_mode,
                 after_form_sync_allow_clear,
                 after_form_sync_row_key.as_deref(),
                 &after_form_sync_derived,
@@ -706,7 +685,6 @@ fn config_audit_summary(
     maps_count: Option<usize>,
     strip_spaces_count: Option<usize>,
     aggregate_batch: bool,
-    form_sync_mode: &str,
     form_sync_allow_clear: bool,
     form_sync_row_key_widget: Option<&str>,
     form_sync_aggregate_derived_mode: &str,
@@ -721,7 +699,6 @@ fn config_audit_summary(
         ("maps_count", serde_json::json!(maps_count)),
         ("strip_spaces_count", serde_json::json!(strip_spaces_count)),
         ("aggregate_batch", serde_json::json!(aggregate_batch)),
-        ("form_sync_mode", serde_json::json!(form_sync_mode)),
         (
             "form_sync_allow_clear",
             serde_json::json!(form_sync_allow_clear),
@@ -827,7 +804,6 @@ mod tests {
                 count,
                 strip_count,
                 aggregate_batch,
-                "live",
                 true,
                 Some("row_key"),
                 "all_members",
@@ -841,7 +817,6 @@ mod tests {
                     "maps_count": count,
                     "strip_spaces_count": strip_count,
                     "aggregate_batch": aggregate_batch,
-                    "form_sync_mode": "live",
                     "form_sync_allow_clear": true,
                     "form_sync_row_key_widget": "row_key",
                     "form_sync_aggregate_derived_mode": "all_members",

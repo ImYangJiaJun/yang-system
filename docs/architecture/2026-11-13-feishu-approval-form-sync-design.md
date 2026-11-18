@@ -317,7 +317,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `form_sync_mode` | `Radio<String>`，required，`varchar(16)`，default `off` | `off / shadow / live`；`shadow` 只计算和记录，不写台账 |
+| `form_sync_mode` | `Radio<String>`，required，`varchar(16)`，default `live` | **历史列**：功能已全量启用，运行时不再读取；新建/更新落库恒为 `live`，控制台不提供开关 |
 | `form_sync_allow_clear` | `Switch`，required，default `false` | P0 确认清空语义后可开 |
 | `form_sync_row_key_widget` | `Str(128)`，可空 | 聚合明细行键子控件；为空时按行下标匹配 |
 | `form_sync_aggregate_derived_mode` | `Radio<String>`，required，`varchar(16)`，default `leader` | 聚合顶层派生值（公式求和/附件并集/多选并集）写哪：`leader / all_members / skip` |
@@ -360,9 +360,9 @@
 
 ## 七、配置与控制台
 
-- `create_config` / `update_config` / `list_configs`：增加 `form_sync_mode`、`form_sync_allow_clear`、`form_sync_row_key_widget`；旧客户端缺字段按默认值。
+- `create_config` / `update_config` / `list_configs`：保留 `form_sync_mode` 字段仅为兼容旧客户端，传入值被忽略；`list_configs` 恒返回 `live`。`form_sync_allow_clear`、`form_sync_row_key_widget` 仍可配置。
 - 保存配置时校验：
-  - `form_sync_mode=live` 时，目标列必须可写且类型在矩阵内；
+  - 功能全量启用：目标列必须可写且类型在矩阵内；
   - 系统列/主字段/评论/导出/外部选项源列冲突 → 拒绝；
   - 聚合配置的 `form_sync_row_key_widget` 必须是明细子控件（若配置）；
   - 同一 `bitable_field` 不被多个控件占用。
@@ -376,7 +376,7 @@
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
 | P0 真机 | 同实例退回→修改→提交后 `GET form` 最新性；台账锁下应用可写；附件/外部选项/清空形态；重提事件；聚合明细行编辑；控件组/关联/部门/日期区间/嵌套明细回读 | 全部通过 |
-| P1 领域层 | `approval_form_sync` 纯函数 + 单测：**全字段**反向映射、附件下载/上传、外部选项反查、关联/部门/控件组/嵌套明细、diff、编码；shadow 模式 | 单测全绿；shadow 观察 1-2 周 |
+| P1 领域层 | `approval_form_sync` 纯函数 + 单测：**全字段**反向映射、附件下载/上传、外部选项反查、关联/部门/控件组/嵌套明细、diff、编码 | 单测全绿；已全量启用 |
 | P2 非聚合 live | **全字段**：文本/数字/金额/公式/日期/日期区间/选项/多选/电话/人员/部门/关联/附件/图片/控件组/嵌套明细/外部选项；单条配置先灰度 | 真实退回重提后台账正确 |
 | P3 聚合 live | `member_row_keys`、顶层共享标量、明细行映射、明细附件/选项/人员、派生值 `aggregate_derived_mode`；行数/行键不一致 review | 聚合配置验证通过 |
 | P4 收尾 | 控制台、告警、重试、文档、运维手册 | 可运维 |

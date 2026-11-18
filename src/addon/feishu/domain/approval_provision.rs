@@ -66,8 +66,6 @@ pub(crate) struct ProvisionInput<'a> {
     /// 批量范围复选框列（可选）。`field_id` **或**列名都接受；`None`/空 = 不启用，
     /// 播种仍按旧行为（只处理回填列为空的记录）。给了就必须是复选框（type=7）。
     pub(crate) batch_scope_field: Option<&'a str>,
-    /// 表单反向同步模式：off / shadow / live。
-    pub(crate) form_sync_mode: &'a str,
     pub(crate) form_sync_allow_clear: bool,
     /// 聚合明细行键子控件 id；空 = 未配置。
     pub(crate) form_sync_row_key_widget: Option<&'a str>,
@@ -146,7 +144,8 @@ pub(crate) struct ProvisionPlan {
     /// 批量范围复选框列的 `field_id` 与展示名（可选）。`None` = 未启用。
     pub(crate) batch_scope_field_id: Option<String>,
     pub(crate) batch_scope_field_name: Option<String>,
-    /// 表单反向同步配置。
+    /// 表单反向同步配置。`form_sync_mode` 是历史列：功能已全量启用，落库恒为
+    /// `live`，运行时不再读取该值。
     pub(crate) form_sync_mode: String,
     pub(crate) form_sync_allow_clear: bool,
     pub(crate) form_sync_row_key_widget: Option<String>,
@@ -502,7 +501,8 @@ fn plan(
         handler_field_id,
         batch_scope_field_id,
         batch_scope_field_name,
-        form_sync_mode: input.form_sync_mode.trim().to_string(),
+        // 退回重提同步已全量启用，配置项不再参与开关；历史列保留以便旧数据可读。
+        form_sync_mode: "live".to_string(),
         form_sync_allow_clear: input.form_sync_allow_clear,
         form_sync_row_key_widget: input
             .form_sync_row_key_widget
@@ -1883,7 +1883,6 @@ mod tests {
             department_field: None,
             handler_field: None,
             batch_scope_field: None,
-            form_sync_mode: "off",
             form_sync_allow_clear: false,
             form_sync_row_key_widget: None,
             form_sync_aggregate_derived_mode: "leader",
@@ -2688,7 +2687,6 @@ mod tests {
         let result = plan(
             &ProvisionInput {
                 batch_scope_field: Some("批量范围"),
-                form_sync_mode: "off",
                 form_sync_allow_clear: false,
                 form_sync_row_key_widget: None,
                 form_sync_aggregate_derived_mode: "leader",

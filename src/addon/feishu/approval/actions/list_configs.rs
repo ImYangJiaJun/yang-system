@@ -363,9 +363,8 @@ pub(super) async fn handle(
             base_timezone: record.require("base_timezone")?,
             enabled: record.require("enabled")?,
             aggregate_batch: record.require("aggregate_batch")?,
-            form_sync_mode: record
-                .optional::<String>("form_sync_mode")?
-                .unwrap_or_else(|| "off".to_string()),
+            // 历史列：功能已全量启用，不看库内旧值。
+            form_sync_mode: "live".to_string(),
             form_sync_allow_clear: record
                 .optional::<bool>("form_sync_allow_clear")?
                 .unwrap_or(false),
@@ -493,7 +492,7 @@ mod tests {
             base_timezone: "Asia/Shanghai".to_string(),
             enabled: true,
             aggregate_batch: true,
-            form_sync_mode: "off".to_string(),
+            form_sync_mode: "live".to_string(),
             form_sync_allow_clear: false,
             form_sync_row_key_widget: None,
             form_sync_aggregate_derived_mode: "leader".to_string(),

@@ -1,7 +1,7 @@
 //! 事件/周期对账的单条任务同步编排。
 //!
 //! 输入是事件 worker 已经拿到的实例详情与表结构；本模块负责：
-//! 判定退回窗口 → 读配置/映射 → 反向映射 → shadow/实写 → 落同步状态。
+//! 判定退回窗口 → 读配置/映射 → 反向映射 → 实写 → 落同步状态。
 
 use std::collections::BTreeMap;
 
@@ -109,10 +109,8 @@ fn include_derived(derived_mode: &str, index: usize) -> bool {
 /// 一次同步的结局。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncOutcome {
-    Disabled,
     Skipped(&'static str),
     AwaitingResubmit,
-    Observed,
     Synced { written: usize, reviews: usize },
     Retry(SyncError),
     Review(SyncError),
@@ -130,7 +128,6 @@ pub(crate) struct RuntimeInput<'a> {
     pub(crate) task_id: i64,
     pub(crate) form_snapshot: &'a str,
     pub(crate) backfill_field_id: &'a str,
-    pub(crate) mode: &'a str,
     pub(crate) allow_clear: bool,
     pub(crate) timezone_offset: FixedOffset,
     pub(crate) detail: &'a InstanceDetail,
@@ -144,9 +141,6 @@ pub(crate) struct RuntimeInput<'a> {
 /// 返回 `Err` 只表示「同步状态写库失败」——那需要事件重试；业务失败都编码在
 /// [`SyncOutcome`] 里，不消耗事件的重试预算。
 pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, SyncError> {
-    if matches!(input.mode.trim(), "" | "off") {
-        return Ok(SyncOutcome::Disabled);
-    }
     if input.group_id.is_some_and(|group| !group.trim().is_empty()) {
         return Ok(SyncOutcome::Skipped("aggregate_member_not_supported"));
     }
@@ -343,39 +337,6 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
     log_plan(&plan);
 
     let hash = plan_hash(&plan);
-    if matches!(input.mode.trim(), "shadow") {
-        let state = if plan.has_reviews() {
-            "review"
-        } else {
-            "observed"
-        };
-        save_state(
-            input.context,
-            input.task_id,
-            &[
-                ("form_sync_state", json!(state)),
-                ("form_sync_last_rollback_ms", json!(rollback_ms)),
-                ("form_sync_hash", json!(hash)),
-                ("form_synced_at", json!(now_seconds())),
-                ("form_sync_next_at", Value::Null),
-                ("form_sync_attempts", json!(0)),
-                ("form_sync_error", plan_error(&plan)),
-            ],
-        )
-        .await?;
-        return Ok(if plan.has_reviews() {
-            SyncOutcome::Review(
-                plan.reviews
-                    .first()
-                    .map(|review| review.error.clone())
-                    .unwrap_or(SyncError::Review {
-                        reason: "shadow_review",
-                    }),
-            )
-        } else {
-            SyncOutcome::Observed
-        });
-    }
 
     let backfill_name = bitable::resolve_field_name(input.fields, input.backfill_field_id)
         .unwrap_or_else(|_| input.backfill_field_id.to_string());
@@ -640,13 +601,6 @@ fn log_plan(plan: &RecordPlan) {
     }
 }
 
-fn plan_error(plan: &RecordPlan) -> Value {
-    plan.reviews
-        .first()
-        .map(|review| json!(format!("{}: {}", review.error.code(), review.error)))
-        .unwrap_or(Value::Null)
-}
-
 fn now_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -755,7 +709,6 @@ pub(crate) struct GroupRuntimeInput<'a> {
     pub(crate) status_field: Option<&'a str>,
     pub(crate) flow_field: Option<&'a str>,
     pub(crate) department_field: Option<&'a str>,
-    pub(crate) mode: &'a str,
     pub(crate) allow_clear: bool,
     pub(crate) derived_mode: &'a str,
     /// 聚合明细行键控件 id；配置后按冻结的成员键值匹配明细行，容忍重排。
@@ -767,9 +720,6 @@ pub(crate) struct GroupRuntimeInput<'a> {
 
 /// 聚合组同步：顶层共享标量写全部成员，明细行按成员快照逐行写。
 pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutcome, SyncError> {
-    if matches!(input.mode.trim(), "" | "off") {
-        return Ok(SyncOutcome::Disabled);
-    }
     let window = detect::inspect(input.detail);
     if window.last_initiator_rollback_ms.is_none() {
         let reason = if window.non_initiator_rollback {
@@ -1024,10 +974,6 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         .await;
         log_plan(&plan);
         hashes.push(plan_hash(&plan));
-        if matches!(input.mode.trim(), "shadow") {
-            review_errors.extend(plan.reviews.iter().map(|review| review.error.clone()));
-            continue;
-        }
         match apply_plan(
             &store,
             &connects,
@@ -1065,64 +1011,44 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         .cloned()
         .collect();
     let hash = SyncValue::Text(hashes.join(";")).hash();
-    let shadow = matches!(input.mode.trim(), "shadow");
-    let (state, attempts, next_at, error_value, outcome) = if shadow {
-        let state = if review_errors.is_empty() {
-            "observed"
-        } else {
-            "review"
-        };
-        let error = review_errors.first().cloned();
-        (
-            state,
-            0,
-            Value::Null,
-            error
-                .as_ref()
-                .map(|error| json!(format!("{}: {error}", error.code())))
-                .unwrap_or(Value::Null),
-            match error {
-                Some(error) => SyncOutcome::Review(error),
-                None => SyncOutcome::Observed,
-            },
-        )
-    } else if let Some(error) = transient_errors.first().cloned() {
-        match retry_decision(stored_attempts, now_seconds()) {
-            RetryDecision::Retry { attempts, next_at } => (
-                "retry",
-                attempts,
-                json!(next_at),
-                json!(format!("{}: {error}", error.code())),
-                SyncOutcome::Retry(error),
-            ),
-            RetryDecision::Exhausted { attempts } => (
+    let (state, attempts, next_at, error_value, outcome) =
+        if let Some(error) = transient_errors.first().cloned() {
+            match retry_decision(stored_attempts, now_seconds()) {
+                RetryDecision::Retry { attempts, next_at } => (
+                    "retry",
+                    attempts,
+                    json!(next_at),
+                    json!(format!("{}: {error}", error.code())),
+                    SyncOutcome::Retry(error),
+                ),
+                RetryDecision::Exhausted { attempts } => (
+                    "review",
+                    attempts,
+                    Value::Null,
+                    json!(format!("{}: retry_exhausted", error.code())),
+                    SyncOutcome::Review(error),
+                ),
+            }
+        } else if let Some(error) = review_errors.first().cloned() {
+            (
                 "review",
-                attempts,
+                0,
                 Value::Null,
-                json!(format!("{}: retry_exhausted", error.code())),
+                json!(format!("{}: {error}", error.code())),
                 SyncOutcome::Review(error),
-            ),
-        }
-    } else if let Some(error) = review_errors.first().cloned() {
-        (
-            "review",
-            0,
-            Value::Null,
-            json!(format!("{}: {error}", error.code())),
-            SyncOutcome::Review(error),
-        )
-    } else {
-        (
-            "synced",
-            0,
-            Value::Null,
-            Value::Null,
-            SyncOutcome::Synced {
-                written,
-                reviews: 0,
-            },
-        )
-    };
+            )
+        } else {
+            (
+                "synced",
+                0,
+                Value::Null,
+                Value::Null,
+                SyncOutcome::Synced {
+                    written,
+                    reviews: 0,
+                },
+            )
+        };
     save_group_state(
         input.context,
         input.config_id,
@@ -1138,23 +1064,21 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         ],
     )
     .await?;
-    if !shadow {
-        if let Some(error) = alert_errors.first() {
-            send_sync_alert(
-                input.transport,
-                input.sleeper,
-                input.tokens,
-                SyncAlert {
-                    config_id: input.config_id,
-                    detail: input.detail,
-                    record_label: input.group_key,
-                    fields: input.fields,
-                    error,
-                    count: alert_errors.len(),
-                },
-            )
-            .await;
-        }
+    if let Some(error) = alert_errors.first() {
+        send_sync_alert(
+            input.transport,
+            input.sleeper,
+            input.tokens,
+            SyncAlert {
+                config_id: input.config_id,
+                detail: input.detail,
+                record_label: input.group_key,
+                fields: input.fields,
+                error,
+                count: alert_errors.len(),
+            },
+        )
+        .await;
     }
     Ok(outcome)
 }
@@ -1353,32 +1277,6 @@ async fn sync_group_rows(
         Ok(matched) => matched,
         Err(error) => return group_review(input, rollback_ms, error).await,
     };
-
-    if matches!(input.mode.trim(), "shadow") {
-        tracing::info!(
-            group_key = input.group_key,
-            pairs = matched.pairs.len(),
-            creates = matched.create_plans.len(),
-            voids = matched.void_records.len(),
-            "聚合组明细对账影子结果"
-        );
-        save_group_state(
-            input.context,
-            input.config_id,
-            input.group_key,
-            &[
-                ("form_sync_state", json!("observed")),
-                ("form_sync_last_rollback_ms", json!(rollback_ms)),
-                ("form_sync_hash", json!(hash)),
-                ("form_synced_at", json!(now_seconds())),
-                ("form_sync_next_at", Value::Null),
-                ("form_sync_attempts", json!(0)),
-                ("form_sync_error", Value::Null),
-            ],
-        )
-        .await?;
-        return Ok(SyncOutcome::Observed);
-    }
 
     let fallback_text = input
         .detail

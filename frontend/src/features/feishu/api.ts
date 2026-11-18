@@ -2526,8 +2526,6 @@ export type CreateApprovalConfigInput = {
   batchScopeField?: string;
   /// 同批聚合派发开关；默认关闭（省略等价于 `false`），开启时必须已配范围列。
   aggregateBatch?: boolean;
-  /// 表单反向同步模式；省略 = off。
-  formSyncMode?: "off" | "shadow" | "live";
   /// 是否允许清空台账字段；省略 = false。
   formSyncAllowClear?: boolean;
   /// 聚合明细行键子控件 id；省略 = 未配置。
@@ -2601,9 +2599,6 @@ export async function createApprovalConfig(
         : {}),
       // 后端 `#[serde(default)] bool`：省略就是关闭，所以只在打开时发。
       ...(input.aggregateBatch === true ? { aggregate_batch: true } : {}),
-      ...(input.formSyncMode && input.formSyncMode !== "off"
-        ? { form_sync_mode: input.formSyncMode }
-        : {}),
       ...(input.formSyncAllowClear === true
         ? { form_sync_allow_clear: true }
         : {}),
@@ -2654,8 +2649,6 @@ export type UpdateApprovalConfigPatch = {
   batchScopeField?: string;
   /// 同批聚合派发开关；未给 = 不改。后端把它与「本次修改 + 库内现值」合并校验。
   aggregateBatch?: boolean;
-  /// 表单反向同步模式；未给 = 不改。
-  formSyncMode?: "off" | "shadow" | "live";
   /// 是否允许清空台账字段；未给 = 不改。
   formSyncAllowClear?: boolean;
   /// 聚合明细行键子控件 id；空串 = 清空。
@@ -2690,8 +2683,6 @@ export async function updateApprovalConfig(
     body.batch_scope_field = patch.batchScopeField.trim();
   if (patch.aggregateBatch !== undefined)
     body.aggregate_batch = patch.aggregateBatch;
-  if (patch.formSyncMode !== undefined)
-    body.form_sync_mode = patch.formSyncMode;
   if (patch.formSyncAllowClear !== undefined)
     body.form_sync_allow_clear = patch.formSyncAllowClear;
   // 空串要发：后端把它当「清空」；省略才是「不改」。

@@ -127,8 +127,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(128),
             // --- 表单反向同步（退回重提后把审批值写回台账） ---
             //
-            // 默认关闭：打开前必须先跑 P0 真机验证（form 最新性、台账锁可写、
-            // 附件/外部选项回读形态）。shadow 只计算 diff、不写台账。
+            // 历史列：功能已全量启用，运行时不再读取该值；保留声明是为了兼容存量
+            // 数据与旧客户端，控制台不再提供开关。
             form_sync_mode => Radio::<String>::new()
                 .title("表单回写模式")
                 .require(true)
@@ -138,7 +138,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     ("shadow", "影子"),
                     ("live", "启用"),
                 ])
-                .default("off")
+                .default("live")
                 .filterable(true),
             // 用户清空审批字段时是否允许清空台账；P0 确认各类型清空语义前保持关闭。
             form_sync_allow_clear => Switch::new()

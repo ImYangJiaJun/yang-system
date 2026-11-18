@@ -108,12 +108,6 @@ pub(crate) struct RecordPlan {
     pub(crate) verifications: Vec<VerifyField>,
 }
 
-impl RecordPlan {
-    pub(crate) fn has_reviews(&self) -> bool {
-        !self.reviews.is_empty()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Location {
     Top,

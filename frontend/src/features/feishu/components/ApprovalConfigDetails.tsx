@@ -106,7 +106,6 @@ export function ApprovalConfigDetails({
   onAggregateChange: (next: boolean) => void;
   /// 审批表单反向同步设置：退回重提后把审批值写回台账。
   onFormSyncChange: (patch: {
-    formSyncMode?: "off" | "shadow" | "live";
     formSyncAllowClear?: boolean;
     formSyncRowKeyWidget?: string;
     formSyncAggregateDerivedMode?: "leader" | "all_members" | "skip";
@@ -678,37 +677,15 @@ export function ApprovalConfigDetails({
             <div className="space-y-3 rounded-md border border-border p-4">
               <h3 className="text-sm font-medium">审批表单回写台账</h3>
               <p className="text-xs text-muted-foreground">
-                审批被退回后，发起人在同一实例内修改并提交时，把审批表单值同步回原记录。
-                「影子」只计算差异、不写台账，用于上线前观察。
+                已全量启用：审批被退回后，发起人在同一实例内修改并提交时，审批表单值会自动同步回原记录。
               </p>
-              <label className="flex items-center gap-2 text-sm">
-                <span className="w-24 shrink-0 text-muted-foreground">
-                  回写模式
-                </span>
-                <select
-                  aria-label="审批表单回写模式"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={item.formSyncMode}
-                  disabled={!canWrite || pending}
-                  onChange={(event) =>
-                    onFormSyncChange({
-                      formSyncMode: event.target.value as
-                        "off" | "shadow" | "live",
-                    })
-                  }
-                >
-                  <option value="off">关闭</option>
-                  <option value="shadow">影子（只观察）</option>
-                  <option value="live">启用</option>
-                </select>
-              </label>
               <div className="flex items-start gap-2">
                 <Checkbox
                   id="approval-form-sync-clear"
                   aria-label="允许清空台账字段"
                   className="mt-0.5"
                   checked={item.formSyncAllowClear}
-                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  disabled={!canWrite || pending}
                   onCheckedChange={(checked) =>
                     onFormSyncChange({ formSyncAllowClear: checked === true })
                   }
@@ -730,7 +707,7 @@ export function ApprovalConfigDetails({
                   aria-label="聚合派生值写入方式"
                   className="h-9 rounded-md border border-input bg-background px-3 text-sm"
                   value={item.formSyncAggregateDerivedMode}
-                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  disabled={!canWrite || pending}
                   onChange={(event) =>
                     onFormSyncChange({
                       formSyncAggregateDerivedMode: event.target.value as
@@ -751,7 +728,7 @@ export function ApprovalConfigDetails({
                   key={item.formSyncRowKeyWidget ?? "none"}
                   aria-label="聚合明细行键控件"
                   defaultValue={item.formSyncRowKeyWidget ?? ""}
-                  disabled={!canWrite || pending || item.formSyncMode === "off"}
+                  disabled={!canWrite || pending}
                   placeholder="可选：明细内唯一的子控件 id"
                   onBlur={(event) => {
                     const next = event.target.value.trim();

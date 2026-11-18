@@ -858,8 +858,6 @@ struct EventConfig {
     end_time_field: Option<String>,
     department_field: Option<String>,
     handler_field: Option<String>,
-    /// 表单反向同步模式：off / shadow / live。
-    form_sync_mode: String,
     form_sync_allow_clear: bool,
     form_sync_aggregate_derived_mode: String,
     /// 聚合明细行键控件 id；用于重排后把表单行匹配回成员台账行。
@@ -960,11 +958,6 @@ async fn load_event_config(
     let end_time_field = optional_nonempty(&config, "end_time_field");
     let department_field = optional_nonempty(&config, "department_field");
     let handler_field = optional_nonempty(&config, "handler_field");
-    let form_sync_mode = config
-        .optional::<String>("form_sync_mode")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "off".to_string());
     let form_sync_allow_clear = config
         .optional::<bool>("form_sync_allow_clear")
         .ok()
@@ -1012,7 +1005,6 @@ async fn load_event_config(
         end_time_field,
         department_field,
         handler_field,
-        form_sync_mode,
         form_sync_allow_clear,
         form_sync_aggregate_derived_mode,
         form_sync_row_key_widget,
@@ -1301,7 +1293,6 @@ async fn fan_out_group_event(
             status_field: config.status_field.as_deref(),
             flow_field: config.flow_field.as_deref(),
             department_field: config.department_field.as_deref(),
-            mode: &config.form_sync_mode,
             allow_clear: config.form_sync_allow_clear,
             derived_mode: &config.form_sync_aggregate_derived_mode,
             row_key_widget: config.form_sync_row_key_widget.as_deref(),
@@ -1627,7 +1618,6 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
             task_id,
             form_snapshot: &config.form_snapshot,
             backfill_field_id: &config.backfill_field,
-            mode: &config.form_sync_mode,
             allow_clear: config.form_sync_allow_clear,
             timezone_offset: runner.timezone_offset,
             detail: &detail,
