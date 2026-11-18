@@ -69,6 +69,35 @@ pub(crate) async fn create_from_plan(
     }
 
     let mut cells = template.cells.clone();
+    // 回读形态与 create 写形态不完全一致：文本列可能是 `[{text,type}]`、人员列
+    // 带 name/avatar、附件列带 name/size。复制未映射列前先反投影再编码成写形态。
+    for field in fields {
+        let Some(cell) = cells.get_mut(&field.field_id) else {
+            continue;
+        };
+        let normalized = match field.field_type {
+            Some(1 | 13) => match current_value(1, cell) {
+                SyncValue::Text(text) => Some(Value::String(text)),
+                _ => None,
+            },
+            Some(2) => encode_cell(2, &current_value(2, cell), false)?,
+            Some(3) => encode_cell(3, &current_value(3, cell), false)?,
+            Some(4) => encode_cell(4, &current_value(4, cell), false)?,
+            Some(5) => encode_cell(5, &current_value(5, cell), false)?,
+            Some(7) => encode_cell(7, &current_value(7, cell), false)?,
+            Some(11) => encode_cell(11, &current_value(11, cell), false)?,
+            // 超链接读回是 {text,link}；已是对象时保留真实 link，别按文本重编码。
+            Some(15) if !cell.is_object() => encode_cell(15, &current_value(15, cell), false)?,
+            Some(17) => encode_cell(17, &current_value(17, cell), false)?,
+            _ => None,
+        };
+        if let Some(normalized) = normalized {
+            *cell = normalized;
+        }
+    }
+    // null 单元格不进入 create 请求：Bitable 对未提供的列用默认值，显式 null
+    // 在部分类型上会直接 400。
+    cells.retain(|_, cell| !cell.is_null());
     // 模板只贡献未映射字段。全局映射字段先全部删掉，再只覆盖本行计划里的值：
     // 条件控件和 leader 专属派生字段（只有第 0 行计划有）不能被成员行继承。
     for field_id in all_mapped_fields {
@@ -1417,6 +1446,82 @@ mod tests {
         assert!(
             created[0].0.get("fld_text").is_none(),
             "新建行的映射字段为空时不能继承模板旧值：{:?}",
+            created[0].0
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_normalizes_readback_text_cells() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::from([(
+                "fld_department".to_string(),
+                serde_json::json!([{"text": "财务部", "type": "text"}]),
+            )]),
+        };
+        let plan = make_plan("", Vec::new());
+        let fields = [field_item("fld_department", 1)];
+        create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::new(),
+            false,
+            "token-text",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let created = store.created();
+        assert_eq!(
+            created[0].0.get("fld_department"),
+            Some(&serde_json::json!("财务部")),
+            "文本列回读数组必须归一成裸字符串"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_normalizes_person_and_drops_null_cells() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::from([
+                (
+                    "fld_person".to_string(),
+                    serde_json::json!([{
+                        "id": "ou_1",
+                        "name": "张三",
+                        "avatar_url": "https://example.invalid/a.png"
+                    }]),
+                ),
+                ("fld_null".to_string(), Value::Null),
+            ]),
+        };
+        let plan = make_plan("", Vec::new());
+        let fields = [field_item("fld_person", 11), field_item("fld_null", 1)];
+        create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::new(),
+            false,
+            "token-person",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let created = store.created();
+        assert_eq!(
+            created[0].0.get("fld_person"),
+            Some(&serde_json::json!([{"id": "ou_1"}])),
+            "人员列只保留 id"
+        );
+        assert!(
+            created[0].0.get("fld_null").is_none(),
+            "null 单元格不能进 create：{:?}",
             created[0].0
         );
     }

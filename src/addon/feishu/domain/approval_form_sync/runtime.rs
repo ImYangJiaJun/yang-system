@@ -11,9 +11,9 @@ use yang_base::table::Record;
 
 use super::super::approval::InstanceDetail;
 use super::super::approval_aggregation::repository::{
-    detach_member_as_terminal, replace_member_row_keys, upsert_synced_task,
+    detach_synced_void_member, replace_member_row_keys, upsert_synced_task,
 };
-use super::super::approval_convert::{amount_currency, FixedOffset};
+use super::super::approval_convert::{amount_currency, FixedOffset, WidgetMap};
 use super::super::approval_dispatch::widget_maps_from_rows;
 use super::super::approval_export::form::InstanceForm;
 use super::super::approval_export::idempotency::client_token;
@@ -254,24 +254,6 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
         Ok(form) => form,
         Err(_) => return review(input, rollback_ms, SyncError::FormInvalid).await,
     };
-    // 单条任务目前一条审批只承载一条台账记录；多行明细若继续按 row_index=0
-    // 写会把第 2..N 行静默丢掉。先显式转人工，等单条多记录模型落地再放开。
-    match form_member_row_count(&form, 1) {
-        Ok(1) => {}
-        Ok(count) => {
-            return review(
-                input,
-                rollback_ms,
-                SyncError::RowCountMismatch {
-                    expected: 1,
-                    actual: count,
-                },
-            )
-            .await;
-        }
-        Err(error) => return review(input, rollback_ms, error).await,
-    }
-
     let maps = input
         .context
         .approval_field_maps()
@@ -309,6 +291,26 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
             },
         )
         .await;
+    }
+    // 单条任务目前一条审批只承载一条台账记录；多行明细若继续按 row_index=0
+    // 写会把第 2..N 行静默丢掉。先显式转人工，等单条多记录模型落地再放开。
+    if let Err(error) = reject_multi_row_nested_details(&form, &widgets) {
+        return review(input, rollback_ms, error).await;
+    }
+    match form_member_row_count(&form, 1, &widgets) {
+        Ok(1) => {}
+        Ok(count) => {
+            return review(
+                input,
+                rollback_ms,
+                SyncError::RowCountMismatch {
+                    expected: 1,
+                    actual: count,
+                },
+            )
+            .await;
+        }
+        Err(error) => return review(input, rollback_ms, error).await,
     }
 
     let options = DbOptionResolver {
@@ -1202,7 +1204,10 @@ async fn sync_group_rows(
         .await;
     }
 
-    let row_count = match form_member_row_count(form, member_ids.len()) {
+    if let Err(error) = reject_multi_row_nested_details(form, &widgets) {
+        return group_review(input, rollback_ms, error).await;
+    }
+    let row_count = match form_member_row_count(form, member_ids.len(), &widgets) {
         Ok(count) => count,
         Err(error) => return group_review(input, rollback_ms, error).await,
     };
@@ -1212,7 +1217,31 @@ async fn sync_group_rows(
             std::iter::once(widget.bitable_field.clone()).chain(widget.interval_end_field.clone())
         })
         .collect();
+    if all_mapped_fields.contains(input.backfill_field_id) {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "mapped_backfill_column",
+            },
+        )
+        .await;
+    }
     let mut fields = input.fields.to_vec();
+    if widgets.iter().any(|widget| {
+        fields.iter().any(|field| {
+            field.field_id == widget.bitable_field && field.field_name == FORM_SYNC_VOID_FIELD
+        })
+    }) {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "reserved_void_field_mapped",
+            },
+        )
+        .await;
+    }
     let options = DbOptionResolver {
         context: input.context,
     };
@@ -1256,6 +1285,9 @@ async fn sync_group_rows(
         }
         plans.push(plan);
     }
+    let mut hashes: Vec<String> = plans.iter().map(plan_hash).collect();
+    hashes.sort();
+    let mut hash = SyncValue::Text(hashes.join(";")).hash();
 
     let member_by_id: BTreeMap<String, &Record> = input
         .members
@@ -1277,7 +1309,7 @@ async fn sync_group_rows(
     };
     let fetched = match store.get_records(&member_ids).await {
         Ok(records) => records,
-        Err(error) => return group_review(input, rollback_ms, error).await,
+        Err(error) => return group_finish(input, rollback_ms, &hash, 0, &[error]).await,
     };
     let mut by_id: BTreeMap<String, super::apply::BitableRecord> = fetched
         .into_iter()
@@ -1292,13 +1324,15 @@ async fn sync_group_rows(
     let mut clear_anchor_void = false;
     for (index, record_id) in member_ids.iter().enumerate() {
         let Some(record) = by_id.remove(record_id) else {
-            return group_review(
+            return group_finish(
                 input,
                 rollback_ms,
-                SyncError::BitableRead {
+                &hash,
+                0,
+                &[SyncError::BitableRead {
                     record_id: record_id.clone(),
                     reason: "member_record_missing",
-                },
+                }],
             )
             .await;
         };
@@ -1319,17 +1353,19 @@ async fn sync_group_rows(
                 clear_anchor_void = true;
             } else {
                 if task_id > 0
-                    && detach_member_as_terminal(input.context, task_id, "form_sync_voided")
+                    && detach_synced_void_member(input.context, task_id)
                         .await
                         .is_err()
                 {
-                    return group_review(
+                    return group_finish(
                         input,
                         rollback_ms,
-                        SyncError::BitableWrite {
+                        &hash,
+                        0,
+                        &[SyncError::BitableWrite {
                             record_id: record_id.clone(),
                             reason: "detach_failed",
-                        },
+                        }],
                     )
                     .await;
                 }
@@ -1360,9 +1396,6 @@ async fn sync_group_rows(
         Err(error) => return group_review(input, rollback_ms, error).await,
     };
 
-    let mut hashes: Vec<String> = plans.iter().map(plan_hash).collect();
-    hashes.sort();
-    let mut hash = SyncValue::Text(hashes.join(";")).hash();
     if matches!(input.mode.trim(), "shadow") {
         tracing::info!(
             group_key = input.group_key,
@@ -1404,13 +1437,15 @@ async fn sync_group_rows(
                 fields.push(field);
             }
             Err(_) => {
-                return group_review(
+                return group_finish(
                     input,
                     rollback_ms,
-                    SyncError::BitableWrite {
+                    &hash,
+                    0,
+                    &[SyncError::BitableWrite {
                         record_id: String::new(),
                         reason: "void_field_unavailable",
-                    },
+                    }],
                 )
                 .await;
             }
@@ -1430,7 +1465,7 @@ async fn sync_group_rows(
                 cells: BTreeMap::from([(field_id.to_string(), Value::Bool(false))]),
             };
             if let Err(error) = store.update_records(&[update]).await {
-                return group_review(input, rollback_ms, error).await;
+                return group_finish(input, rollback_ms, &hash, 0, &[error]).await;
             }
             // 新建行会从 leader 复制未映射列；内存模板也要同步清掉作废标记，
             // 否则新行一建出来就是“已作废”。
@@ -1492,18 +1527,17 @@ async fn sync_group_rows(
         .max()
         .unwrap_or(0)
         + 1;
-    let mut ordinals: BTreeMap<String, usize> = BTreeMap::new();
     for &plan_index in &matched.create_plans {
         let plan = &plans[plan_index];
-        let plan_key = plan_hash(plan);
-        let ordinal = ordinals.entry(plan_key.clone()).or_insert(0);
-        let token = client_token(
+        // token 只由 (实例, 退回轮次, 表单行下标) 决定：同一行重试永远同 token，
+        // 不同行哪怕内容完全相同也不会共用 token（用“待创建集合序号”会在部分
+        // 成功后把下一行错误地映射到上一行已建的记录上）。
+        let token = form_sync_create_token(
             input.config_id,
             &input.detail.instance_code,
-            &format!("form-sync|{rollback_ms}|{plan_key}|{ordinal}"),
-            0,
+            rollback_ms,
+            plan_index,
         );
-        *ordinal += 1;
         let report = match create_from_plan(
             &store,
             &connects,
@@ -1522,6 +1556,16 @@ async fn sync_group_rows(
                 break;
             }
         };
+        if record_for_plan
+            .iter()
+            .flatten()
+            .any(|record_id| record_id == &report.record_id)
+        {
+            errors.push(SyncError::Review {
+                reason: "create_token_collision",
+            });
+            break;
+        }
         // 同 token 重放会拿回一条已存在的记录；如果它正好在本轮待作废集合里，
         // 说明上一轮已创建但后续步骤失败。把它改成“复用”，不能再作废。
         let reused = matched
@@ -1531,31 +1575,8 @@ async fn sync_group_rows(
         if let Some(position) = reused {
             matched.void_records.remove(position);
         }
-        let mut created_plan = plans[plan_index].clone();
-        created_plan.record_id = report.record_id.clone();
-        created_plan.task_id = active_members
-            .iter()
-            .find(|(record_id, _)| record_id == &report.record_id)
-            .map(|(_, task_id)| *task_id)
-            .filter(|task_id| *task_id > 0);
-        match apply_plan(
-            &store,
-            &connects,
-            &created_plan,
-            input.allow_clear,
-            SYNC_VERIFY_READBACK,
-        )
-        .await
-        {
-            Ok(applied) => {
-                written += 1 + applied.written.len();
-                errors.extend(applied.reviews);
-            }
-            Err(error) => errors.push(error),
-        }
-        if !errors.is_empty() {
-            break;
-        }
+        // 先落任务行再应用字段：apply 的只读校验失败时，这条台账行至少已经
+        // 是组员，下一次重提能看到并继续更新，而不是变成永远不可见的孤儿。
         if reused.is_none() {
             let uuid = derive_uuid(
                 &input.coordinates.app_token,
@@ -1582,6 +1603,31 @@ async fn sync_group_rows(
             }
             next_seq += 1;
         }
+        let mut created_plan = plans[plan_index].clone();
+        created_plan.record_id = report.record_id.clone();
+        created_plan.task_id = active_members
+            .iter()
+            .find(|(record_id, _)| record_id == &report.record_id)
+            .map(|(_, task_id)| *task_id)
+            .filter(|task_id| *task_id > 0);
+        match apply_plan(
+            &store,
+            &connects,
+            &created_plan,
+            input.allow_clear,
+            SYNC_VERIFY_READBACK,
+        )
+        .await
+        {
+            Ok(applied) => {
+                written += 1 + applied.written.len();
+                errors.extend(applied.reviews);
+            }
+            Err(error) => errors.push(error),
+        }
+        if !errors.is_empty() {
+            break;
+        }
         record_for_plan[plan_index] = Some(report.record_id);
     }
     if errors.is_empty() {
@@ -1602,7 +1648,7 @@ async fn sync_group_rows(
                 .find(|(active_id, _)| active_id == record_id)
             {
                 if *task_id > 0
-                    && detach_member_as_terminal(input.context, *task_id, "form_sync_voided")
+                    && detach_synced_void_member(input.context, *task_id)
                         .await
                         .is_err()
                 {
@@ -1652,8 +1698,68 @@ async fn sync_group_rows(
     group_finish(input, rollback_ms, &hash, written, &[]).await
 }
 
-fn form_member_row_count(form: &InstanceForm, fallback: usize) -> Result<usize, SyncError> {
-    let details = form.member_detail_ids();
+/// 新建行的幂等 token：只由实例、退回轮次、**表单行下标**决定。
+///
+/// 不能用“本轮待创建集合内的序号”：部分创建成功后重试时集合会缩短，序号
+/// 从 0 重新开始，会把下一行映射到上一行已建的记录上。
+fn form_sync_create_token(
+    config_id: i64,
+    instance_code: &str,
+    rollback_ms: i64,
+    plan_index: usize,
+) -> String {
+    client_token(
+        config_id,
+        instance_code,
+        &format!("form-sync|{rollback_ms}|{plan_index}"),
+        0,
+    )
+}
+
+/// 表单里真正有映射控件的顶层/嵌套明细。
+///
+/// 未映射的明细控件不参与行数校验：审批定义里常有「附件清单」这类明细，
+/// 配置没映射它，用户把它删空不应让整单停止同步。
+fn mapped_detail_ids(
+    form: &InstanceForm,
+    widgets: &[WidgetMap],
+) -> std::collections::BTreeSet<String> {
+    widgets
+        .iter()
+        .filter_map(
+            |widget| match super::plan::locate(form, &widget.widget_id) {
+                super::plan::Location::Detail { detail_id, .. } => Some(detail_id),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// 控件组内的嵌套明细是整单共享值；当前只支持单行，多行会静默丢后面的行。
+fn reject_multi_row_nested_details(
+    form: &InstanceForm,
+    widgets: &[WidgetMap],
+) -> Result<(), SyncError> {
+    for detail_id in mapped_detail_ids(form, widgets) {
+        if form.is_nested_detail(&detail_id) {
+            let count = form.row_count(&detail_id);
+            if count > 1 {
+                return Err(SyncError::RowCountMismatch {
+                    expected: 1,
+                    actual: count,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_member_row_count(
+    form: &InstanceForm,
+    fallback: usize,
+    widgets: &[WidgetMap],
+) -> Result<usize, SyncError> {
+    let details = mapped_detail_ids(form, widgets);
     if details.is_empty() {
         return if fallback == 0 {
             Err(SyncError::EmptyDetailRows)
@@ -2279,43 +2385,100 @@ mod tests {
     }
 
     #[test]
+    fn create_tokens_differ_by_plan_index_even_for_identical_rows() {
+        let first = form_sync_create_token(31, "INST", 100, 1);
+        let second = form_sync_create_token(31, "INST", 100, 2);
+        assert_ne!(
+            first, second,
+            "两行内容完全相同时，token 必须靠表单行下标区分"
+        );
+        assert_eq!(
+            first,
+            form_sync_create_token(31, "INST", 100, 1),
+            "同一行重试必须复用同一 token"
+        );
+        assert_ne!(
+            first,
+            form_sync_create_token(31, "INST", 200, 1),
+            "新一轮退回必须换 token"
+        );
+    }
+
+    #[test]
+    fn nested_multi_row_details_are_rejected() {
+        let inner = widget("inner_field", "input");
+        let one = form(
+            r#"[{"id":"group","type":"workGroup","value":[
+                {"id":"inner","type":"fieldList","value":[
+                    [{"id":"inner_field","type":"input","value":"x"}]
+                ]}
+            ]}]"#,
+        );
+        assert_eq!(
+            reject_multi_row_nested_details(&one, std::slice::from_ref(&inner)),
+            Ok(())
+        );
+        let two = form(
+            r#"[{"id":"group","type":"workGroup","value":[
+                {"id":"inner","type":"fieldList","value":[
+                    [{"id":"inner_field","type":"input","value":"x"}],
+                    [{"id":"inner_field","type":"input","value":"y"}]
+                ]}
+            ]}]"#,
+        );
+        assert_eq!(
+            reject_multi_row_nested_details(&two, &[inner]),
+            Err(SyncError::RowCountMismatch {
+                expected: 1,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
     fn member_row_count_uses_detail_rows_and_fails_closed() {
         let no_detail = form(r#"[]"#);
-        assert_eq!(form_member_row_count(&no_detail, 3), Ok(3));
+        assert_eq!(form_member_row_count(&no_detail, 3, &[]), Ok(3));
         assert_eq!(
-            form_member_row_count(&no_detail, 0),
+            form_member_row_count(&no_detail, 0, &[]),
             Err(SyncError::EmptyDetailRows)
         );
 
+        let field = widget("f", "input");
         let one_detail = form(
             r#"[{"id":"detail","type":"fieldList","value":[
                 [{"id":"f","type":"input","value":"A"}],
                 [{"id":"f","type":"input","value":"B"}]
             ]}]"#,
         );
-        assert_eq!(form_member_row_count(&one_detail, 1), Ok(2));
-
-        let empty_detail = form(r#"[{"id":"detail","type":"fieldList","value":[]}]"#);
         assert_eq!(
-            form_member_row_count(&empty_detail, 2),
-            Err(SyncError::EmptyDetailRows)
+            form_member_row_count(&one_detail, 1, std::slice::from_ref(&field)),
+            Ok(2)
         );
 
+        // 空 fieldList 里没有任何行，实例表单无法反推某个控件属于它；此时退回
+        // 成员数，由 build_single 逐行把缺失控件记为 skipped/review。未映射的
+        // 空明细则完全不参与行数校验（见 mapped_detail_ids）。
+        let empty_detail = form(r#"[{"id":"detail","type":"fieldList","value":[]}]"#);
+        assert_eq!(form_member_row_count(&empty_detail, 2, &[field]), Ok(2));
+
+        let first = widget("f1", "input");
+        let second = widget("f2", "input");
         let mismatched = form(
             r#"[
                 {"id":"d1","type":"fieldList","value":[
-                    [{"id":"f","type":"input","value":"A"}],
-                    [{"id":"f","type":"input","value":"B"}]
+                    [{"id":"f1","type":"input","value":"A"}],
+                    [{"id":"f1","type":"input","value":"B"}]
                 ]},
                 {"id":"d2","type":"fieldList","value":[
-                    [{"id":"f","type":"input","value":"A"}],
-                    [{"id":"f","type":"input","value":"B"}],
-                    [{"id":"f","type":"input","value":"C"}]
+                    [{"id":"f2","type":"input","value":"A"}],
+                    [{"id":"f2","type":"input","value":"B"}],
+                    [{"id":"f2","type":"input","value":"C"}]
                 ]}
             ]"#,
         );
         assert_eq!(
-            form_member_row_count(&mismatched, 2),
+            form_member_row_count(&mismatched, 2, &[first, second]),
             Err(SyncError::RowCountMismatch {
                 expected: 2,
                 actual: 3,

@@ -593,6 +593,31 @@ pub(crate) async fn detach_member_as_terminal(
     Ok(updated == 1)
 }
 
+/// 把表单同步软作废的成员摘出组，但保留为 `backfilled` 任务行。
+///
+/// 与 [`detach_member_as_terminal`] 的区别：那条是「记录已删/无权限」的毒记录
+/// 出口；表单同步的作废是正常业务事实，不能把任务行标成 terminal。摘组后
+/// `load_members` 不再把它当成员，`finish_group` 也不会再改它的状态。
+pub(crate) async fn detach_synced_void_member(
+    context: &FeishuContext,
+    task_id: i64,
+) -> anyhow::Result<bool> {
+    let row = Record::new()
+        .set("state", "backfilled")
+        .set("last_error", "form_sync_voided")
+        .set("group_id", Value::Null)
+        .set("group_seq", 0)
+        .set("worker_id", Value::Null)
+        .set("lease_until", Value::Null);
+    let updated = context
+        .approval_tasks()
+        .query()
+        .where_eq("id", serde_json::json!(task_id))?
+        .update(row)
+        .await?;
+    Ok(updated == 1)
+}
+
 /// 读一个组的全部任务行（按 `group_seq` 升序），供处理期取成员与明细行序。
 ///
 /// 与 [`lock_group_members_in_tx`] 的区别只在**不锁**：处理期已经持有 leader 的
