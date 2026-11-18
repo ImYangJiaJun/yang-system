@@ -1369,77 +1369,6 @@ pub(crate) async fn list_all_tables(
     Ok(items)
 }
 
-/// 表单反向同步的软作废标记列名。
-///
-/// 选中「软作废」后，台账需要一列让视图能过滤掉被删除的明细行。该列由同步
-/// 在第一次真的需要作废时按需创建，类型固定为复选框；不参与审批字段映射。
-pub(crate) const FORM_SYNC_VOID_FIELD: &str = "台账作废";
-
-/// 确保目标表有软作废复选框，返回字段定义。
-///
-/// 只在真的要作废行时调用；字段不存在就创建。字段已存在但类型不是复选框时
-/// 失败关闭——继续写会得到一条永远无法回读确认的“作废”记录。
-pub(crate) async fn ensure_void_checkbox(
-    transport: &dyn OutboundTransport,
-    sleeper: &dyn Sleeper,
-    tokens: &TenantTokenProvider,
-    coordinates: &BitableCoordinates,
-) -> Result<FieldItem, OutboundFailure> {
-    let fields = list_all_fields(transport, sleeper, tokens, coordinates).await?;
-    if let Some(field) = checkbox_field(&fields, FORM_SYNC_VOID_FIELD)? {
-        return Ok(field);
-    }
-
-    let url = fields_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
-        OutboundFailure {
-            kind: FailureKind::Fatal { code: 0 },
-            message: error.to_string(),
-        }
-    })?;
-    let body = serde_json::json!({
-        "field_name": FORM_SYNC_VOID_FIELD,
-        "type": 7,
-    });
-    let created = send_json::<serde_json::Value>(
-        transport,
-        sleeper,
-        tokens,
-        OutboundMethod::Post,
-        &url,
-        Vec::new(),
-        Some(body),
-        PULL_REQUEST_TIMEOUT_SECS,
-    )
-    .await;
-    // 创建响应丢失/并发创建时，重新列字段比相信响应更可靠。
-    let fields = list_all_fields(transport, sleeper, tokens, coordinates)
-        .await
-        .map_err(|error| {
-            if let Err(create_error) = created {
-                return create_error;
-            }
-            error
-        })?;
-    checkbox_field(&fields, FORM_SYNC_VOID_FIELD)?.ok_or_else(|| OutboundFailure {
-        kind: FailureKind::Fatal { code: 0 },
-        message: "作废标记列创建后仍不可见".to_string(),
-    })
-}
-
-/// 在字段列表里找工作簿标记列；同名但非复选框时直接失败。
-fn checkbox_field(fields: &[FieldItem], name: &str) -> Result<Option<FieldItem>, OutboundFailure> {
-    let Some(field) = fields.iter().find(|field| field.field_name == name) else {
-        return Ok(None);
-    };
-    if field.field_type != Some(7) {
-        return Err(OutboundFailure {
-            kind: FailureKind::Fatal { code: 0 },
-            message: format!("作废标记列「{name}」已存在但不是复选框"),
-        });
-    }
-    Ok(Some(field.clone()))
-}
-
 /// 拉取全量字段定义（用于 `field_id → 字段名` 映射）。
 pub(crate) async fn list_all_fields(
     transport: &dyn OutboundTransport,
@@ -2805,27 +2734,6 @@ mod tests {
             field("fldA", "费用大类/Main Exp Cat*"),
             field("fldB", "费用类型/Fee Type*"),
         ]
-    }
-
-    #[test]
-    fn void_checkbox_is_found_only_when_it_is_a_checkbox() {
-        let mut checkbox = field("fldVoid", FORM_SYNC_VOID_FIELD);
-        checkbox.field_type = Some(7);
-        let found = checkbox_field(&[checkbox], FORM_SYNC_VOID_FIELD)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .unwrap_or_else(|| panic!("必须找到复选框"));
-        assert_eq!(found.field_id, "fldVoid");
-        assert!(checkbox_field(&fields(), FORM_SYNC_VOID_FIELD)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .is_none());
-        assert!(
-            checkbox_field(
-                &[field("fldVoid", FORM_SYNC_VOID_FIELD)],
-                FORM_SYNC_VOID_FIELD
-            )
-            .is_err(),
-            "同名但非复选框必须失败关闭"
-        );
     }
 
     #[test]

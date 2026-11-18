@@ -19,13 +19,11 @@ use super::super::approval_export::form::InstanceForm;
 use super::super::approval_export::idempotency::client_token;
 use super::super::approval_notification::{send_feedback, NotificationRecipient, ReceiveIdType};
 use super::super::approval_uuid::derive_uuid;
-use super::super::bitable::{self, BitableCoordinates, FieldItem, FORM_SYNC_VOID_FIELD};
+use super::super::bitable::{self, BitableCoordinates, FieldItem};
 use super::super::context::FeishuContext;
 use super::super::outbound::{OutboundTransport, Sleeper};
 use super::super::tenant_token::TenantTokenProvider;
-use super::apply::{
-    apply_plan, create_from_plan, current_value, void_record, BitableStore, BitableUpdate,
-};
+use super::apply::{apply_plan, create_from_plan, mark_void_record, BitableStore};
 use super::attachments::BitableAttachmentUploader;
 use super::detect;
 use super::error::SyncError;
@@ -753,6 +751,10 @@ pub(crate) struct GroupRuntimeInput<'a> {
     pub(crate) members: &'a [Record],
     pub(crate) form_snapshot: &'a str,
     pub(crate) backfill_field_id: &'a str,
+    /// 可选扩展回填列；软作废时只有文本/超链接列会追加标记。
+    pub(crate) status_field: Option<&'a str>,
+    pub(crate) flow_field: Option<&'a str>,
+    pub(crate) department_field: Option<&'a str>,
     pub(crate) mode: &'a str,
     pub(crate) allow_clear: bool,
     pub(crate) derived_mode: &'a str,
@@ -1227,21 +1229,14 @@ async fn sync_group_rows(
         )
         .await;
     }
-    let mut fields = input.fields.to_vec();
-    if widgets.iter().any(|widget| {
-        fields.iter().any(|field| {
-            field.field_id == widget.bitable_field && field.field_name == FORM_SYNC_VOID_FIELD
-        })
-    }) {
-        return group_review(
-            input,
-            rollback_ms,
-            SyncError::Review {
-                reason: "reserved_void_field_mapped",
-            },
-        )
-        .await;
-    }
+    let fields = input.fields.to_vec();
+    let mut marker_fields: Vec<&str> = vec![input.backfill_field_id];
+    marker_fields.extend(
+        [input.status_field, input.flow_field, input.department_field]
+            .into_iter()
+            .flatten()
+            .filter(|field| !field.trim().is_empty()),
+    );
     let options = DbOptionResolver {
         context: input.context,
     };
@@ -1315,14 +1310,9 @@ async fn sync_group_rows(
         .into_iter()
         .map(|record| (record.record_id.clone(), record))
         .collect();
-    let void_field = fields
-        .iter()
-        .find(|field| field.field_name == FORM_SYNC_VOID_FIELD && field.field_type == Some(7))
-        .cloned();
     let mut active_records = Vec::with_capacity(member_ids.len());
     let mut active_members: Vec<(String, i64)> = Vec::with_capacity(member_ids.len());
-    let mut clear_anchor_void = false;
-    for (index, record_id) in member_ids.iter().enumerate() {
+    for record_id in &member_ids {
         let Some(record) = by_id.remove(record_id) else {
             return group_finish(
                 input,
@@ -1340,38 +1330,6 @@ async fn sync_group_rows(
             .get(record_id)
             .and_then(|member| member.optional::<i64>("id").ok().flatten())
             .unwrap_or_default();
-        let voided = void_field.as_ref().is_some_and(|field| {
-            record
-                .cells
-                .get(&field.field_id)
-                .map(|cell| current_value(7, cell) == SyncValue::Bool(true))
-                .unwrap_or(false)
-        });
-        if voided {
-            if index == 0 {
-                // 上一次软作废成功但摘组失败：leader 必须留在组里，重新激活。
-                clear_anchor_void = true;
-            } else {
-                if task_id > 0
-                    && detach_synced_void_member(input.context, task_id)
-                        .await
-                        .is_err()
-                {
-                    return group_finish(
-                        input,
-                        rollback_ms,
-                        &hash,
-                        0,
-                        &[SyncError::BitableWrite {
-                            record_id: record_id.clone(),
-                            reason: "detach_failed",
-                        }],
-                    )
-                    .await;
-                }
-                continue;
-            }
-        }
         active_records.push(record);
         active_members.push((record_id.clone(), task_id));
     }
@@ -1422,35 +1380,15 @@ async fn sync_group_rows(
         return Ok(SyncOutcome::Observed);
     }
 
-    let mut void_field_id = void_field.as_ref().map(|field| field.field_id.clone());
-    if (!matched.void_records.is_empty() || clear_anchor_void) && void_field_id.is_none() {
-        match bitable::ensure_void_checkbox(
-            input.transport,
-            input.sleeper,
-            input.tokens,
-            input.coordinates,
-        )
-        .await
-        {
-            Ok(field) => {
-                void_field_id = Some(field.field_id.clone());
-                fields.push(field);
-            }
-            Err(_) => {
-                return group_finish(
-                    input,
-                    rollback_ms,
-                    &hash,
-                    0,
-                    &[SyncError::BitableWrite {
-                        record_id: String::new(),
-                        reason: "void_field_unavailable",
-                    }],
-                )
-                .await;
-            }
-        }
-    }
+    let fallback_text = input
+        .detail
+        .serial_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| input.detail.instance_code.trim());
+    let fallback_link =
+        super::super::approval::instance_applink(&input.detail.instance_code).unwrap_or_default();
     let store = BitableStoreImpl {
         transport: input.transport,
         sleeper: input.sleeper,
@@ -1458,24 +1396,6 @@ async fn sync_group_rows(
         coordinates: input.coordinates,
         fields: &fields,
     };
-    if clear_anchor_void {
-        if let Some(field_id) = void_field_id.as_deref() {
-            let update = BitableUpdate {
-                record_id: anchor_record_id.clone(),
-                cells: BTreeMap::from([(field_id.to_string(), Value::Bool(false))]),
-            };
-            if let Err(error) = store.update_records(&[update]).await {
-                return group_finish(input, rollback_ms, &hash, 0, &[error]).await;
-            }
-            // 新建行会从 leader 复制未映射列；内存模板也要同步清掉作废标记，
-            // 否则新行一建出来就是“已作废”。
-            if let Some(record) = active_records.first_mut() {
-                record
-                    .cells
-                    .insert(field_id.to_string(), Value::Bool(false));
-            }
-        }
-    }
     let backfill_name = bitable::resolve_field_name(input.fields, input.backfill_field_id)
         .unwrap_or_else(|_| input.backfill_field_id.to_string());
     let connects = BitableConnectResolver {
@@ -1632,17 +1552,23 @@ async fn sync_group_rows(
     }
     if errors.is_empty() {
         for record_id in &matched.void_records {
-            let Some(field_id) = void_field_id.as_deref() else {
-                errors.push(SyncError::BitableWrite {
-                    record_id: record_id.clone(),
-                    reason: "void_field_unavailable",
-                });
-                break;
+            let marked = match mark_void_record(
+                &store,
+                record_id,
+                &fields,
+                &marker_fields,
+                input.backfill_field_id,
+                fallback_text,
+                &fallback_link,
+            )
+            .await
+            {
+                Ok(marked) => marked,
+                Err(error) => {
+                    errors.push(error);
+                    break;
+                }
             };
-            if let Err(error) = void_record(&store, record_id, field_id).await {
-                errors.push(error);
-                break;
-            }
             if let Some((_, task_id)) = active_members
                 .iter()
                 .find(|(active_id, _)| active_id == record_id)
@@ -1659,7 +1585,9 @@ async fn sync_group_rows(
                     break;
                 }
             }
-            written += 1;
+            if marked {
+                written += 1;
+            }
         }
     }
     if !errors.is_empty() {

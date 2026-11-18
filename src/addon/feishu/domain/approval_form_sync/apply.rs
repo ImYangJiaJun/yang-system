@@ -137,20 +137,124 @@ pub(crate) async fn create_from_plan(
     Ok(CreateReport { record_id })
 }
 
-/// 软作废一条台账记录：只把作废标记写成 `true`，写后回读确认。
-pub(crate) async fn void_record(
+/// 软作废标记：追加到可承载文本的回填列末尾。
+pub(crate) const VOID_MARKER: &str = "-台账作废";
+
+/// 软作废一条台账记录：在 `申请编号` 等回填列的原值末尾追加 [`VOID_MARKER`]。
+///
+/// 只写目标列为文本（1）或超链接（15）的列；单选/数字/日期/人员等格式不允许
+/// 的列直接跳过。`backfill_field_id`（申请编号）是唯一必写列：它无法承载标记
+/// 时整条作废失败，避免出现“行已删但台账看不出来”的静默状态。
+pub(crate) async fn mark_void_record(
     store: &dyn BitableStore,
     record_id: &str,
-    void_field_id: &str,
-) -> Result<(), SyncError> {
-    let cells = BTreeMap::from([(void_field_id.to_string(), Value::Bool(true))]);
+    fields: &[super::super::bitable::FieldItem],
+    marker_fields: &[&str],
+    backfill_field_id: &str,
+    fallback_text: &str,
+    fallback_link: &str,
+) -> Result<bool, SyncError> {
+    let id = record_id.to_string();
+    let records = store.get_records(std::slice::from_ref(&id)).await?;
+    let Some(current) = records
+        .into_iter()
+        .find(|record| record.record_id == record_id)
+    else {
+        return Err(SyncError::BitableRead {
+            record_id: record_id.to_string(),
+            reason: "record_not_found",
+        });
+    };
+
+    let mut cells = BTreeMap::new();
+    let mut backfill_marked = false;
+    for field_id in marker_fields {
+        let Some(field) = fields.iter().find(|field| field.field_id == **field_id) else {
+            continue;
+        };
+        let is_backfill = field.field_id == backfill_field_id;
+        match field.field_type {
+            Some(1) => {
+                let text = match current.cells.get(&field.field_id) {
+                    Some(cell) => match current_value(1, cell) {
+                        SyncValue::Text(text) => text,
+                        _ => String::new(),
+                    },
+                    None => String::new(),
+                };
+                let text = if is_backfill && text.trim().is_empty() {
+                    fallback_text.to_string()
+                } else {
+                    text
+                };
+                if is_backfill {
+                    backfill_marked = true;
+                }
+                if !text.ends_with(VOID_MARKER) {
+                    cells.insert(
+                        field.field_id.clone(),
+                        Value::String(format!("{text}{VOID_MARKER}")),
+                    );
+                }
+            }
+            Some(15) => {
+                let (text, link) = match current.cells.get(&field.field_id) {
+                    Some(Value::Object(cell)) => (
+                        cell.get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        cell.get("link")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    ),
+                    _ => (String::new(), String::new()),
+                };
+                let text = if text.trim().is_empty() {
+                    fallback_text.to_string()
+                } else {
+                    text
+                };
+                let link = if link.trim().is_empty() {
+                    fallback_link.to_string()
+                } else {
+                    link
+                };
+                // 超链接列必须带 link；拿不到实例链接就不写这一列。
+                if link.trim().is_empty() {
+                    continue;
+                }
+                if is_backfill {
+                    backfill_marked = true;
+                }
+                if !text.ends_with(VOID_MARKER) {
+                    cells.insert(
+                        field.field_id.clone(),
+                        serde_json::json!({ "text": format!("{text}{VOID_MARKER}"), "link": link }),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !backfill_marked {
+        return Err(SyncError::Review {
+            reason: "void_marker_unavailable",
+        });
+    }
+    if cells.is_empty() {
+        return Ok(false);
+    }
     store
         .update_records(&[BitableUpdate {
             record_id: record_id.to_string(),
-            cells,
+            cells: cells.clone(),
         }])
         .await?;
-    let id = record_id.to_string();
+
+    // 写后回读：文本列实际是富文本数组，超链接列是对象，必须按列类型反投影确认。
     let after = store.get_records(std::slice::from_ref(&id)).await?;
     let Some(after) = after
         .into_iter()
@@ -161,18 +265,34 @@ pub(crate) async fn void_record(
             reason: "record_missing_after_void",
         });
     };
-    let marked = after
-        .cells
-        .get(void_field_id)
-        .map(|cell| current_value(7, cell))
-        .unwrap_or(SyncValue::Empty);
-    if marked != SyncValue::Bool(true) {
-        return Err(SyncError::BitableWrite {
-            record_id: record_id.to_string(),
-            reason: "void_verify_mismatch",
-        });
+    for field_id in cells.keys() {
+        let marked = fields
+            .iter()
+            .find(|field| &field.field_id == field_id)
+            .is_some_and(|field| {
+                field_has_void_marker(field.field_type, after.cells.get(field_id))
+            });
+        if !marked {
+            return Err(SyncError::BitableWrite {
+                record_id: record_id.to_string(),
+                reason: "void_verify_mismatch",
+            });
+        }
     }
-    Ok(())
+    Ok(true)
+}
+
+fn field_has_void_marker(field_type: Option<i32>, cell: Option<&Value>) -> bool {
+    match (field_type, cell) {
+        (Some(1), Some(cell)) => {
+            matches!(current_value(1, cell), SyncValue::Text(text) if text.ends_with(VOID_MARKER))
+        }
+        (Some(15), Some(Value::Object(cell))) => cell
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.ends_with(VOID_MARKER)),
+        _ => false,
+    }
 }
 
 /// 关联审批列（18/21）的实例 Code → record_id。
@@ -1598,21 +1718,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn void_record_writes_and_reads_back_the_checkbox() {
+    async fn void_marks_text_and_hyperlink_but_skips_incompatible_columns() {
+        let link = "https://applink.feishu.cn/client/approval/instance/INST";
         let store = FakeStore::with(
             "rec2",
-            BTreeMap::from([("fld_void".to_string(), serde_json::json!(false))]),
+            BTreeMap::from([
+                (
+                    "fld_backfill".to_string(),
+                    serde_json::json!({"text": "202611180039", "link": link}),
+                ),
+                ("fld_flow".to_string(), serde_json::json!("提交✓ → 主管✓")),
+                ("fld_empty".to_string(), serde_json::json!("")),
+                ("fld_status".to_string(), serde_json::json!("审批中")),
+                (
+                    "fld_person".to_string(),
+                    serde_json::json!([{"id": "ou_1"}]),
+                ),
+                (
+                    "fld_date".to_string(),
+                    serde_json::json!(1_700_000_000_000i64),
+                ),
+            ]),
         );
-        void_record(&store, "rec2", "fld_void")
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+        let fields = [
+            field_item("fld_backfill", 15),
+            field_item("fld_flow", 1),
+            field_item("fld_empty", 1),
+            field_item("fld_status", 3),
+            field_item("fld_person", 11),
+            field_item("fld_date", 5),
+        ];
+        let marker_fields = [
+            "fld_backfill",
+            "fld_flow",
+            "fld_empty",
+            "fld_status",
+            "fld_person",
+            "fld_date",
+        ];
+        let written = mark_void_record(
+            &store,
+            "rec2",
+            &fields,
+            &marker_fields,
+            "fld_backfill",
+            "202611180039",
+            link,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(written);
         let records = store
             .get_records(&["rec2".to_string()])
             .await
             .unwrap_or_else(|error| panic!("{error}"));
+        let cells = &records[0].cells;
         assert_eq!(
-            records[0].cells.get("fld_void"),
-            Some(&serde_json::json!(true))
+            cells.get("fld_backfill"),
+            Some(&serde_json::json!({
+                "text": "202611180039-台账作废",
+                "link": link,
+            })),
+            "超链接列追加标记但保留原链接"
         );
+        assert_eq!(
+            cells.get("fld_flow"),
+            Some(&serde_json::json!("提交✓ → 主管✓-台账作废"))
+        );
+        assert_eq!(
+            cells.get("fld_empty"),
+            Some(&serde_json::json!("-台账作废")),
+            "空文本列直接写标记"
+        );
+        for unchanged in [
+            ("fld_status", serde_json::json!("审批中")),
+            ("fld_person", serde_json::json!([{"id": "ou_1"}])),
+            ("fld_date", serde_json::json!(1_700_000_000_000i64)),
+        ] {
+            assert_eq!(
+                cells.get(unchanged.0),
+                Some(&unchanged.1),
+                "{} 格式不允许，不应写入",
+                unchanged.0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn void_uses_fallback_link_and_does_not_double_mark() {
+        let link = "https://applink.feishu.cn/client/approval/instance/INST";
+        let store = FakeStore::with("rec3", BTreeMap::new());
+        let fields = [field_item("fld_backfill", 15)];
+        let marker_fields = ["fld_backfill"];
+        let first = mark_void_record(
+            &store,
+            "rec3",
+            &fields,
+            &marker_fields,
+            "fld_backfill",
+            "202611180039",
+            link,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(first);
+        let second = mark_void_record(
+            &store,
+            "rec3",
+            &fields,
+            &marker_fields,
+            "fld_backfill",
+            "202611180039",
+            link,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!second, "已带标记的记录不应重复写");
+        assert_eq!(store.updates().len(), 1, "幂等重试只允许一次 batch_update");
+        let records = store
+            .get_records(&["rec3".to_string()])
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            records[0].cells.get("fld_backfill"),
+            Some(&serde_json::json!({
+                "text": "202611180039-台账作废",
+                "link": link,
+            })),
+            "空超链接列用审批实例链接兜底"
+        );
+    }
+
+    #[tokio::test]
+    async fn void_fails_when_backfill_column_cannot_take_text() {
+        let store = FakeStore::with(
+            "rec4",
+            BTreeMap::from([(
+                "fld_backfill".to_string(),
+                serde_json::json!([{"id": "ou_1"}]),
+            )]),
+        );
+        let fields = [field_item("fld_backfill", 11)];
+        let error = mark_void_record(
+            &store,
+            "rec4",
+            &fields,
+            &["fld_backfill"],
+            "fld_backfill",
+            "202611180039",
+            "https://applink.feishu.cn/client/approval/instance/INST",
+        )
+        .await
+        .expect_err("人员列不能承载作废标记");
+        assert!(
+            matches!(
+                error,
+                SyncError::Review {
+                    reason: "void_marker_unavailable"
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(store.updates().is_empty());
     }
 }
