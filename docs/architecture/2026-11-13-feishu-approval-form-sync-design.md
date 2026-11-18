@@ -228,24 +228,27 @@
 
 1. **成员与行序**：
    - 组行 `feishu_approval_group` + 成员任务行；成员顺序 = `group_seq asc, id asc`（`group_seq` 可能留洞，不能当数组下标）。
-   - 在 create 前冻结 `group.member_row_keys`（`v=1, rows[{record_id, row_key?}]`）；恢复路径不重建。
-   - 每个被映射的顶层 `fieldList` 独立校验 `row_count == 成员数`；控件组内的整单共享 `fieldList` 不参与这项校验（按 leader / 派生模式处理，多行 `review`）。
-2. **行匹配**：
-   - 优先 `form_sync_row_key_widget`：明细内唯一业务键（如明细编号）→ 成员快照匹配，容忍重排。
-   - 一期实现一个成员只带一个 `row_index`，因此所有**含该行键控件**的顶层明细必须键序一致；不一致 → 整组 `review`。不含该控件的明细不参与键序匹配。
-   - 行键控件应选文本/数字类；日期控件的表单回读是 RFC3339 文案而台账单元格是毫秒数，会稳定落入 `row_key_unresolved`。
-   - 组创建时未配置行键（快照没有 `row_key`）的旧组回退下标语义。
-   - 未配置行键时按行下标 `i ↔ member_row_keys[i]`；行数不等、成员集合变化 → 整组 `review`，零写入。
-   - 用户增行/删行 → 不自动建/删多维表记录，整组 `review`。
-   - 无行键且用户重排 → 无法检测，按原下标写；这是已知限制，控制台必须提示「聚合明细请不要重排，或配置行键」。
-3. **顶层共享标量**：文本/数字/日期/固定选项/电话/复选框 → 写全部成员（派发时签名保证一致）。
-4. **顶层派生值**（`formula` 求和、附件/图片并集、多选并集）无法归因到成员，由 `form_sync_aggregate_derived_mode` 控制：
+   - 在 create 前冻结 `group.member_row_keys`（`v=1, rows[{record_id, row_key?}]`）；恢复路径不重建。该列没有 `filterable`，写入前必须先读组行再按 `config_id + group_key` 更新，不能拿它当 WHERE 条件。
+   - 每个被映射的顶层 `fieldList` 必须是同一行数；控件组内的整单共享 `fieldList` 不参与这项校验（按 leader / 派生模式处理，多行 `review`）。
+2. **行匹配（无行键时的内容多重集）**：
+   - 有 `form_sync_row_key_widget` 的存量配置继续按业务键匹配（行为不变）。
+   - 没有行键时，身份只能来自**已映射字段的内容**：每条表单行算一个规范化内容签名（排序去重、trim、数字按十进制、附件按 name+size），台账行用同一套 `current_value` 反投影。签名完全相同的行先互相抵消；剩余行按顺序配对并整行覆写，剩余表单行新建、剩余台账行软作废。
+   - 不按“位置 + 相似度”猜哪一行被修改：任意配对后每个计划都会完整覆写一条记录，最终活动行的多重集一定等于表单行集合。行数不变时优先复用原记录，只有数量变化才新增/作废。
+   - leader/锚点固定吃第 0 条表单行：第 0 条计划可能带 leader 专属派生值（顶层公式/附件并集/多选并集），只能写 leader。其余行仍按内容匹配。
+   - 软作废列固定为 `台账作废`（复选框），第一次真的需要作废时按需创建；台账视图应加过滤 `台账作废 = false`。新建行会复制 leader 的未映射列（`申请编号`、`申请状态`、`批量选择`、发起人/时间等），**映射列先全部清空再按本行计划覆写**，避免重复派发和串值。
+   - 新增记录同时插入 `state=backfilled` 的任务行：聚合组带 `group_id/group_seq`，下次退回同步才看得见。
+   - 无行键且用户重排：内容相同的行互换无差别；内容不同的行按上述配对，最终数据仍正确，但记录 id 可能变化。这是无行键的固有限制。
+3. **单条任务**：
+   - 一条单条审批当前对应一条台账记录；明细行数 `!= 1` 时整单 `review`（`row_count_mismatch`），不再静默只写第 0 行。
+   - 单条多明细 → 多台账记录需要独立的状态/事件回填模型，二期再做。
+4. **顶层共享标量**：文本/数字/日期/固定选项/电话/复选框 → 写全部成员（派发时签名保证一致）。
+5. **顶层派生值**（`formula` 求和、附件/图片并集、多选并集）无法归因到成员，由 `form_sync_aggregate_derived_mode` 控制：
    - `leader`（默认）：写到 leader 行；
    - `all_members`：镜像到所有成员（适用于共享/汇总列）；
    - `skip`：不写，控制台列明原因。
    推荐把需要逐成员统计的附件/多选放到明细行内。
-5. **明细行内字段**：按成员独立值写；行内附件/图片、外部选项、人员、控件组子控件均支持；行内 `formula` 仅在目标列是可写数字列时写；嵌套 `fieldList` 仅支持单行，多行 `review`。
-6. **部分失败**：成功成员更新，失败成员保留旧值并 `retry/review`；组状态按成员聚合。
+6. **明细行内字段**：按成员独立值写；行内附件/图片、外部选项、人员、控件组子控件均支持；行内 `formula` 仅在目标列是可写数字列时写；嵌套 `fieldList` 仅支持单行，多行 `review`。
+7. **部分失败**：成功成员更新，失败成员保留旧值并 `retry/review`；组状态按成员聚合。
 
 ### 5.5 附件（一期）
 
@@ -296,7 +299,8 @@
 ### 5.8 与现有回写/评论/导出的关系
 
 - `write_extended`（状态/流程/时间/部门/处理人/申请人/编号）与表单同步**分开写**，列集合不相交。
-- 表单同步**永不写**：`applicant_field / backfill_field / status_field / flow_field / start_time_field / end_time_field / department_field / handler_field / batch_scope_field`、主字段、评论规则列、导出规则列、外部选项源列。
+- 表单同步**不通过字段映射写**：`applicant_field / backfill_field / status_field / flow_field / start_time_field / end_time_field / department_field / handler_field / batch_scope_field`、主字段、评论规则列、导出规则列、外部选项源列。新增明细行时，这些未映射列从既有 leader/成员行复制，避免新行因回填列为空被再次派发。
+- 唯一由同步直接写的系统列是 `台账作废`（复选框）：只在用户删明细时写 `true`，视图用它过滤软作废行。
 - 表单同步写入会触发多维表格 `record_changed` 事件；评论 worker 对「form sync 刚写过的 record」加 60 秒抑制窗口。
 - 聚合顶层附件/多选并集按 `form_sync_aggregate_derived_mode` 处理（默认写 leader，可选 all_members/skip），不静默丢失。
 

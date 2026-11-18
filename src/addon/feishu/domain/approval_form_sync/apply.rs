@@ -34,6 +34,116 @@ pub(crate) struct BitableUpdate {
 pub(crate) trait BitableStore: Send + Sync {
     async fn get_records(&self, record_ids: &[String]) -> Result<Vec<BitableRecord>, SyncError>;
     async fn update_records(&self, updates: &[BitableUpdate]) -> Result<(), SyncError>;
+    /// 新建一条记录；`client_token` 必须由调用方确定性派生，重放返回同一 id。
+    async fn create_record(
+        &self,
+        fields: BTreeMap<String, Value>,
+        client_token: &str,
+    ) -> Result<String, SyncError>;
+}
+
+/// 新建记录的结果。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CreateReport {
+    pub(crate) record_id: String,
+}
+
+/// 按一条表单行的计划新建台账记录。
+///
+/// 模板记录只提供**未映射**字段（申请编号、状态、批量选择、发起人等）的初值；
+/// 所有映射字段先从模板删掉再按计划覆写，避免把模板行的业务值带进新行。只读
+/// 公式/查找列不写，建行后由 Bitable 自行计算。
+#[allow(clippy::too_many_arguments)] // 端口、计划、模板、字段表与幂等键各自独立，拼结构体反而多一层
+pub(crate) async fn create_from_plan(
+    store: &dyn BitableStore,
+    connects: &dyn ConnectResolver,
+    plan: &RecordPlan,
+    template: &BitableRecord,
+    fields: &[super::super::bitable::FieldItem],
+    all_mapped_fields: &BTreeSet<String>,
+    allow_clear: bool,
+    client_token: &str,
+) -> Result<CreateReport, SyncError> {
+    if let Some(review) = plan.reviews.first() {
+        return Err(review.error.clone());
+    }
+
+    let mut cells = template.cells.clone();
+    // 模板只贡献未映射字段。全局映射字段先全部删掉，再只覆盖本行计划里的值：
+    // 条件控件和 leader 专属派生字段（只有第 0 行计划有）不能被成员行继承。
+    for field_id in all_mapped_fields {
+        cells.remove(field_id);
+    }
+    // 未映射的公式/查找列也不能出现在 create 请求里。
+    for field in fields {
+        if matches!(field.field_type, Some(19 | 20)) {
+            cells.remove(&field.field_id);
+        }
+    }
+
+    for patch in &plan.patches {
+        if matches!(patch.target_type, 18 | 21) {
+            let SyncValue::ConnectCodes(codes) = &patch.value else {
+                return Err(SyncError::InvalidValue {
+                    widget_id: String::new(),
+                    reason: "关联列的值不是实例 Code",
+                });
+            };
+            let ids = connects.record_ids(codes).await?;
+            cells.insert(
+                patch.field_id.clone(),
+                serde_json::json!({ "link_record_ids": ids }),
+            );
+            continue;
+        }
+        let Some(cell) = encode_cell(patch.target_type, &patch.value, allow_clear)? else {
+            continue;
+        };
+        cells.insert(patch.field_id.clone(), cell);
+    }
+
+    let record_id = store.create_record(cells, client_token).await?;
+    // 不在这里回读校验：同 token 重放会返回已有记录，而 create 本身不会更新它。
+    // 调用方拿到 id 后统一走 apply_plan，既覆盖新建行，也覆盖幂等重放行。
+    Ok(CreateReport { record_id })
+}
+
+/// 软作废一条台账记录：只把作废标记写成 `true`，写后回读确认。
+pub(crate) async fn void_record(
+    store: &dyn BitableStore,
+    record_id: &str,
+    void_field_id: &str,
+) -> Result<(), SyncError> {
+    let cells = BTreeMap::from([(void_field_id.to_string(), Value::Bool(true))]);
+    store
+        .update_records(&[BitableUpdate {
+            record_id: record_id.to_string(),
+            cells,
+        }])
+        .await?;
+    let id = record_id.to_string();
+    let after = store.get_records(std::slice::from_ref(&id)).await?;
+    let Some(after) = after
+        .into_iter()
+        .find(|record| record.record_id == record_id)
+    else {
+        return Err(SyncError::BitableRead {
+            record_id: record_id.to_string(),
+            reason: "record_missing_after_void",
+        });
+    };
+    let marked = after
+        .cells
+        .get(void_field_id)
+        .map(|cell| current_value(7, cell))
+        .unwrap_or(SyncValue::Empty);
+    if marked != SyncValue::Bool(true) {
+        return Err(SyncError::BitableWrite {
+            record_id: record_id.to_string(),
+            reason: "void_verify_mismatch",
+        });
+    }
+    Ok(())
 }
 
 /// 关联审批列（18/21）的实例 Code → record_id。
@@ -224,7 +334,10 @@ pub(crate) async fn apply_plan(
 }
 
 /// 当前台账单元格 → 语义值。
-fn current_value(field_type: i32, cell: &Value) -> SyncValue {
+///
+/// 对账层也要用同一套反投影：内容签名必须与 `apply_plan` 的“是否变化”判定
+/// 完全同源，否则会出现「签名说相同、写入又说不同」的抖动。
+pub(crate) fn current_value(field_type: i32, cell: &Value) -> SyncValue {
     match field_type {
         1 | 13 => text_cell(cell)
             .map(SyncValue::Text)
@@ -613,6 +726,7 @@ mod tests {
     struct FakeStore {
         records: Mutex<BTreeMap<String, BTreeMap<String, Value>>>,
         updates: Mutex<Vec<BitableUpdate>>,
+        created: Mutex<Vec<(BTreeMap<String, Value>, String)>>,
         fail_write: Mutex<bool>,
         corrupt_write: Mutex<bool>,
         tamper_connect: Mutex<bool>,
@@ -636,6 +750,13 @@ mod tests {
             self.updates
                 .lock()
                 .map(|updates| updates.clone())
+                .unwrap_or_default()
+        }
+
+        fn created(&self) -> Vec<(BTreeMap<String, Value>, String)> {
+            self.created
+                .lock()
+                .map(|created| created.clone())
                 .unwrap_or_default()
         }
     }
@@ -736,6 +857,27 @@ mod tests {
                 stored.extend_from_slice(updates);
             }
             Ok(())
+        }
+
+        async fn create_record(
+            &self,
+            fields: BTreeMap<String, Value>,
+            client_token: &str,
+        ) -> Result<String, SyncError> {
+            let mut created = self.created.lock().map_err(|_| SyncError::BitableWrite {
+                record_id: String::new(),
+                reason: "lock",
+            })?;
+            let record_id = format!("rec_created_{}", created.len() + 1);
+            created.push((fields.clone(), client_token.to_string()));
+            self.records
+                .lock()
+                .map_err(|_| SyncError::BitableWrite {
+                    record_id: String::new(),
+                    reason: "lock",
+                })?
+                .insert(record_id.clone(), fields);
+            Ok(record_id)
         }
     }
 
@@ -1172,5 +1314,200 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(report.written.is_empty(), "{:?}", report.written);
         assert!(store.updates().is_empty());
+    }
+
+    fn field_item(
+        field_id: &str,
+        field_type: i32,
+    ) -> crate::addon::feishu::domain::bitable::FieldItem {
+        crate::addon::feishu::domain::bitable::FieldItem {
+            is_primary: false,
+            field_id: field_id.to_string(),
+            field_name: field_id.to_string(),
+            field_type: Some(field_type),
+            ui_type: None,
+            property: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_copies_unmapped_fields_and_drops_mapped_readonly() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::from([
+                ("fld_text".to_string(), serde_json::json!("old")),
+                ("fld_system".to_string(), serde_json::json!("sys")),
+                ("fld_formula".to_string(), serde_json::json!("calc")),
+            ]),
+        };
+        let plan = make_plan(
+            "",
+            vec![FieldPatch {
+                field_id: "fld_text".into(),
+                target_type: 1,
+                value: SyncValue::Text("new".into()),
+            }],
+        );
+        let fields = [
+            field_item("fld_text", 1),
+            field_item("fld_system", 1),
+            field_item("fld_formula", 19),
+        ];
+        let report = create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::from(["fld_text".to_string(), "fld_formula".to_string()]),
+            false,
+            "token-1",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(report.record_id, "rec_created_1");
+        let created = store.created();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].1, "token-1");
+        assert_eq!(
+            created[0].0.get("fld_text"),
+            Some(&serde_json::json!("new"))
+        );
+        assert_eq!(
+            created[0].0.get("fld_system"),
+            Some(&serde_json::json!("sys"))
+        );
+        assert!(
+            created[0].0.get("fld_formula").is_none(),
+            "只读公式列不能写：{:?}",
+            created[0].0
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_does_not_copy_template_value_for_empty_mapped_field() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::from([("fld_text".to_string(), serde_json::json!("old"))]),
+        };
+        let plan = make_plan(
+            "",
+            vec![FieldPatch {
+                field_id: "fld_text".into(),
+                target_type: 1,
+                value: SyncValue::Empty,
+            }],
+        );
+        let fields = [field_item("fld_text", 1)];
+        create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::from(["fld_text".to_string()]),
+            false,
+            "token-2",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let created = store.created();
+        assert!(
+            created[0].0.get("fld_text").is_none(),
+            "新建行的映射字段为空时不能继承模板旧值：{:?}",
+            created[0].0
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_drops_leader_only_derived_fields() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::from([
+                ("fld_derived".to_string(), serde_json::json!("leader-only")),
+                ("fld_system".to_string(), serde_json::json!("sys")),
+            ]),
+        };
+        let plan = make_plan("", Vec::new());
+        let fields = [field_item("fld_derived", 1), field_item("fld_system", 1)];
+        create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::from(["fld_derived".to_string()]),
+            false,
+            "token-derived",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let created = store.created();
+        assert!(
+            created[0].0.get("fld_derived").is_none(),
+            "成员行不能继承 leader 专属派生值：{:?}",
+            created[0].0
+        );
+        assert_eq!(
+            created[0].0.get("fld_system"),
+            Some(&serde_json::json!("sys"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_plan_resolves_connect_codes_to_record_ids() {
+        let store = FakeStore::default();
+        let template = BitableRecord {
+            record_id: "anchor".into(),
+            cells: BTreeMap::new(),
+        };
+        let plan = make_plan(
+            "",
+            vec![FieldPatch {
+                field_id: "fld_connect".into(),
+                target_type: 18,
+                value: SyncValue::ConnectCodes(vec!["A".into()]),
+            }],
+        );
+        let fields = [field_item("fld_connect", 18)];
+        create_from_plan(
+            &store,
+            &FakeConnects,
+            &plan,
+            &template,
+            &fields,
+            &BTreeSet::from(["fld_connect".to_string()]),
+            false,
+            "token-3",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let created = store.created();
+        assert_eq!(
+            created[0].0.get("fld_connect"),
+            Some(&serde_json::json!({"link_record_ids": ["rec-A"]}))
+        );
+    }
+
+    #[tokio::test]
+    async fn void_record_writes_and_reads_back_the_checkbox() {
+        let store = FakeStore::with(
+            "rec2",
+            BTreeMap::from([("fld_void".to_string(), serde_json::json!(false))]),
+        );
+        void_record(&store, "rec2", "fld_void")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let records = store
+            .get_records(&["rec2".to_string()])
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            records[0].cells.get("fld_void"),
+            Some(&serde_json::json!(true))
+        );
     }
 }

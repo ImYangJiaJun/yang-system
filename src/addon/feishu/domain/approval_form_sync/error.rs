@@ -44,6 +44,8 @@ pub(crate) enum SyncError {
     DuplicateTarget { field_id: String },
     /// 聚合明细行数与成员数不一致。
     RowCountMismatch { expected: usize, actual: usize },
+    /// 明细控件存在但一行都没有；台账无法用零行表达一条审批。
+    EmptyDetailRows,
     /// 聚合行键缺失/重复/匹配不上。
     RowKeyUnresolved { detail_id: String },
     /// 读台账失败。
@@ -82,6 +84,7 @@ impl SyncError {
             Self::FieldNotFound { .. } => "field_not_found",
             Self::DuplicateTarget { .. } => "duplicate_target",
             Self::RowCountMismatch { .. } => "row_count_mismatch",
+            Self::EmptyDetailRows => "empty_detail_rows",
             Self::RowKeyUnresolved { .. } => "row_key_unresolved",
             Self::BitableRead { .. } => "bitable_read",
             Self::BitableWrite { .. } => "bitable_write",
@@ -150,6 +153,7 @@ impl std::fmt::Display for SyncError {
                 formatter,
                 "聚合明细行数与成员数不一致（期望 {expected}，实际 {actual}）"
             ),
+            Self::EmptyDetailRows => write!(formatter, "审批明细控件存在但没有任何明细行"),
             Self::RowKeyUnresolved { detail_id } => write!(
                 formatter,
                 "聚合明细「{detail_id}」的行键缺失、重复或匹配不上成员"

@@ -117,7 +117,9 @@ impl InstanceForm {
         }
         let rows = node.detail_rows();
         let children = node.child_nodes();
-        if !rows.is_empty() {
+        // 空 `fieldList` 也要进索引：否则「明细行被全部删空」会退化成
+        // 「表单里没有这个明细」，聚合对账会按成员数继续写旧值而不是转人工。
+        if !rows.is_empty() || node.widget_type == "fieldList" {
             self.rows.entry(id.clone()).or_insert(rows);
             if inside_container {
                 self.nested_detail_ids.insert(id.clone());

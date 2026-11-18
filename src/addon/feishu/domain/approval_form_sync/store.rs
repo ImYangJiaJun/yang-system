@@ -84,6 +84,37 @@ impl BitableStore for BitableStoreImpl<'_> {
         }
         Ok(())
     }
+
+    async fn create_record(
+        &self,
+        fields: BTreeMap<String, Value>,
+        client_token: &str,
+    ) -> Result<String, SyncError> {
+        let mut named = serde_json::Map::with_capacity(fields.len());
+        for (field_id, cell) in fields {
+            let name = bitable::resolve_field_name(self.fields, &field_id).map_err(|_| {
+                SyncError::BitableWrite {
+                    record_id: String::new(),
+                    reason: "field_not_found",
+                }
+            })?;
+            named.insert(name, cell);
+        }
+        let created = bitable::create_record(
+            self.transport,
+            self.sleeper,
+            self.tokens,
+            self.coordinates,
+            named,
+            client_token,
+        )
+        .await
+        .map_err(|_| SyncError::BitableWrite {
+            record_id: String::new(),
+            reason: "create_record_failed",
+        })?;
+        Ok(created.record_id)
+    }
 }
 
 fn to_record(fields: &[FieldItem], item: RecordItem) -> Result<BitableRecord, SyncError> {

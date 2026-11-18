@@ -16,6 +16,7 @@ pub(crate) mod detect;
 pub(crate) mod encode;
 pub(crate) mod error;
 pub(crate) mod plan;
+pub(crate) mod reconcile;
 pub(crate) mod resolvers;
 pub(crate) mod runtime;
 pub(crate) mod store;

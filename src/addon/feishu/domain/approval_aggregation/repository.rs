@@ -284,15 +284,101 @@ pub(crate) async fn save_member_row_keys(
     group_key: &str,
     snapshot: &str,
 ) -> anyhow::Result<u64> {
+    // `member_row_keys` 没有 `filterable`，不能拿它当 WHERE 条件（DSL 是
+    // fail-closed 的：207 上 34 个组曾因此全部写不进快照）。先读组行再按
+    // `config_id + group_key` 更新，语义仍是「只在第一次写入」。
+    let Some(group) = load_group(context, config_id, group_key).await? else {
+        return Ok(0);
+    };
+    if group
+        .optional::<String>("member_row_keys")?
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(0);
+    }
     let row = Record::new().set("member_row_keys", snapshot);
     Ok(context
         .approval_groups()
         .query()
         .where_eq("config_id", serde_json::json!(config_id))?
         .where_eq("group_key", serde_json::json!(group_key))?
-        .where_null("member_row_keys")?
         .update(row)
         .await?)
+}
+
+/// 用对账后的最终成员顺序覆盖快照。
+///
+/// 与 [`save_member_row_keys`] 的区别：创建前只写一次，重提对账后必须能更新。
+pub(crate) async fn replace_member_row_keys(
+    context: &FeishuContext,
+    config_id: i64,
+    group_key: &str,
+    snapshot: &str,
+) -> anyhow::Result<u64> {
+    let row = Record::new().set("member_row_keys", snapshot);
+    Ok(context
+        .approval_groups()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("group_key", serde_json::json!(group_key))?
+        .update(row)
+        .await?)
+}
+
+/// 插入/更新一条「已由表单同步建立」的台账任务行。
+///
+/// 新记录必须进入任务表，否则下一次退回同步看不到它。`state=backfilled`
+/// 让批量认领跳过；聚合成员还要落 `group_id/group_seq` 才能被 `load_members`
+/// 取到。已有任务行若属于别的实例/已终止，拒绝劫持。
+pub(crate) async fn upsert_synced_task(
+    context: &FeishuContext,
+    config_id: i64,
+    record_id: &str,
+    uuid: &str,
+    group_key: Option<&str>,
+    group_seq: i64,
+) -> anyhow::Result<()> {
+    let existing = context
+        .approval_tasks()
+        .query()
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("record_id", serde_json::json!(record_id))?
+        .optional()
+        .await?;
+    if let Some(row) = existing {
+        let state = row.optional::<String>("state")?.unwrap_or_default();
+        let instance = row.optional::<String>("instance_code")?;
+        anyhow::ensure!(
+            state != "terminal" && instance.is_none(),
+            "记录已有其它审批任务，不能挂到当前实例"
+        );
+        let task_id = row.require::<i64>("id")?;
+        let mut update = Record::new()
+            .set("state", "backfilled")
+            .set("group_seq", group_seq);
+        update = update.set(
+            "group_id",
+            group_key.map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+        );
+        context
+            .approval_tasks()
+            .query()
+            .where_eq("id", serde_json::json!(task_id))?
+            .update(update)
+            .await?;
+        return Ok(());
+    }
+    let mut row = Record::new()
+        .set("config_id", config_id)
+        .set("record_id", record_id)
+        .set("uuid", uuid)
+        .set("state", "backfilled")
+        .set("group_seq", group_seq);
+    if let Some(group_key) = group_key {
+        row = row.set("group_id", group_key);
+    }
+    context.approval_tasks().query().insert(row).await?;
+    Ok(())
 }
 
 /// 记下组编号（回填成功后调用）。

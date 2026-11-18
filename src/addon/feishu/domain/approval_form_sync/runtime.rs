@@ -10,19 +10,27 @@ use serde_json::{json, Value};
 use yang_base::table::Record;
 
 use super::super::approval::InstanceDetail;
+use super::super::approval_aggregation::repository::{
+    detach_member_as_terminal, replace_member_row_keys, upsert_synced_task,
+};
 use super::super::approval_convert::{amount_currency, FixedOffset};
 use super::super::approval_dispatch::widget_maps_from_rows;
 use super::super::approval_export::form::InstanceForm;
+use super::super::approval_export::idempotency::client_token;
 use super::super::approval_notification::{send_feedback, NotificationRecipient, ReceiveIdType};
-use super::super::bitable::{self, BitableCoordinates, FieldItem};
+use super::super::approval_uuid::derive_uuid;
+use super::super::bitable::{self, BitableCoordinates, FieldItem, FORM_SYNC_VOID_FIELD};
 use super::super::context::FeishuContext;
 use super::super::outbound::{OutboundTransport, Sleeper};
 use super::super::tenant_token::TenantTokenProvider;
-use super::apply::apply_plan;
+use super::apply::{
+    apply_plan, create_from_plan, current_value, void_record, BitableStore, BitableUpdate,
+};
 use super::attachments::BitableAttachmentUploader;
 use super::detect;
 use super::error::SyncError;
 use super::plan::{build_single, PlanInput, RecordPlan};
+use super::reconcile::match_rows;
 use super::resolvers::{DbOptionResolver, FeishuDepartmentResolver};
 use super::store::{BitableConnectResolver, BitableStoreImpl};
 use super::value::SyncValue;
@@ -246,6 +254,23 @@ pub(crate) async fn sync_task(input: RuntimeInput<'_>) -> Result<SyncOutcome, Sy
         Ok(form) => form,
         Err(_) => return review(input, rollback_ms, SyncError::FormInvalid).await,
     };
+    // 单条任务目前一条审批只承载一条台账记录；多行明细若继续按 row_index=0
+    // 写会把第 2..N 行静默丢掉。先显式转人工，等单条多记录模型落地再放开。
+    match form_member_row_count(&form, 1) {
+        Ok(1) => {}
+        Ok(count) => {
+            return review(
+                input,
+                rollback_ms,
+                SyncError::RowCountMismatch {
+                    expected: 1,
+                    actual: count,
+                },
+            )
+            .await;
+        }
+        Err(error) => return review(input, rollback_ms, error).await,
+    }
 
     let maps = input
         .context
@@ -827,11 +852,11 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
     }
 
     let Some(form_raw) = input.detail.form.as_deref() else {
-        return group_review(input, rollback_ms, SyncError::FormMissing).await;
+        return group_review(&input, rollback_ms, SyncError::FormMissing).await;
     };
     let form = match super::super::approval_export::form::InstanceForm::parse(Some(form_raw)) {
         Ok(form) => form,
-        Err(_) => return group_review(input, rollback_ms, SyncError::FormInvalid).await,
+        Err(_) => return group_review(&input, rollback_ms, SyncError::FormInvalid).await,
     };
 
     // 成员行序：优先用 create 前冻结的快照；缺失时回退当前成员顺序（并记录原因）。
@@ -846,10 +871,20 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         .iter()
         .filter_map(|member| member.optional::<String>("record_id").ok().flatten())
         .collect();
+    // 没配行键控件时走内容多重集对账：它允许明细增删，也是配置 31 的现行路径。
+    // 配了行键的存量配置仍走下面的按快照/键匹配路径，行为不变。
+    if input
+        .row_key_widget
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return sync_group_rows(&input, rollback_ms, &form, member_ids).await;
+    }
     let ordered_ids =
         match resolve_member_order(snapshot.as_ref(), &member_ids, &form, input.row_key_widget) {
             Ok(ordered) => ordered,
-            Err(error) => return group_review(input, rollback_ms, error).await,
+            Err(error) => return group_review(&input, rollback_ms, error).await,
         };
 
     // 每个顶层明细的行数必须等于成员数；控件组内的整单共享明细不参与这项校验。
@@ -857,7 +892,7 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         let count = form.row_count(&detail_id);
         if count != ordered_ids.len() {
             return group_review(
-                input,
+                &input,
                 rollback_ms,
                 SyncError::RowCountMismatch {
                     expected: ordered_ids.len(),
@@ -888,7 +923,7 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
         amount_currency(input.form_snapshot, widget_id)
     }) else {
         return group_review(
-            input,
+            &input,
             rollback_ms,
             SyncError::Review {
                 reason: "field_map_corrupt",
@@ -898,7 +933,7 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
     };
     if widgets.is_empty() {
         return group_review(
-            input,
+            &input,
             rollback_ms,
             SyncError::Review {
                 reason: "no_field_maps",
@@ -1120,6 +1155,632 @@ pub(crate) async fn sync_group(input: GroupRuntimeInput<'_>) -> Result<SyncOutco
     Ok(outcome)
 }
 
+/// 无行键聚合组的对账写回：按内容多重集匹配，允许明细新增/删除。
+#[allow(clippy::too_many_lines)] // 与 sync_group 同一条编排，拆开反而看不清写入顺序
+async fn sync_group_rows(
+    input: &GroupRuntimeInput<'_>,
+    rollback_ms: i64,
+    form: &InstanceForm,
+    member_ids: Vec<String>,
+) -> Result<SyncOutcome, SyncError> {
+    let maps = input
+        .context
+        .approval_field_maps()
+        .query()
+        .where_eq("config_id", json!(input.config_id))
+        .map_err(|_| SyncError::BitableRead {
+            record_id: String::new(),
+            reason: "field_map_query_failed",
+        })?
+        .all()
+        .await
+        .map_err(|_| SyncError::BitableRead {
+            record_id: String::new(),
+            reason: "field_map_query_failed",
+        })?;
+    let rows: Vec<_> = maps.into_iter().map(Record::into_map).collect();
+    let Some(widgets) = widget_maps_from_rows(&rows, |widget_id| {
+        amount_currency(input.form_snapshot, widget_id)
+    }) else {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "field_map_corrupt",
+            },
+        )
+        .await;
+    };
+    if widgets.is_empty() {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "no_field_maps",
+            },
+        )
+        .await;
+    }
+
+    let row_count = match form_member_row_count(form, member_ids.len()) {
+        Ok(count) => count,
+        Err(error) => return group_review(input, rollback_ms, error).await,
+    };
+    let all_mapped_fields: std::collections::BTreeSet<String> = widgets
+        .iter()
+        .flat_map(|widget| {
+            std::iter::once(widget.bitable_field.clone()).chain(widget.interval_end_field.clone())
+        })
+        .collect();
+    let mut fields = input.fields.to_vec();
+    let options = DbOptionResolver {
+        context: input.context,
+    };
+    let departments = FeishuDepartmentResolver {
+        transport: input.transport,
+        sleeper: input.sleeper,
+        tokens: input.tokens,
+    };
+    let attachments = BitableAttachmentUploader {
+        transport: input.transport,
+        sleeper: input.sleeper,
+        tokens: input.tokens,
+        base_token: &input.coordinates.app_token,
+        max_bytes: super::attachments::MAX_UPLOAD_BYTES,
+    };
+
+    let mut plans = Vec::with_capacity(row_count);
+    for index in 0..row_count {
+        let filtered: Vec<_> = widgets
+            .iter()
+            .filter(|widget| include_for_member(form, widget, index, input.derived_mode))
+            .cloned()
+            .collect();
+        let plan = build_single(PlanInput {
+            record_id: "",
+            task_id: None,
+            form,
+            widgets: &filtered,
+            fields: &fields,
+            timezone_offset_seconds: input.timezone_offset.seconds(),
+            allow_clear: input.allow_clear,
+            row_index: Some(index),
+            options: &options,
+            departments: &departments,
+            attachments: &attachments,
+        })
+        .await;
+        log_plan(&plan);
+        if let Some(review) = plan.reviews.first() {
+            return group_review(input, rollback_ms, review.error.clone()).await;
+        }
+        plans.push(plan);
+    }
+
+    let member_by_id: BTreeMap<String, &Record> = input
+        .members
+        .iter()
+        .filter_map(|member| {
+            member
+                .optional::<String>("record_id")
+                .ok()
+                .flatten()
+                .map(|record_id| (record_id, member))
+        })
+        .collect();
+    let store = BitableStoreImpl {
+        transport: input.transport,
+        sleeper: input.sleeper,
+        tokens: input.tokens,
+        coordinates: input.coordinates,
+        fields: &fields,
+    };
+    let fetched = match store.get_records(&member_ids).await {
+        Ok(records) => records,
+        Err(error) => return group_review(input, rollback_ms, error).await,
+    };
+    let mut by_id: BTreeMap<String, super::apply::BitableRecord> = fetched
+        .into_iter()
+        .map(|record| (record.record_id.clone(), record))
+        .collect();
+    let void_field = fields
+        .iter()
+        .find(|field| field.field_name == FORM_SYNC_VOID_FIELD && field.field_type == Some(7))
+        .cloned();
+    let mut active_records = Vec::with_capacity(member_ids.len());
+    let mut active_members: Vec<(String, i64)> = Vec::with_capacity(member_ids.len());
+    let mut clear_anchor_void = false;
+    for (index, record_id) in member_ids.iter().enumerate() {
+        let Some(record) = by_id.remove(record_id) else {
+            return group_review(
+                input,
+                rollback_ms,
+                SyncError::BitableRead {
+                    record_id: record_id.clone(),
+                    reason: "member_record_missing",
+                },
+            )
+            .await;
+        };
+        let task_id = member_by_id
+            .get(record_id)
+            .and_then(|member| member.optional::<i64>("id").ok().flatten())
+            .unwrap_or_default();
+        let voided = void_field.as_ref().is_some_and(|field| {
+            record
+                .cells
+                .get(&field.field_id)
+                .map(|cell| current_value(7, cell) == SyncValue::Bool(true))
+                .unwrap_or(false)
+        });
+        if voided {
+            if index == 0 {
+                // 上一次软作废成功但摘组失败：leader 必须留在组里，重新激活。
+                clear_anchor_void = true;
+            } else {
+                if task_id > 0
+                    && detach_member_as_terminal(input.context, task_id, "form_sync_voided")
+                        .await
+                        .is_err()
+                {
+                    return group_review(
+                        input,
+                        rollback_ms,
+                        SyncError::BitableWrite {
+                            record_id: record_id.clone(),
+                            reason: "detach_failed",
+                        },
+                    )
+                    .await;
+                }
+                continue;
+            }
+        }
+        active_records.push(record);
+        active_members.push((record_id.clone(), task_id));
+    }
+    if active_records.is_empty() {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "no_active_members",
+            },
+        )
+        .await;
+    }
+    let anchor_record_id = active_records[0].record_id.clone();
+    let mut matched = match match_rows(
+        &plans,
+        &active_records,
+        Some(&anchor_record_id),
+        input.allow_clear,
+    ) {
+        Ok(matched) => matched,
+        Err(error) => return group_review(input, rollback_ms, error).await,
+    };
+
+    let mut hashes: Vec<String> = plans.iter().map(plan_hash).collect();
+    hashes.sort();
+    let mut hash = SyncValue::Text(hashes.join(";")).hash();
+    if matches!(input.mode.trim(), "shadow") {
+        tracing::info!(
+            group_key = input.group_key,
+            pairs = matched.pairs.len(),
+            creates = matched.create_plans.len(),
+            voids = matched.void_records.len(),
+            "聚合组明细对账影子结果"
+        );
+        save_group_state(
+            input.context,
+            input.config_id,
+            input.group_key,
+            &[
+                ("form_sync_state", json!("observed")),
+                ("form_sync_last_rollback_ms", json!(rollback_ms)),
+                ("form_sync_hash", json!(hash)),
+                ("form_synced_at", json!(now_seconds())),
+                ("form_sync_next_at", Value::Null),
+                ("form_sync_attempts", json!(0)),
+                ("form_sync_error", Value::Null),
+            ],
+        )
+        .await?;
+        return Ok(SyncOutcome::Observed);
+    }
+
+    let mut void_field_id = void_field.as_ref().map(|field| field.field_id.clone());
+    if (!matched.void_records.is_empty() || clear_anchor_void) && void_field_id.is_none() {
+        match bitable::ensure_void_checkbox(
+            input.transport,
+            input.sleeper,
+            input.tokens,
+            input.coordinates,
+        )
+        .await
+        {
+            Ok(field) => {
+                void_field_id = Some(field.field_id.clone());
+                fields.push(field);
+            }
+            Err(_) => {
+                return group_review(
+                    input,
+                    rollback_ms,
+                    SyncError::BitableWrite {
+                        record_id: String::new(),
+                        reason: "void_field_unavailable",
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    let store = BitableStoreImpl {
+        transport: input.transport,
+        sleeper: input.sleeper,
+        tokens: input.tokens,
+        coordinates: input.coordinates,
+        fields: &fields,
+    };
+    if clear_anchor_void {
+        if let Some(field_id) = void_field_id.as_deref() {
+            let update = BitableUpdate {
+                record_id: anchor_record_id.clone(),
+                cells: BTreeMap::from([(field_id.to_string(), Value::Bool(false))]),
+            };
+            if let Err(error) = store.update_records(&[update]).await {
+                return group_review(input, rollback_ms, error).await;
+            }
+            // 新建行会从 leader 复制未映射列；内存模板也要同步清掉作废标记，
+            // 否则新行一建出来就是“已作废”。
+            if let Some(record) = active_records.first_mut() {
+                record
+                    .cells
+                    .insert(field_id.to_string(), Value::Bool(false));
+            }
+        }
+    }
+    let backfill_name = bitable::resolve_field_name(input.fields, input.backfill_field_id)
+        .unwrap_or_else(|_| input.backfill_field_id.to_string());
+    let connects = BitableConnectResolver {
+        transport: input.transport,
+        sleeper: input.sleeper,
+        tokens: input.tokens,
+        coordinates: input.coordinates,
+        backfill_field_name: &backfill_name,
+        max_pages: 20,
+    };
+
+    let mut written = 0usize;
+    let mut errors: Vec<SyncError> = Vec::new();
+    let mut record_for_plan: Vec<Option<String>> = vec![None; plans.len()];
+    for pair in &matched.pairs {
+        let mut plan = plans[pair.plan_index].clone();
+        plan.record_id = pair.record_id.clone();
+        plan.task_id = active_members
+            .iter()
+            .find(|(record_id, _)| record_id == &pair.record_id)
+            .map(|(_, task_id)| *task_id)
+            .filter(|task_id| *task_id > 0);
+        match apply_plan(
+            &store,
+            &connects,
+            &plan,
+            input.allow_clear,
+            SYNC_VERIFY_READBACK,
+        )
+        .await
+        {
+            Ok(report) => {
+                written += report.written.len();
+                errors.extend(report.reviews);
+            }
+            Err(error) => errors.push(error),
+        }
+        record_for_plan[pair.plan_index] = Some(pair.record_id.clone());
+    }
+    if !errors.is_empty() {
+        return group_finish(input, rollback_ms, &hash, written, &errors).await;
+    }
+
+    let template = active_records[0].clone();
+    let mut next_seq = input
+        .members
+        .iter()
+        .filter_map(|member| member.optional::<i64>("group_seq").ok().flatten())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut ordinals: BTreeMap<String, usize> = BTreeMap::new();
+    for &plan_index in &matched.create_plans {
+        let plan = &plans[plan_index];
+        let plan_key = plan_hash(plan);
+        let ordinal = ordinals.entry(plan_key.clone()).or_insert(0);
+        let token = client_token(
+            input.config_id,
+            &input.detail.instance_code,
+            &format!("form-sync|{rollback_ms}|{plan_key}|{ordinal}"),
+            0,
+        );
+        *ordinal += 1;
+        let report = match create_from_plan(
+            &store,
+            &connects,
+            plan,
+            &template,
+            &fields,
+            &all_mapped_fields,
+            input.allow_clear,
+            &token,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                errors.push(error);
+                break;
+            }
+        };
+        // 同 token 重放会拿回一条已存在的记录；如果它正好在本轮待作废集合里，
+        // 说明上一轮已创建但后续步骤失败。把它改成“复用”，不能再作废。
+        let reused = matched
+            .void_records
+            .iter()
+            .position(|record_id| record_id == &report.record_id);
+        if let Some(position) = reused {
+            matched.void_records.remove(position);
+        }
+        let mut created_plan = plans[plan_index].clone();
+        created_plan.record_id = report.record_id.clone();
+        created_plan.task_id = active_members
+            .iter()
+            .find(|(record_id, _)| record_id == &report.record_id)
+            .map(|(_, task_id)| *task_id)
+            .filter(|task_id| *task_id > 0);
+        match apply_plan(
+            &store,
+            &connects,
+            &created_plan,
+            input.allow_clear,
+            SYNC_VERIFY_READBACK,
+        )
+        .await
+        {
+            Ok(applied) => {
+                written += 1 + applied.written.len();
+                errors.extend(applied.reviews);
+            }
+            Err(error) => errors.push(error),
+        }
+        if !errors.is_empty() {
+            break;
+        }
+        if reused.is_none() {
+            let uuid = derive_uuid(
+                &input.coordinates.app_token,
+                &input.coordinates.table_id,
+                input.detail.approval_code.as_deref().unwrap_or("form-sync"),
+                &report.record_id,
+            );
+            if upsert_synced_task(
+                input.context,
+                input.config_id,
+                &report.record_id,
+                &uuid,
+                Some(input.group_key),
+                next_seq,
+            )
+            .await
+            .is_err()
+            {
+                errors.push(SyncError::BitableWrite {
+                    record_id: report.record_id.clone(),
+                    reason: "task_row_insert_failed",
+                });
+                break;
+            }
+            next_seq += 1;
+        }
+        record_for_plan[plan_index] = Some(report.record_id);
+    }
+    if errors.is_empty() {
+        for record_id in &matched.void_records {
+            let Some(field_id) = void_field_id.as_deref() else {
+                errors.push(SyncError::BitableWrite {
+                    record_id: record_id.clone(),
+                    reason: "void_field_unavailable",
+                });
+                break;
+            };
+            if let Err(error) = void_record(&store, record_id, field_id).await {
+                errors.push(error);
+                break;
+            }
+            if let Some((_, task_id)) = active_members
+                .iter()
+                .find(|(active_id, _)| active_id == record_id)
+            {
+                if *task_id > 0
+                    && detach_member_as_terminal(input.context, *task_id, "form_sync_voided")
+                        .await
+                        .is_err()
+                {
+                    errors.push(SyncError::BitableWrite {
+                        record_id: record_id.clone(),
+                        reason: "detach_failed",
+                    });
+                    break;
+                }
+            }
+            written += 1;
+        }
+    }
+    if !errors.is_empty() {
+        return group_finish(input, rollback_ms, &hash, written, &errors).await;
+    }
+
+    let final_ids: Vec<String> = record_for_plan.into_iter().flatten().collect();
+    if final_ids.len() != plans.len() {
+        return group_review(
+            input,
+            rollback_ms,
+            SyncError::Review {
+                reason: "row_mapping_incomplete",
+            },
+        )
+        .await;
+    }
+    let snapshot = serde_json::json!({
+        "v": 2,
+        "rows": final_ids.iter().enumerate().map(|(index, record_id)| {
+            serde_json::json!({"record_id": record_id, "row_index": index})
+        }).collect::<Vec<_>>(),
+    })
+    .to_string();
+    if replace_member_row_keys(input.context, input.config_id, input.group_key, &snapshot)
+        .await
+        .is_err()
+    {
+        errors.push(SyncError::BitableWrite {
+            record_id: String::new(),
+            reason: "snapshot_write_failed",
+        });
+        return group_finish(input, rollback_ms, &hash, written, &errors).await;
+    }
+    hash = SyncValue::Text(format!("{hash}:{}", written)).hash();
+    group_finish(input, rollback_ms, &hash, written, &[]).await
+}
+
+fn form_member_row_count(form: &InstanceForm, fallback: usize) -> Result<usize, SyncError> {
+    let details = form.member_detail_ids();
+    if details.is_empty() {
+        return if fallback == 0 {
+            Err(SyncError::EmptyDetailRows)
+        } else {
+            Ok(fallback)
+        };
+    }
+    let mut expected: Option<usize> = None;
+    for detail_id in details {
+        let count = form.row_count(&detail_id);
+        if count == 0 {
+            return Err(SyncError::EmptyDetailRows);
+        }
+        match expected {
+            None => expected = Some(count),
+            Some(expected) if expected != count => {
+                return Err(SyncError::RowCountMismatch {
+                    expected,
+                    actual: count,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(expected.unwrap_or(fallback))
+}
+
+/// 组同步的收尾：分类错误、写组状态、按需告警。
+async fn group_finish(
+    input: &GroupRuntimeInput<'_>,
+    rollback_ms: i64,
+    hash: &str,
+    written: usize,
+    errors: &[SyncError],
+) -> Result<SyncOutcome, SyncError> {
+    let stored_attempts = input
+        .group
+        .optional::<i64>("form_sync_attempts")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let mut review_errors = Vec::new();
+    let mut transient_errors = Vec::new();
+    for error in errors {
+        if is_retryable(error) {
+            transient_errors.push(error.clone());
+        } else {
+            review_errors.push(error.clone());
+        }
+    }
+    let (state, attempts, next_at, error_value, outcome) =
+        if let Some(error) = transient_errors.first().cloned() {
+            match retry_decision(stored_attempts, now_seconds()) {
+                RetryDecision::Retry { attempts, next_at } => (
+                    "retry",
+                    attempts,
+                    json!(next_at),
+                    json!(format!("{}: {error}", error.code())),
+                    SyncOutcome::Retry(error),
+                ),
+                RetryDecision::Exhausted { attempts } => (
+                    "review",
+                    attempts,
+                    Value::Null,
+                    json!(format!("{}: retry_exhausted", error.code())),
+                    SyncOutcome::Review(error),
+                ),
+            }
+        } else if let Some(error) = review_errors.first().cloned() {
+            (
+                "review",
+                0,
+                Value::Null,
+                json!(format!("{}: {error}", error.code())),
+                SyncOutcome::Review(error),
+            )
+        } else {
+            (
+                "synced",
+                0,
+                Value::Null,
+                Value::Null,
+                SyncOutcome::Synced {
+                    written,
+                    reviews: 0,
+                },
+            )
+        };
+    save_group_state(
+        input.context,
+        input.config_id,
+        input.group_key,
+        &[
+            ("form_sync_state", json!(state)),
+            ("form_sync_last_rollback_ms", json!(rollback_ms)),
+            ("form_sync_hash", json!(hash)),
+            ("form_synced_at", json!(now_seconds())),
+            ("form_sync_next_at", next_at),
+            ("form_sync_attempts", json!(attempts)),
+            ("form_sync_error", error_value),
+        ],
+    )
+    .await?;
+    let alert_errors: Vec<SyncError> = review_errors
+        .iter()
+        .filter(|error| should_alert(error))
+        .cloned()
+        .collect();
+    if let Some(error) = alert_errors.first() {
+        send_sync_alert(
+            input.transport,
+            input.sleeper,
+            input.tokens,
+            SyncAlert {
+                config_id: input.config_id,
+                detail: input.detail,
+                record_label: input.group_key,
+                fields: input.fields,
+                error,
+                count: alert_errors.len(),
+            },
+        )
+        .await;
+    }
+    Ok(outcome)
+}
+
 /// 解析聚合组成员的台账行序。
 ///
 /// 优先用建单前冻结的 `member_row_keys` 快照；快照缺失或没有 `rows` 数组时
@@ -1295,7 +1956,7 @@ fn include_for_member(
 }
 
 async fn group_review(
-    input: GroupRuntimeInput<'_>,
+    input: &GroupRuntimeInput<'_>,
     rollback_ms: i64,
     error: SyncError,
 ) -> Result<SyncOutcome, SyncError> {
@@ -1615,6 +2276,51 @@ mod tests {
 
     fn form(raw: &str) -> InstanceForm {
         InstanceForm::parse(Some(raw)).unwrap_or_else(|error| panic!("应可解析: {error}"))
+    }
+
+    #[test]
+    fn member_row_count_uses_detail_rows_and_fails_closed() {
+        let no_detail = form(r#"[]"#);
+        assert_eq!(form_member_row_count(&no_detail, 3), Ok(3));
+        assert_eq!(
+            form_member_row_count(&no_detail, 0),
+            Err(SyncError::EmptyDetailRows)
+        );
+
+        let one_detail = form(
+            r#"[{"id":"detail","type":"fieldList","value":[
+                [{"id":"f","type":"input","value":"A"}],
+                [{"id":"f","type":"input","value":"B"}]
+            ]}]"#,
+        );
+        assert_eq!(form_member_row_count(&one_detail, 1), Ok(2));
+
+        let empty_detail = form(r#"[{"id":"detail","type":"fieldList","value":[]}]"#);
+        assert_eq!(
+            form_member_row_count(&empty_detail, 2),
+            Err(SyncError::EmptyDetailRows)
+        );
+
+        let mismatched = form(
+            r#"[
+                {"id":"d1","type":"fieldList","value":[
+                    [{"id":"f","type":"input","value":"A"}],
+                    [{"id":"f","type":"input","value":"B"}]
+                ]},
+                {"id":"d2","type":"fieldList","value":[
+                    [{"id":"f","type":"input","value":"A"}],
+                    [{"id":"f","type":"input","value":"B"}],
+                    [{"id":"f","type":"input","value":"C"}]
+                ]}
+            ]"#,
+        );
+        assert_eq!(
+            form_member_row_count(&mismatched, 2),
+            Err(SyncError::RowCountMismatch {
+                expected: 2,
+                actual: 3,
+            })
+        );
     }
 
     fn group_snapshot(order: &[(&str, &str)]) -> serde_json::Value {
