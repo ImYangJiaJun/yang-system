@@ -5,6 +5,11 @@ import * as XLSX from "xlsx";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
+import {
+  stubClipboardApi,
+  stubExecCommand,
+  stubInsecureClipboard,
+} from "@test/helpers/clipboard";
 
 vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?worker", () => ({
   default: class {
@@ -93,6 +98,7 @@ const TASKS = [
     definition_code: "D1",
     definition_name: "报销审批",
     title: "报销单 A",
+    serial_number: "202611200024",
     initiator_name: "李四",
     summaries: ["差旅费 ¥100"],
     support_api_operate: true,
@@ -120,6 +126,7 @@ const TASKS = [
     definition_code: "D2",
     definition_name: "请假审批",
     title: "请假单 B",
+    serial_number: "202611210031",
     initiator_name: "王五",
     summaries: ["2 天"],
     support_api_operate: false,
@@ -134,6 +141,7 @@ const TASKS = [
     definition_code: "D2",
     definition_name: "请假审批",
     title: "外部单 C",
+    serial_number: "202611220008",
     initiator_name: "赵六",
     summaries: ["外部流程"],
     instance_external_id: "ext-1",
@@ -331,7 +339,7 @@ describe("BatchApprovalPage", () => {
         { timeout: 30_000 },
       ),
     ).toBeInTheDocument();
-    expect(await screen.findByText("报销单 A")).toBeInTheDocument();
+    expect(await screen.findByLabelText("选择 报销单 A")).toBeInTheDocument();
     // 左侧分组带数量。
     expect(screen.getByRole("button", { name: /报销审批/ })).toHaveTextContent(
       "1",
@@ -351,7 +359,7 @@ describe("BatchApprovalPage", () => {
   it("审批定义侧栏可收起，给表格腾出空间", async () => {
     stubBatchApi();
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "收起审批定义侧栏" }));
@@ -361,25 +369,36 @@ describe("BatchApprovalPage", () => {
     expect(screen.getByText("全部待办")).toBeInTheDocument();
   });
 
-  it("全局搜索按标题、单号或发起人过滤待办", async () => {
+  it("全局搜索按标题、审批编号、实例编号或发起人过滤待办", async () => {
     stubBatchApi();
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     const user = userEvent.setup();
-    await user.type(screen.getByRole("textbox", { name: "搜索待办" }), "王五");
-    expect(await screen.findByText("请假单 B")).toBeInTheDocument();
-    expect(screen.queryByText("报销单 A")).not.toBeInTheDocument();
-    expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
+    const search = screen.getByRole("textbox", { name: "搜索待办" });
+    await user.type(search, "王五");
+    expect(await screen.findByLabelText("选择 请假单 B")).toBeInTheDocument();
+    expect(screen.queryByLabelText("选择 报销单 A")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("选择 外部单 C")).not.toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "202611200024");
+    expect(await screen.findByLabelText("选择 报销单 A")).toBeInTheDocument();
+    expect(screen.queryByLabelText("选择 请假单 B")).not.toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "外部单 C");
+    expect(await screen.findByLabelText("选择 外部单 C")).toBeInTheDocument();
+    expect(screen.queryByLabelText("选择 报销单 A")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "清空搜索" }));
-    expect(await screen.findByText("报销单 A")).toBeInTheDocument();
+    expect(await screen.findByLabelText("选择 报销单 A")).toBeInTheDocument();
   });
 
   it("全选可处理只勾选允许 API 操作的任务", async () => {
     stubBatchApi();
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "全选可处理" }));
@@ -412,7 +431,7 @@ describe("BatchApprovalPage", () => {
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     const user = userEvent.setup();
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await user.click(screen.getByLabelText("选择 报销单 A"));
     await user.click(screen.getByRole("button", { name: "同意" }));
 
@@ -456,7 +475,7 @@ describe("BatchApprovalPage", () => {
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     const user = userEvent.setup();
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await user.click(screen.getByLabelText("选择 报销单 A"));
     await user.click(screen.getByRole("button", { name: "拒绝" }));
 
@@ -489,6 +508,7 @@ describe("BatchApprovalPage", () => {
       task_id: "t1b",
       instance_code: "i1b",
       title: "报销单 A2",
+      serial_number: "202611200025",
       form_fields: [
         { id: "amount", name: "金额", value: { text: "200" } },
         { id: "dept", name: "部门", value: "研发" },
@@ -507,7 +527,7 @@ describe("BatchApprovalPage", () => {
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     // 表头与值都在同一张表内，不需要点开详情。
     expect(screen.getAllByText("金额").length).toBeGreaterThan(0);
     expect(screen.getAllByText("部门").length).toBeGreaterThan(0);
@@ -525,13 +545,13 @@ describe("BatchApprovalPage", () => {
 
     const user = userEvent.setup();
     await filterColumn(user, "报销审批", "金额", "100");
-    expect(screen.getByText("报销单 A")).toBeInTheDocument();
-    expect(screen.queryByText("报销单 A2")).not.toBeInTheDocument();
+    expect(screen.getByText("202611200024")).toBeInTheDocument();
+    expect(screen.queryByText("202611200025")).not.toBeInTheDocument();
 
     await filterColumn(user, "请假审批", "当前节点", "主管审批");
-    expect(screen.getByText("报销单 A")).toBeInTheDocument();
-    expect(screen.getByText("请假单 B")).toBeInTheDocument();
-    expect(screen.queryByText("外部单 C")).not.toBeInTheDocument();
+    expect(screen.getByText("202611200024")).toBeInTheDocument();
+    expect(screen.getByText("202611210031")).toBeInTheDocument();
+    expect(screen.queryByText("202611220008")).not.toBeInTheDocument();
   });
 
   it("字段设置按用户保存列可见性与计算字段规则", async () => {
@@ -551,7 +571,6 @@ describe("BatchApprovalPage", () => {
         },
       ],
       columns: [
-        { key: "base:title", visible: true },
         { key: "form:amount", visible: true },
         { key: "form:dept", visible: false },
         { key: "computed:c1", visible: true },
@@ -587,7 +606,7 @@ describe("BatchApprovalPage", () => {
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     // 已保存的布局生效：部门列隐藏，计算列照常展示。
     expect(screen.queryByText("部门")).not.toBeInTheDocument();
     expect(screen.getAllByText("参考人民币金额").length).toBeGreaterThan(0);
@@ -637,11 +656,15 @@ describe("BatchApprovalPage", () => {
     const columns = (
       saved as { columns: Array<{ key: string; visible: boolean }> }
     ).columns;
-    expect(columns).toContainEqual({ key: "form:dept", visible: true });
-    expect(columns).toContainEqual({
-      key: "detail:items:itemName",
-      visible: true,
-    });
+    expect(columns).toContainEqual(
+      expect.objectContaining({ key: "form:dept", visible: true }),
+    );
+    expect(columns).toContainEqual(
+      expect.objectContaining({
+        key: "detail:items:itemName",
+        visible: true,
+      }),
+    );
     expect(columns.some((column) => column.key === "computed:c1")).toBe(false);
   });
 
@@ -649,10 +672,7 @@ describe("BatchApprovalPage", () => {
     let saved: unknown;
     const view = {
       computed_fields: [],
-      columns: [
-        { key: "base:title", visible: true },
-        { key: "detail:items:itemName", visible: false },
-      ],
+      columns: [{ key: "detail:items:itemName", visible: false }],
     };
     stubBatchApi({
       catalogError: true,
@@ -666,7 +686,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "字段设置" }));
@@ -681,10 +701,12 @@ describe("BatchApprovalPage", () => {
       saved as { columns: Array<{ key: string; visible: boolean }> }
     ).columns;
     // 目录失败时 draft 里没有明细列，保存必须按原配置保留它（包括隐藏状态）。
-    expect(columns).toContainEqual({
-      key: "detail:items:itemName",
-      visible: false,
-    });
+    expect(columns).toContainEqual(
+      expect.objectContaining({
+        key: "detail:items:itemName",
+        visible: false,
+      }),
+    );
   });
 
   it("控件目录正常时保存会丢弃已不存在的明细列配置", async () => {
@@ -716,7 +738,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "字段设置" }));
@@ -727,14 +749,224 @@ describe("BatchApprovalPage", () => {
     const columns = (
       saved as { columns: Array<{ key: string; visible: boolean }> }
     ).columns;
-    expect(columns).toContainEqual({
-      key: "detail:items:itemName",
-      visible: true,
-    });
+    expect(columns).toContainEqual(
+      expect.objectContaining({
+        key: "detail:items:itemName",
+        visible: true,
+      }),
+    );
     // 后端 validate_widgets 会拒绝目录里已不存在的子控件；保存前必须丢弃。
     expect(columns.some((column) => column.key === "detail:items:gone")).toBe(
       false,
     );
+  });
+
+  it("首列展示审批编号，标题不再单独占列", async () => {
+    stubBatchApi();
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByLabelText("选择 报销单 A");
+
+    const card = groupCard("报销审批");
+    expect(
+      within(card).getByRole("columnheader", { name: /审批编号/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("columnheader", { name: /^标题$/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("202611200024")).toBeInTheDocument();
+    // 标题仍保留在数据里供操作确认弹窗使用，但不再作为表格内容展示。
+    expect(screen.queryByText("报销单 A")).not.toBeInTheDocument();
+  });
+
+  it("当前节点列按内容取最窄完整宽度，不截断节点名", async () => {
+    stubBatchApi({
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              current_node_names: ["部门审批"],
+              my_node_name: "部门审批",
+            },
+          ],
+          truncated: false,
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByLabelText("选择 报销单 A");
+
+    // 「部门审批（我的）」= 8 个 CJK 字（104px）+ 左右内边距 28px。
+    expect(columnWidth("报销审批", "当前节点")).toBe(132);
+    const row = rowsOf("报销审批")[0];
+    const node = row.querySelector<HTMLElement>('span[title="部门审批"]');
+    expect(node).not.toBeNull();
+    expect(node?.className ?? "").not.toContain("truncate");
+  });
+
+  it("字段设置可配置完整显示与快捷复制（含复制去空格）", async () => {
+    let saved: unknown;
+    const view = {
+      computed_fields: [],
+      columns: [{ key: "form:account", visible: true }],
+    };
+    stubBatchApi({
+      catalog: [{ id: "account", name: "银行账号", type: "input" }],
+      viewConfig: view,
+      onSaveView: (body) => {
+        saved = body;
+      },
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              form_fields: [
+                {
+                  id: "account",
+                  name: "银行账号",
+                  value: "6222 0212 3456 7890",
+                },
+              ],
+            },
+          ],
+          truncated: false,
+          views: { D1: view },
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByLabelText("选择 报销单 A");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "字段设置" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText("显示字段");
+
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "显示方式 银行账号" }),
+    );
+    await user.click(await screen.findByRole("option", { name: "完整显示" }));
+    const copyBox = () =>
+      within(dialog).getByRole("checkbox", { name: "快捷复制 银行账号" });
+    const trimBox = () =>
+      within(dialog).getByRole("checkbox", { name: "复制去空格 银行账号" });
+    await user.click(copyBox());
+    await user.click(trimBox());
+    // 关闭快捷复制时同时清空去空格，避免留下无效配置。
+    await user.click(copyBox());
+    expect(trimBox()).not.toBeChecked();
+    expect(trimBox()).toBeDisabled();
+    await user.click(copyBox());
+    await user.click(trimBox());
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(saved).toBeDefined());
+    const columns = (saved as { columns: Array<Record<string, unknown>> })
+      .columns;
+    expect(columns).toContainEqual(
+      expect.objectContaining({
+        key: "form:account",
+        display_mode: "full",
+        copyable: true,
+        trim_whitespace: true,
+      }),
+    );
+  });
+
+  it("完整显示列不截断内容，快捷复制按配置去掉空格", async () => {
+    const account = "6222 0212 3456 7890";
+    const view = {
+      computed_fields: [],
+      columns: [
+        {
+          key: "form:account",
+          visible: true,
+          display_mode: "full",
+          copyable: true,
+          trim_whitespace: true,
+        },
+      ],
+    };
+    stubBatchApi({
+      viewConfig: view,
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              form_fields: [
+                { id: "account", name: "银行账号", value: account },
+              ],
+            },
+          ],
+          truncated: false,
+          views: { D1: view },
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByLabelText("选择 报销单 A");
+
+    const cell = screen.getByText(account);
+    expect(cell.className).toContain("whitespace-normal");
+    expect(cell.className).not.toContain("truncate");
+    // 19 个半角字符 = 142.5px + 内边距 28px + 复制按钮 20px。
+    expect(columnWidth("报销审批", "银行账号")).toBe(191);
+
+    const user = userEvent.setup();
+    const writeText = stubClipboardApi(async () => undefined);
+    await user.click(screen.getByRole("button", { name: "复制银行账号" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("6222021234567890"),
+    );
+    expect(await screen.findByText("已复制")).toBeInTheDocument();
+  });
+
+  it("非安全上下文没有 Clipboard API 时退化为 execCommand 复制", async () => {
+    const view = {
+      computed_fields: [],
+      columns: [{ key: "form:account", visible: true, copyable: true }],
+    };
+    stubBatchApi({
+      viewConfig: view,
+      tasksResponse: jsonResponse({
+        code: 0,
+        data: {
+          tasks: [
+            {
+              ...TASKS[0],
+              form_fields: [
+                {
+                  id: "account",
+                  name: "银行账号",
+                  value: "6222021234567890",
+                },
+              ],
+            },
+          ],
+          truncated: false,
+          views: { D1: view },
+        },
+      }),
+    });
+    renderTestApp({ path: "/batch-approval", authenticated: true });
+    await screen.findByLabelText("选择 报销单 A");
+    // 默认固定宽度：内容超出时省略。
+    expect(screen.getByText("6222021234567890").className).toContain(
+      "truncate",
+    );
+
+    const user = userEvent.setup();
+    // 先 setup 再撤 Clipboard：user-event 自己会装一个可用实现。
+    stubInsecureClipboard();
+    const execCommand = stubExecCommand(true);
+    await user.click(screen.getByRole("button", { name: "复制银行账号" }));
+    await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+    expect(await screen.findByText("已复制")).toBeInTheDocument();
   });
 
   it("明细控件先显示行数与首行预览，展开后加载全部明细行", async () => {
@@ -790,7 +1022,7 @@ describe("BatchApprovalPage", () => {
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     expect(
       document.querySelector('[data-slot="detail-count"]'),
     ).toHaveTextContent("3 行");
@@ -1059,7 +1291,7 @@ describe("BatchApprovalPage", () => {
     renderTestApp({ path: "/batch-approval", authenticated: true });
 
     const user = userEvent.setup();
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await user.click(screen.getByLabelText("选择 报销单 A"));
     await user.click(screen.getByRole("button", { name: "同意" }));
     await user.click(
@@ -1098,17 +1330,20 @@ describe("BatchApprovalPage", () => {
               ...TASKS[0],
               instance_status: "1",
               title: "流转中的报销单",
+              serial_number: "202611200001",
             },
             {
               ...TASKS[1],
               topic: "1",
               title: "待办请假单",
+              serial_number: "202611210002",
             },
             {
               ...TASKS[0],
               task_id: "t4",
               instance_code: "i4",
               title: "待办报销单",
+              serial_number: "202611200003",
             },
           ],
           truncated: false,
@@ -1130,18 +1365,18 @@ describe("BatchApprovalPage", () => {
     expect(screen.queryByText("状态 1")).not.toBeInTheDocument();
 
     const user = userEvent.setup();
-    await filterColumn(user, "报销审批", "标题", "流转中的报销单");
+    await filterColumn(user, "报销审批", "审批编号", "202611200001");
     await waitFor(() => {
       expect(
-        screen.queryByRole("cell", { name: "待办报销单" }),
+        within(groupCard("报销审批")).queryByText("202611200003"),
       ).not.toBeInTheDocument();
     });
     expect(
-      screen.getByRole("cell", { name: "流转中的报销单" }),
+      within(groupCard("报销审批")).getByText("202611200001"),
     ).toBeInTheDocument();
     expect(
-      (await screen.findAllByRole("cell", { name: /待办请假单/ })).length,
-    ).toBeGreaterThan(0);
+      within(groupCard("请假审批")).getByText("202611210002"),
+    ).toBeInTheDocument();
   });
 
   function groupCard(groupName: string): HTMLElement {
@@ -1158,6 +1393,19 @@ describe("BatchApprovalPage", () => {
         ".ant-table-tbody > tr.ant-table-row",
       ),
     );
+  }
+
+  /// 从 colgroup 读列宽：AntD 把宽度样式放在 col 上，表头单元格本身没有。
+  function columnWidth(groupName: string, columnName: string): number {
+    const card = groupCard(groupName);
+    const headers = Array.from(card.querySelectorAll("thead th"));
+    const index = headers.findIndex((cell) =>
+      cell.textContent?.includes(columnName),
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    const col = card.querySelectorAll("colgroup col")[index];
+    expect(col).not.toBeNull();
+    return Number.parseFloat((col as HTMLElement).style.width);
   }
 
   async function choosePageSize(
@@ -1223,6 +1471,9 @@ describe("BatchApprovalPage", () => {
       definition_code: code,
       definition_name: name,
       title: `${titlePrefix} ${String(index + 1).padStart(3, "0")}`,
+      serial_number: `202611${code === "D1" ? "20" : "21"}${String(
+        index + 1,
+      ).padStart(4, "0")}`,
     }));
   }
 
@@ -1235,7 +1486,7 @@ describe("BatchApprovalPage", () => {
         }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
     expect(rowsOf("报销审批")).toHaveLength(20);
 
     const user = userEvent.setup();
@@ -1256,7 +1507,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
 
     const user = userEvent.setup();
     const card = groupCard("报销审批");
@@ -1294,8 +1545,8 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
-    await screen.findByText("批量请假单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
+    await screen.findByLabelText("选择 批量请假单 001");
 
     const user = userEvent.setup();
     await choosePageSize(user, "报销审批", 50);
@@ -1323,7 +1574,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
 
     const user = userEvent.setup();
     const card = groupCard("报销审批");
@@ -1359,7 +1610,7 @@ describe("BatchApprovalPage", () => {
     window.innerHeight = 768;
     try {
       renderTestApp({ path: "/batch-approval", authenticated: true });
-      await screen.findByText("批量报销单 001");
+      await screen.findByLabelText("选择 批量报销单 001");
 
       const card = groupCard("报销审批");
       // scroll.y 生效后 rc-table 拆出固定表头与独立滚动的表体：
@@ -1388,7 +1639,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
 
     const card = groupCard("报销审批");
     expect(card.querySelector(".ant-pagination")).not.toBeNull();
@@ -1404,7 +1655,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
 
     const user = userEvent.setup();
     const card = groupCard("报销审批");
@@ -1492,7 +1743,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     const user = await expandDetailRows();
 
     const single = await screen.findByRole("button", {
@@ -1554,7 +1805,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await expandDetailRows();
 
     expect(
@@ -1615,7 +1866,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await expandDetailRows();
 
     expect(await screen.findByText("笔记本")).toBeInTheDocument();
@@ -1664,7 +1915,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await expandDetailRows();
 
     expect(
@@ -1699,7 +1950,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
 
     expect(screen.getByText("说明")).toBeInTheDocument();
     expect(
@@ -1716,7 +1967,7 @@ describe("BatchApprovalPage", () => {
       detailRowsError: true,
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("报销单 A");
+    await screen.findByLabelText("选择 报销单 A");
     await expandDetailRows();
 
     expect(await screen.findByText(/读取明细失败/)).toBeInTheDocument();
@@ -1734,7 +1985,7 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
 
     const user = userEvent.setup();
     await filterColumn(user, "报销审批", "发起人", "李四");
@@ -1774,11 +2025,11 @@ describe("BatchApprovalPage", () => {
       }),
     });
     renderTestApp({ path: "/batch-approval", authenticated: true });
-    await screen.findByText("批量报销单 001");
-    await screen.findByText("批量请假单 001");
+    await screen.findByLabelText("选择 批量报销单 001");
+    await screen.findByLabelText("选择 批量请假单 001");
 
     const user = userEvent.setup();
-    await filterColumn(user, "报销审批", "标题", "批量报销单 001");
+    await filterColumn(user, "报销审批", "审批编号", "202611200001");
     await waitFor(() => expect(rowsOf("报销审批")).toHaveLength(1));
 
     // 切走再切回：表格重挂载、列筛选状态丢失；父级镜像也必须同步清理，

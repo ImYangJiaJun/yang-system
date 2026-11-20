@@ -130,6 +130,8 @@ export type BatchTask = {
   definitionCode: string;
   definitionName: string;
   title: string;
+  /// 审批编号（飞书实例详情的 `serial_number`，如 202611200024）。
+  serialNumber: string | null;
   initiatorName: string | null;
   summaries: string[];
   supportApiOperate: boolean;
@@ -225,10 +227,18 @@ export type BatchViewComputedRule = {
   enabled: boolean;
 };
 
+/// 列宽策略：`fixed` 固定宽度、超出省略；`full` 按内容完整显示。
+export type BatchViewDisplayMode = "fixed" | "full";
+
 /// 列顺序即展示顺序；`form:<widget_id>` 或 `computed:<rule_id>`。
 export type BatchViewColumn = {
   key: string;
   visible: boolean;
+  displayMode: BatchViewDisplayMode;
+  /// 单元格是否提供快捷复制。
+  copyable: boolean;
+  /// 复制时是否去掉所有空白字符（如银行账号中的空格）。
+  trimWhitespace: boolean;
 };
 
 export type BatchViewConfig = {
@@ -485,6 +495,7 @@ function parseTask(raw: unknown): BatchTask | null {
     definitionName:
       firstText(record, "definition_name", "approval_name") ?? "未命名审批",
     title: firstText(record, "title", "instance_title") ?? "（无标题）",
+    serialNumber: firstText(record, "serial_number"),
     initiatorName: firstText(record, "initiator_name", "start_user_name"),
     summaries: stringArrayOf(record?.summaries),
     // 字段缺失按可操作处理（§6.3）；写失败时后端会给出逐条错误。
@@ -991,7 +1002,17 @@ function parseViewColumn(raw: unknown): BatchViewColumn | null {
   const record = recordOf(raw);
   const key = firstText(record, "key");
   if (!key) return null;
-  return { key, visible: record?.visible !== false };
+  return {
+    key,
+    visible: record?.visible !== false,
+    displayMode:
+      firstText(record, "display_mode", "displayMode") === "full"
+        ? "full"
+        : "fixed",
+    copyable: record?.copyable === true,
+    trimWhitespace:
+      record?.trim_whitespace === true || record?.trimWhitespace === true,
+  };
 }
 
 const AGGREGATES = new Set(["sum", "max", "min", "range", "average"]);
@@ -1160,6 +1181,9 @@ function viewRequestBody(
     columns: view.columns.map((column) => ({
       key: column.key,
       visible: column.visible,
+      display_mode: column.displayMode,
+      copyable: column.copyable,
+      trim_whitespace: column.trimWhitespace,
     })),
   };
 }

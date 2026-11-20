@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import { useToast } from "@/shared/lib/toast";
+import { cn } from "@/shared/lib/utils";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -37,6 +38,7 @@ import {
   type BatchFieldCatalogEntry,
   type BatchViewComputedRule,
   type BatchViewConfig,
+  type BatchViewDisplayMode,
   fetchBatchFieldCatalog,
   fetchBatchViewConfig,
   resetBatchViewConfig,
@@ -102,6 +104,12 @@ type DraftColumn = {
   visible: boolean;
   /// 明细列的分组标题（父明细控件名）；普通列为空。
   group?: string;
+  /// 固定宽度超出省略，或按内容完整显示。
+  displayMode: BatchViewDisplayMode;
+  /// 单元格是否提供快捷复制。
+  copyable: boolean;
+  /// 复制时是否去掉所有空白字符。
+  trimWhitespace: boolean;
 };
 type FieldOption = { id: string; name: string };
 type DetailOption = { id: string; name: string; columns: FieldOption[] };
@@ -183,9 +191,7 @@ function draftColumns(
   base: Array<{ key: string; label: string; group?: string }>,
   view: BatchViewConfig,
 ): DraftColumn[] {
-  const visible = new Map(
-    view.columns.map((column) => [column.key, column.visible]),
-  );
+  const configs = new Map(view.columns.map((column) => [column.key, column]));
   const byKey = new Map(base.map((entry) => [entry.key, entry]));
   const ordered: DraftColumn[] = [];
   const used = new Set<string>();
@@ -193,14 +199,24 @@ function draftColumns(
     const entry = byKey.get(column.key);
     if (!entry || used.has(column.key)) continue;
     used.add(column.key);
-    ordered.push({ ...entry, visible: column.visible });
+    ordered.push({
+      ...entry,
+      visible: column.visible,
+      displayMode: column.displayMode,
+      copyable: column.copyable,
+      trimWhitespace: column.trimWhitespace,
+    });
   }
   for (const entry of base) {
     if (used.has(entry.key)) continue;
     used.add(entry.key);
+    const config = configs.get(entry.key);
     ordered.push({
       ...entry,
-      visible: visible.get(entry.key) ?? !DEFAULT_HIDDEN_COLUMNS.has(entry.key),
+      visible: config?.visible ?? !DEFAULT_HIDDEN_COLUMNS.has(entry.key),
+      displayMode: config?.displayMode ?? "fixed",
+      copyable: config?.copyable ?? false,
+      trimWhitespace: config?.trimWhitespace ?? false,
     });
   }
   return ordered;
@@ -227,7 +243,16 @@ function syncComputedColumns(
     });
   const existing = new Set(kept.map((column) => column.key));
   for (const [key, name] of enabled) {
-    if (!existing.has(key)) kept.push({ key, label: name, visible: true });
+    if (!existing.has(key)) {
+      kept.push({
+        key,
+        label: name,
+        visible: true,
+        displayMode: "fixed",
+        copyable: false,
+        trimWhitespace: false,
+      });
+    }
   }
   return kept;
 }
@@ -497,6 +522,14 @@ export function BatchViewSettingsDrawer({
     setColumns((current) => syncComputedColumns(current, next));
   };
 
+  const updateColumn = (key: string, patch: Partial<DraftColumn>) => {
+    setColumns((current) =>
+      current.map((entry) =>
+        entry.key === key ? { ...entry, ...patch } : entry,
+      ),
+    );
+  };
+
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -620,12 +653,10 @@ export function BatchViewSettingsDrawer({
       // 不保留就会一次保存清空。目录正常时按 draft 为准，避免把定义里已经
       // 删除/改名的子控件 key 回传，让后端 validate_widgets 拒绝整次保存。
       const preservedDetailColumns = catalogFailed
-        ? originalColumnsRef.current
-            .filter(
-              (column) =>
-                column.key.startsWith("detail:") && !draftKeys.has(column.key),
-            )
-            .map((column) => ({ key: column.key, visible: column.visible }))
+        ? originalColumnsRef.current.filter(
+            (column) =>
+              column.key.startsWith("detail:") && !draftKeys.has(column.key),
+          )
         : [];
       await saveBatchViewConfig(
         approvalCode,
@@ -635,6 +666,9 @@ export function BatchViewSettingsDrawer({
             ...columns.map((column) => ({
               key: column.key,
               visible: column.visible,
+              displayMode: column.displayMode,
+              copyable: column.copyable,
+              trimWhitespace: column.trimWhitespace,
             })),
             ...preservedDetailColumns,
           ],
@@ -719,9 +753,9 @@ export function BatchViewSettingsDrawer({
               const groupStart =
                 Boolean(column.group) && column.group !== previous?.group;
               return (
-                <div key={column.key}>
+                <div key={column.key} className="rounded border empty:hidden">
                   {groupStart && (
-                    <div className="pb-1 pt-2 text-xs font-medium text-muted-foreground">
+                    <div className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">
                       明细内的列 · {column.group}
                     </div>
                   )}
@@ -754,7 +788,7 @@ export function BatchViewSettingsDrawer({
                       commitDrop();
                     }}
                     onDragEnd={finishDrag}
-                    className={`flex cursor-grab items-center gap-2 rounded border px-2 py-1.5 ${
+                    className={`flex cursor-grab items-center gap-2 rounded-t px-2 py-1.5 ${
                       dragIndex === index ? "opacity-50" : ""
                     }`}
                   >
@@ -766,13 +800,7 @@ export function BatchViewSettingsDrawer({
                       checked={column.visible}
                       aria-label={`显示 ${column.label}`}
                       onCheckedChange={(checked) =>
-                        setColumns((current) =>
-                          current.map((entry) =>
-                            entry.key === column.key
-                              ? { ...entry, visible: checked === true }
-                              : entry,
-                          ),
-                        )
+                        updateColumn(column.key, { visible: checked === true })
                       }
                     />
                     <span className="min-w-0 flex-1 truncate text-sm">
@@ -806,6 +834,63 @@ export function BatchViewSettingsDrawer({
                       }`}
                     >
                       {COLUMN_KIND_META[columnKind(column.key)].label}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-b border-t bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      宽度
+                      <Select
+                        value={column.displayMode}
+                        onValueChange={(value) =>
+                          updateColumn(column.key, {
+                            displayMode: value as BatchViewDisplayMode,
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          aria-label={`显示方式 ${column.label}`}
+                          className="h-6 w-[7.5rem] text-xs"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="fixed">固定宽度省略</SelectItem>
+                          <SelectItem value="full">完整显示</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Checkbox
+                        checked={column.copyable}
+                        aria-label={`快捷复制 ${column.label}`}
+                        onCheckedChange={(checked) =>
+                          updateColumn(column.key, {
+                            copyable: checked === true,
+                            ...(checked === true
+                              ? {}
+                              : { trimWhitespace: false }),
+                          })
+                        }
+                      />
+                      快捷复制
+                    </span>
+                    <span
+                      className={cn(
+                        "flex items-center gap-1",
+                        !column.copyable && "opacity-50",
+                      )}
+                    >
+                      <Checkbox
+                        checked={column.trimWhitespace}
+                        disabled={!column.copyable}
+                        aria-label={`复制去空格 ${column.label}`}
+                        onCheckedChange={(checked) =>
+                          updateColumn(column.key, {
+                            trimWhitespace: checked === true,
+                          })
+                        }
+                      />
+                      复制时去空格
                     </span>
                   </div>
                 </div>

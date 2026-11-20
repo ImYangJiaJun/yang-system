@@ -118,44 +118,14 @@ pub(super) async fn handle(
     let mut rows = Vec::with_capacity(list.tasks.len());
     for task in list.tasks {
         let task_id = task.task_id.clone();
+        let view = task
+            .definition_code
+            .as_ref()
+            .and_then(|code| views.get(code));
         let mut row = serde_json::to_value(&task)
             .map_err(|error| BaseError::Unknown(format!("序列化审批任务失败：{error}")))?;
-        if let Value::Object(map) = &mut row {
-            let detail = details.get(&task.instance_code).cloned().flatten();
-            if let Some(detail) = detail {
-                let nodes = current_node_names(&detail, &task_id);
-                map.insert(
-                    "form_fields".to_string(),
-                    Value::Array(form_fields(&detail)),
-                );
-                map.insert(
-                    "current_node_names".to_string(),
-                    Value::Array(nodes.iter().cloned().map(Value::String).collect()),
-                );
-                map.insert(
-                    "my_node_name".to_string(),
-                    my_node_name(&detail, &task_id)
-                        .map(Value::String)
-                        .unwrap_or(Value::Null),
-                );
-                if let Some(view) = task
-                    .definition_code
-                    .as_ref()
-                    .and_then(|code| views.get(code))
-                {
-                    let rules: Vec<_> = view
-                        .computed_fields
-                        .iter()
-                        .filter(|rule| rule.enabled)
-                        .cloned()
-                        .collect();
-                    map.insert(
-                        "computed_fields".to_string(),
-                        Value::Array(computed_fields(&detail, &rules)),
-                    );
-                }
-            }
-        }
+        let detail = details.get(&task.instance_code).cloned().flatten();
+        enrich_row(&mut row, detail.as_ref(), &task_id, view);
         rows.push(row);
     }
     ApiResponse::success(
@@ -167,6 +137,49 @@ pub(super) async fn handle(
         }),
         "ok",
     )
+}
+
+/// 把实例详情里的展示字段并入待办行；没有详情时保持任务列表的原始形状。
+fn enrich_row(
+    row: &mut Value,
+    detail: Option<&Value>,
+    task_id: &str,
+    view: Option<&BatchUserView>,
+) {
+    let Value::Object(map) = row else {
+        return;
+    };
+    let Some(detail) = detail else {
+        return;
+    };
+    let nodes = current_node_names(detail, task_id);
+    map.insert(
+        "serial_number".to_string(),
+        detail.get("serial_number").cloned().unwrap_or(Value::Null),
+    );
+    map.insert("form_fields".to_string(), Value::Array(form_fields(detail)));
+    map.insert(
+        "current_node_names".to_string(),
+        Value::Array(nodes.iter().cloned().map(Value::String).collect()),
+    );
+    map.insert(
+        "my_node_name".to_string(),
+        my_node_name(detail, task_id)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    if let Some(view) = view {
+        let rules: Vec<_> = view
+            .computed_fields
+            .iter()
+            .filter(|rule| rule.enabled)
+            .cloned()
+            .collect();
+        map.insert(
+            "computed_fields".to_string(),
+            Value::Array(computed_fields(detail, &rules)),
+        );
+    }
 }
 
 fn view_map(
@@ -370,8 +383,8 @@ fn my_node_name(detail: &Value, task_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_node_names, form_fields, my_node_name, view_map};
-    use serde_json::json;
+    use super::{current_node_names, enrich_row, form_fields, my_node_name, view_map};
+    use serde_json::{json, Value};
 
     #[test]
     fn form_fields_parse_json_string_and_field_value() {
@@ -443,5 +456,32 @@ mod tests {
             vec!["部门审批", "财务审批"]
         );
         assert_eq!(my_node_name(&detail, "t2").as_deref(), Some("财务审批"));
+    }
+
+    #[test]
+    fn enrich_row_copies_serial_number_from_instance_detail() {
+        let detail = json!({
+            "serial_number": "202611200024",
+            "form": []
+        });
+        let mut row = json!({ "task_id": "t1" });
+        enrich_row(&mut row, Some(&detail), "t1", None);
+        assert_eq!(row["serial_number"], json!("202611200024"));
+    }
+
+    #[test]
+    fn enrich_row_keeps_null_serial_number_when_detail_lacks_it() {
+        let detail = json!({ "form": [] });
+        let mut row = json!({ "task_id": "t1" });
+        enrich_row(&mut row, Some(&detail), "t1", None);
+        assert_eq!(row["serial_number"], Value::Null);
+    }
+
+    #[test]
+    fn enrich_row_leaves_list_shape_when_detail_is_unavailable() {
+        let mut row = json!({ "task_id": "t1" });
+        enrich_row(&mut row, None, "t1", None);
+        assert!(row.get("serial_number").is_none());
+        assert!(row.get("form_fields").is_none());
     }
 }

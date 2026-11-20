@@ -14,6 +14,7 @@ import zhCN from "antd/locale/zh_CN";
 import {
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
   Eye,
   Inbox,
@@ -1177,27 +1178,197 @@ function taskNodes(task: BatchTask): string[] {
   return task.myNodeName ? [task.myNodeName] : [];
 }
 
+/// 列宽下限：再窄就看不清内容，也留不出拖拽手柄的位置。
+const MIN_COLUMN_WIDTH = 80;
+/// 「完整显示」列按内容估算宽度时的上限，超过后改为换行展示。
+const MAX_FIT_COLUMN_WIDTH = 480;
+/// 单元格左右内边距（含表头排序/筛选图标的余量）。
+const CELL_HORIZONTAL_PADDING = 28;
+
+/// 粗略估算文本像素宽度：CJK 按 13px/字，其余按 7.5px/字。
+function textPixelWidth(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    width += code >= 0x2e80 && code <= 0xffff ? 13 : 7.5;
+  }
+  return width;
+}
+
+/// 「完整显示」模式下让内容不换行所需的最窄列宽。
+function fitColumnWidth(texts: string[]): number {
+  const widest = texts.reduce(
+    (max, text) => Math.max(max, textPixelWidth(text)),
+    0,
+  );
+  return Math.min(
+    MAX_FIT_COLUMN_WIDTH,
+    Math.max(MIN_COLUMN_WIDTH, Math.ceil(widest + CELL_HORIZONTAL_PADDING)),
+  );
+}
+
+type ColumnBehavior = {
+  displayMode: "fixed" | "full";
+  copyable: boolean;
+  trimWhitespace: boolean;
+};
+
+const DEFAULT_COLUMN_BEHAVIOR: ColumnBehavior = {
+  displayMode: "fixed",
+  copyable: false,
+  trimWhitespace: false,
+};
+
+function columnBehavior(
+  view: BatchViewConfig | undefined,
+  key: string,
+): ColumnBehavior {
+  const column = view?.columns.find((entry) => entry.key === key);
+  if (!column) return DEFAULT_COLUMN_BEHAVIOR;
+  return {
+    displayMode: column.displayMode,
+    copyable: column.copyable,
+    trimWhitespace: column.trimWhitespace,
+  };
+}
+
+/// 列宽：完整显示按内容估算，固定宽度沿用默认值。
+function displayWidth(
+  behavior: ColumnBehavior,
+  texts: string[],
+  fallback: number,
+): number {
+  if (behavior.displayMode !== "full") return fallback;
+  // 复制按钮固定占 20px，估算时一并留出。
+  return fitColumnWidth(texts) + (behavior.copyable ? 20 : 0);
+}
+
+/// 文本样式：固定宽度省略；完整显示换行、绝不隐藏内容。
+function cellTextClass(behavior: ColumnBehavior, base: string): string {
+  return cn(
+    base,
+    behavior.displayMode === "full"
+      ? "whitespace-normal break-all"
+      : "truncate",
+  );
+}
+
+function CopyButton({
+  text,
+  trimWhitespace,
+  label,
+}: {
+  text: string;
+  trimWhitespace: boolean;
+  label: string;
+}) {
+  const toast = useToast();
+  const handleCopy = async () => {
+    const value = trimWhitespace ? text.replace(/\s+/g, "") : text;
+    // 非安全上下文（http://<IP>:<port>）没有 Clipboard API，退化为临时文本域。
+    let copied = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+    if (!copied && typeof document.execCommand === "function") {
+      const area = document.createElement("textarea");
+      area.value = value;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      } finally {
+        area.remove();
+      }
+    }
+    if (copied) {
+      toast.success("已复制");
+    } else {
+      toast.error("复制失败，请手动选择文本复制");
+    }
+  };
+  return (
+    <button
+      type="button"
+      aria-label={`复制${label}`}
+      title={trimWhitespace ? "复制（自动去空格）" : "复制"}
+      onClick={(event) => {
+        event.stopPropagation();
+        void handleCopy();
+      }}
+      className="absolute top-0 right-0 flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/cell:opacity-100"
+    >
+      <Copy className="size-3" />
+    </button>
+  );
+}
+
+/// 开启快捷复制时给单元格补一个悬浮按钮；没有可复制文本时保持原样。
+function withCopy(
+  node: ReactNode,
+  text: string | null,
+  behavior: ColumnBehavior,
+  label: string,
+): ReactNode {
+  if (!behavior.copyable || !text || text === "—") return node;
+  return (
+    <div className="group/cell relative min-w-0 pr-5">
+      {node}
+      <CopyButton
+        text={text}
+        trimWhitespace={behavior.trimWhitespace}
+        label={label}
+      />
+    </div>
+  );
+}
+
 function buildTaskColumns(
   tasks: BatchTask[],
   view?: BatchViewConfig,
 ): TableColumnsType<BatchTask> {
-  // 勾选、标题、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
+  // 勾选、审批编号、当前节点、实例状态是固定列，不参与个人视图的排序与隐藏。
+  // 同一审批定义下标题完全相同，首列展示审批编号更能区分实例。
+  // 内容完整显示即可；表头的排序/筛选图标再额外留 32px，避免标题被压断。
+  const currentNodeWidth = Math.max(
+    fitColumnWidth(
+      tasks.flatMap((task) => {
+        const nodes = taskNodes(task);
+        return nodes.map((node) =>
+          node === task.myNodeName ? `${node}（我的）` : node,
+        );
+      }),
+    ),
+    fitColumnWidth(["当前节点"]) + 32,
+  );
   const fixedColumns: TableColumnsType<BatchTask> = [
     {
-      title: columnTitle("标题", "instance"),
-      dataIndex: "title",
-      key: "title",
-      width: 220,
-      sorter: (left, right) => left.title.localeCompare(right.title, "zh-CN"),
-      filters: uniqueFilters(tasks.map((task) => task.title)),
+      title: columnTitle("审批编号", "instance"),
+      dataIndex: "serialNumber",
+      key: "serialNumber",
+      width: 140,
+      sorter: (left, right) =>
+        compareProductText(left.serialNumber ?? "", right.serialNumber ?? ""),
+      filters: uniqueFilters(tasks.map((task) => task.serialNumber ?? "—")),
       filterSearch: true,
-      onFilter: (value, task) => task.title === String(value),
+      onFilter: (value, task) => (task.serialNumber ?? "—") === String(value),
       render: (_, task) => {
+        const serialNumber = task.serialNumber ?? "—";
         const operability = taskOperability(task);
         return (
-          <div className="max-w-full">
-            <span className="block truncate font-medium" title={task.title}>
-              {task.title}
+          <div className="max-w-full" title={task.title}>
+            <span className="block truncate tabular-nums" title={serialNumber}>
+              {serialNumber}
             </span>
             {!operability.operable && (
               <span className="block text-xs text-muted-foreground">
@@ -1211,7 +1382,7 @@ function buildTaskColumns(
     {
       title: columnTitle("当前节点", "instance"),
       key: "currentNode",
-      width: 240,
+      width: currentNodeWidth,
       sorter: (left, right) =>
         compareProductText(
           taskNodes(left).join("、"),
@@ -1239,10 +1410,7 @@ function buildTaskColumns(
                 <span
                   key={node}
                   title={node}
-                  className={cn(
-                    "truncate",
-                    mine && "font-medium text-tone-info",
-                  )}
+                  className={cn(mine && "font-medium text-tone-info")}
                 >
                   {node}
                   {mine && (
@@ -1272,50 +1440,94 @@ function buildTaskColumns(
     },
   ];
 
+  const baseBehaviors = {
+    definition: columnBehavior(view, "base:definition"),
+    instanceCode: columnBehavior(view, "base:instanceCode"),
+    initiator: columnBehavior(view, "base:initiator"),
+    summary: columnBehavior(view, "base:summary"),
+    createdAt: columnBehavior(view, "base:createdAt"),
+    apiOperate: columnBehavior(view, "base:apiOperate"),
+  };
+
   const baseColumns: TableColumnsType<BatchTask> = [
     {
       title: columnTitle("审批定义", "instance"),
       key: "definition",
-      width: 220,
+      width: displayWidth(
+        baseBehaviors.definition,
+        tasks.flatMap((task) => [task.definitionName, task.definitionCode]),
+        220,
+      ),
       sorter: (left, right) =>
         left.definitionName.localeCompare(right.definitionName, "zh-CN"),
       filters: uniqueFilters(tasks.map((task) => task.definitionName)),
       filterSearch: true,
       onFilter: (value, task) => task.definitionName === String(value),
-      render: (_, task) => (
-        <div className="max-w-full">
-          <span className="block truncate" title={task.definitionName}>
-            {task.definitionName}
-          </span>
-          <span
-            className="block truncate text-xs text-muted-foreground"
-            title={task.definitionCode || "—"}
-          >
-            {task.definitionCode || "—"}
-          </span>
-        </div>
-      ),
+      render: (_, task) => {
+        const behavior = baseBehaviors.definition;
+        return withCopy(
+          <div className="max-w-full">
+            <span
+              className={cellTextClass(behavior, "block")}
+              title={task.definitionName}
+            >
+              {task.definitionName}
+            </span>
+            <span
+              className={cn(
+                "block text-xs text-muted-foreground",
+                behavior.displayMode === "full"
+                  ? "whitespace-normal break-all"
+                  : "truncate",
+              )}
+              title={task.definitionCode || "—"}
+            >
+              {task.definitionCode || "—"}
+            </span>
+          </div>,
+          task.definitionName,
+          behavior,
+          "审批定义",
+        );
+      },
     },
     {
       title: columnTitle("实例编号", "instance"),
       dataIndex: "instanceCode",
       key: "instanceCode",
-      width: 300,
+      width: displayWidth(
+        baseBehaviors.instanceCode,
+        tasks.map((task) => task.instanceCode),
+        300,
+      ),
       sorter: (left, right) =>
         compareProductText(left.instanceCode, right.instanceCode),
       filters: uniqueFilters(tasks.map((task) => task.instanceCode)),
       filterSearch: true,
       onFilter: (value, task) => task.instanceCode === String(value),
-      render: (_, task) => (
-        <span className="text-xs" title={task.instanceCode}>
-          {task.instanceCode}
-        </span>
-      ),
+      render: (_, task) => {
+        const behavior = baseBehaviors.instanceCode;
+        return withCopy(
+          <span
+            className={cellTextClass(behavior, "block max-w-full text-xs")}
+            title={task.instanceCode}
+          >
+            {task.instanceCode}
+          </span>,
+          task.instanceCode,
+          behavior,
+          "实例编号",
+        );
+      },
     },
     {
       title: columnTitle("发起人", "instance"),
       key: "initiator",
-      width: 120,
+      width: displayWidth(
+        baseBehaviors.initiator,
+        tasks.map((task) => task.initiatorName ?? "—"),
+        120,
+      ),
       sorter: (left, right) =>
         (left.initiatorName ?? "").localeCompare(
           right.initiatorName ?? "",
@@ -1323,16 +1535,30 @@ function buildTaskColumns(
         ),
       filters: uniqueFilters(tasks.map((task) => task.initiatorName ?? "—")),
       onFilter: (value, task) => (task.initiatorName ?? "—") === String(value),
-      render: (_, task) => (
-        <span title={task.initiatorName ?? "—"}>
-          {task.initiatorName ?? "—"}
-        </span>
-      ),
+      render: (_, task) => {
+        const behavior = baseBehaviors.initiator;
+        const name = task.initiatorName ?? "—";
+        return withCopy(
+          <span
+            className={cellTextClass(behavior, "block max-w-full")}
+            title={name}
+          >
+            {name}
+          </span>,
+          name,
+          behavior,
+          "发起人",
+        );
+      },
     },
     {
       title: columnTitle("摘要", "instance"),
       key: "summary",
-      width: 280,
+      width: displayWidth(
+        baseBehaviors.summary,
+        tasks.map((task) => task.summaries.join("；") || "—"),
+        280,
+      ),
       filters: uniqueFilters(
         tasks.map((task) => task.summaries.join("；") || "—"),
       ),
@@ -1340,45 +1566,70 @@ function buildTaskColumns(
       onFilter: (value, task) =>
         (task.summaries.join("；") || "—") === String(value),
       render: (_, task) => {
+        const behavior = baseBehaviors.summary;
         const summary = task.summaries.join("；") || "—";
-        return (
-          <span className="block max-w-full truncate text-xs" title={summary}>
+        return withCopy(
+          <span
+            className={cellTextClass(behavior, "block max-w-full text-xs")}
+            title={summary}
+          >
             {summary}
-          </span>
+          </span>,
+          summary,
+          behavior,
+          "摘要",
         );
       },
     },
     {
       title: columnTitle("提交时间", "instance"),
       key: "createdAt",
-      width: 180,
+      width: displayWidth(
+        baseBehaviors.createdAt,
+        tasks.flatMap((task) => {
+          const waiting = waitingText(task.createdAt);
+          return [timeText(task.createdAt), waiting?.text ?? ""];
+        }),
+        180,
+      ),
       sorter: (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
       defaultSortOrder: "ascend",
       filters: uniqueFilters(tasks.map((task) => dateKey(task.createdAt))),
       onFilter: (value, task) => dateKey(task.createdAt) === String(value),
       render: (_, task) => {
+        const behavior = baseBehaviors.createdAt;
         const waiting = waitingText(task.createdAt);
-        return (
+        const time = timeText(task.createdAt);
+        return withCopy(
           <div className="leading-tight">
             <span
-              className="block tabular-nums"
-              title={timeText(task.createdAt)}
+              className={cellTextClass(behavior, "block tabular-nums")}
+              title={time}
             >
-              {timeText(task.createdAt)}
+              {time}
             </span>
             {waiting && (
               <span className={`block text-xs ${waiting.className}`}>
                 {waiting.text}
               </span>
             )}
-          </div>
+          </div>,
+          task.createdAt === null ? null : time,
+          behavior,
+          "提交时间",
         );
       },
     },
     {
       title: columnTitle("可批量处理", "instance"),
       key: "apiOperate",
-      width: 130,
+      width: displayWidth(
+        baseBehaviors.apiOperate,
+        tasks.map((task) =>
+          task.supportApiOperate ? "可批量处理" : "需在飞书处理",
+        ),
+        130,
+      ),
       filters: [
         { text: "可批量处理", value: "supported" },
         { text: "需在飞书处理", value: "unsupported" },
@@ -1387,18 +1638,25 @@ function buildTaskColumns(
         value === "supported"
           ? task.supportApiOperate
           : !task.supportApiOperate,
-      render: (_, task) => (
-        <span
-          className={cn(
-            "text-xs",
-            task.supportApiOperate
-              ? "text-tone-positive"
-              : "text-muted-foreground",
-          )}
-        >
-          {task.supportApiOperate ? "可批量处理" : "需在飞书处理"}
-        </span>
-      ),
+      render: (_, task) => {
+        const behavior = baseBehaviors.apiOperate;
+        const label = task.supportApiOperate ? "可批量处理" : "需在飞书处理";
+        return withCopy(
+          <span
+            className={cellTextClass(
+              behavior,
+              task.supportApiOperate
+                ? "block text-xs text-tone-positive"
+                : "block text-xs text-muted-foreground",
+            )}
+          >
+            {label}
+          </span>,
+          label,
+          behavior,
+          "可批量处理",
+        );
+      },
     },
   ];
 
@@ -1408,11 +1666,20 @@ function buildTaskColumns(
   }));
 
   for (const field of formColumns(tasks)) {
+    const behavior = columnBehavior(view, field.key);
     const values = tasks.map((task) => formFieldText(task, field) || "—");
+    // 「完整显示」按单元格实际可见文本估算：明细列展示的是首行预览。
+    const fitTexts = tasks.map((task) => {
+      const detail = detailFieldOf(task, field);
+      if (detail) {
+        return `首行：${detail.preview.join(" · ") || "—"}`;
+      }
+      return formFieldText(task, field) || "—";
+    });
     columns.push({
       title: columnTitle(field.name, "form"),
       key: field.key,
-      width: 180,
+      width: displayWidth(behavior, fitTexts, 180),
       filters: uniqueFilters(values),
       filterSearch: true,
       onFilter: (value, task) =>
@@ -1424,18 +1691,24 @@ function buildTaskColumns(
             detail.rowCount ??
             (Array.isArray(detail.value) ? detail.value.length : 0);
           const preview = detail.preview.join(" · ");
-          return (
+          return withCopy(
             <div className="flex min-w-0 flex-col gap-0.5">
               <span className="text-xs" data-slot="detail-count">
                 <b className="font-semibold">{count}</b> 行
               </span>
               <span
-                className="truncate text-[11px] text-muted-foreground"
+                className={cellTextClass(
+                  behavior,
+                  "text-[11px] text-muted-foreground",
+                )}
                 title={preview ? `首行：${preview}` : undefined}
               >
                 首行：{preview || "—"}
               </span>
-            </div>
+            </div>,
+            preview,
+            behavior,
+            field.name,
           );
         }
         const files = task.formFields
@@ -1449,20 +1722,31 @@ function buildTaskColumns(
           return <AttachmentCell files={files} />;
         }
         const text = formFieldText(task, field) || "—";
-        return (
-          <span className="block max-w-full truncate text-xs" title={text}>
+        return withCopy(
+          <span
+            className={cellTextClass(behavior, "block max-w-full text-xs")}
+            title={text}
+          >
             {text}
-          </span>
+          </span>,
+          text,
+          behavior,
+          field.name,
         );
       },
     });
   }
 
   for (const field of computedFieldNames(tasks)) {
+    const behavior = columnBehavior(view, field.key);
     columns.push({
       title: columnTitle(field.name, "computed"),
       key: field.key,
-      width: 160,
+      width: displayWidth(
+        behavior,
+        tasks.map((task) => computedFieldText(task, field.key) || "—"),
+        160,
+      ),
       align: "right",
       sorter: (left, right) =>
         computedFieldValue(left, field.key) -
@@ -1475,14 +1759,17 @@ function buildTaskColumns(
         (computedFieldText(task, field.key) || "—") === String(value),
       render: (_, task) => {
         const text = computedFieldText(task, field.key) || "—";
-        return (
+        return withCopy(
           <span
-            className="block tabular-nums"
+            className={cellTextClass(behavior, "block tabular-nums")}
             title={text}
             data-slot="computed-field"
           >
             {text}
-          </span>
+          </span>,
+          text,
+          behavior,
+          field.name,
         );
       },
     });
@@ -1733,8 +2020,39 @@ function TaskDetailSection({
     rows.length,
     start + Math.ceil(viewportHeight / DETAIL_ROW_HEIGHT) + 4,
   );
-  const gridTemplate = `44px repeat(${Math.max(visibleColumns.length, 1)}, minmax(0, 1fr))`;
-  const minWidth = 44 + Math.max(visibleColumns.length, 1) * 120;
+  const detailColumns = visibleColumns.map((column) => {
+    const behavior = columnBehavior(view, `detail:${fieldId}:${column.id}`);
+    // 「完整显示」按已加载行的内容与表头估算宽度，所有行共用同一模板保证对齐。
+    const width =
+      behavior.displayMode === "full"
+        ? Math.max(
+            MIN_COLUMN_WIDTH,
+            Math.ceil(
+              [
+                column.name,
+                ...rows.map((row) =>
+                  fieldValueText(
+                    row.find((item) => item.id === column.id)?.value,
+                  ),
+                ),
+              ].reduce((max, text) => Math.max(max, textPixelWidth(text)), 0) +
+                CELL_HORIZONTAL_PADDING +
+                (behavior.copyable ? 20 : 0),
+            ),
+          )
+        : 120;
+    return { column, behavior, width };
+  });
+  const gridTemplate =
+    detailColumns.length === 0
+      ? "44px repeat(1, minmax(0, 1fr))"
+      : `44px ${detailColumns
+          .map(({ behavior, width }) =>
+            behavior.displayMode === "full" ? `${width}px` : "minmax(0, 1fr)",
+          )
+          .join(" ")}`;
+  const minWidth =
+    44 + detailColumns.reduce((sum, entry) => sum + entry.width, 0);
 
   return (
     <div data-slot="task-detail">
@@ -1813,7 +2131,7 @@ function TaskDetailSection({
                       <div className="truncate px-2.5 text-center text-xs tabular-nums text-muted-foreground">
                         {start + index + 1}
                       </div>
-                      {visibleColumns.map((column) => {
+                      {detailColumns.map(({ column, behavior, width }) => {
                         const cell = row.find((item) => item.id === column.id);
                         const attachment = detailAttachmentInfo(cell, column);
                         if (attachment.attachment) {
@@ -1833,10 +2151,28 @@ function TaskDetailSection({
                         return (
                           <div
                             key={column.id}
-                            className="truncate px-2.5"
+                            className={cn(
+                              "group/cell relative min-w-0 px-2.5",
+                              behavior.copyable && "pr-7",
+                              behavior.displayMode === "full"
+                                ? "whitespace-nowrap"
+                                : "truncate",
+                            )}
+                            style={
+                              behavior.displayMode === "full"
+                                ? { width }
+                                : undefined
+                            }
                             title={text}
                           >
                             {text}
+                            {behavior.copyable && text && text !== "—" && (
+                              <CopyButton
+                                text={text}
+                                trimWhitespace={behavior.trimWhitespace}
+                                label={column.name}
+                              />
+                            )}
                           </div>
                         );
                       })}
@@ -1941,7 +2277,7 @@ function DefinitionTable({
             onResize: (_event: SyntheticEvent, data: ResizeCallbackData) => {
               setColumnWidths((previous) => ({
                 ...previous,
-                [key]: Math.max(100, Math.round(data.size.width)),
+                [key]: Math.max(MIN_COLUMN_WIDTH, Math.round(data.size.width)),
               }));
             },
           }),
@@ -2226,6 +2562,7 @@ export default function BatchApprovalPage() {
         tasks: group.tasks.filter((task) =>
           [
             task.title,
+            task.serialNumber ?? "",
             task.instanceCode,
             task.initiatorName ?? "",
             task.definitionName,

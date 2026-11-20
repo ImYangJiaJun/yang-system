@@ -32,12 +32,32 @@ const BASE_COLUMNS: [&str; 6] = [
     "apiOperate",
 ];
 
+/// 列的宽度策略：固定宽度超出省略，或按内容完整显示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DisplayMode {
+    /// 使用默认宽度，超出部分省略。
+    #[default]
+    Fixed,
+    /// 按内容撑开宽度，保证内容完整可见。
+    Full,
+}
+
 /// 一列的显示配置。`key` 形如 `form:<widget_id>`、`computed:<rule_id>` 或
 /// `detail:<detail_field_id>:<column_id>`（明细内的列）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ColumnConfig {
     pub(crate) key: String,
     pub(crate) visible: bool,
+    /// 内容展示方式，缺省为固定宽度省略。
+    #[serde(default)]
+    pub(crate) display_mode: DisplayMode,
+    /// 单元格是否提供快捷复制。
+    #[serde(default)]
+    pub(crate) copyable: bool,
+    /// 复制时是否去掉所有空白字符（如银行账号中的空格）。
+    #[serde(default)]
+    pub(crate) trim_whitespace: bool,
 }
 
 /// 一个用户在一个审批定义下的完整视图。
@@ -519,7 +539,7 @@ pub(crate) fn normalize_code(raw: &str) -> Result<String, BaseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_code, normalize_codes, BatchUserView};
+    use super::{normalize_code, normalize_codes, BatchUserView, DisplayMode};
     use serde_json::json;
 
     fn rule(id: &str, name: &str) -> serde_json::Value {
@@ -546,6 +566,48 @@ mod tests {
         .unwrap_or_else(|error| panic!("应解析成功: {error}"));
         assert_eq!(view.computed_fields[0].id, "c1");
         assert_eq!(view.columns.len(), 2);
+    }
+
+    #[test]
+    fn parses_column_display_options_with_defaults() {
+        let view = BatchUserView::parse(
+            &json!([]),
+            &json!([
+                {"key":"form:amount","visible":true},
+                {
+                    "key":"form:account",
+                    "visible":true,
+                    "display_mode":"full",
+                    "copyable":true,
+                    "trim_whitespace":true
+                }
+            ]),
+        )
+        .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+        assert_eq!(view.columns[0].display_mode, DisplayMode::Fixed);
+        assert!(!view.columns[0].copyable);
+        assert!(!view.columns[0].trim_whitespace);
+        assert_eq!(view.columns[1].display_mode, DisplayMode::Full);
+        assert!(view.columns[1].copyable);
+        assert!(view.columns[1].trim_whitespace);
+
+        // 回写数据库与响应必须保留新增配置。
+        let payload = view.to_json();
+        let columns = payload["columns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("columns 应为数组"));
+        assert_eq!(columns[1]["display_mode"], json!("full"));
+        assert_eq!(columns[1]["copyable"], json!(true));
+        assert_eq!(columns[1]["trim_whitespace"], json!(true));
+    }
+
+    #[test]
+    fn rejects_unknown_display_mode() {
+        assert!(BatchUserView::parse(
+            &json!([]),
+            &json!([{"key":"form:amount","visible":true,"display_mode":"wide"}])
+        )
+        .is_err());
     }
 
     #[test]
