@@ -12,9 +12,9 @@ default-run = "yang-system"
 [workspace]
 
 [dependencies]
-yang-base = { version = "0.5.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "postgres", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics", "http"] }
-yang-db = { version = "0.3.0", path = "../../crates/yang-db", default-features = false, features = ["mysql", "postgres", "redis"] }
-yang-runtime = { version = "0.2.0", path = "../../crates/yang-runtime" }
+yang-base = { version = "0.6.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "postgres", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics", "http"] }
+yang-db = { version = "0.3.1", path = "../../crates/yang-db", default-features = false, features = ["mysql", "postgres", "redis"] }
+yang-runtime = { version = "0.2.1", path = "../../crates/yang-runtime" }
 
 anyhow = "1.0"
 async-trait = "0.1.89"

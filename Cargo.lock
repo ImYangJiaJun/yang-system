@@ -3809,7 +3809,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 
 [[package]]
 name = "yang-base"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "yang-db"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -3881,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "yang-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
