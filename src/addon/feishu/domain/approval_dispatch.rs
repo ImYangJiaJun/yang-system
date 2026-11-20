@@ -948,6 +948,11 @@ pub(crate) struct GroupMemberInput<'a> {
     pub(crate) record_id: &'a str,
     pub(crate) cells: &'a Map<String, Value>,
     pub(crate) attachment_codes: BTreeMap<String, Vec<String>>,
+    /// 该成员自己解析出的控件映射（外部选项按本记录的值解析）。
+    ///
+    /// 明细行用它逐个装配：级联选项的同文案在不同父值下对应不同 `option_id`，
+    /// 组级并集只能留一个，写进别的成员的行就是错选项。
+    pub(crate) widgets: &'a [WidgetMap],
 }
 
 /// 一个聚合组的派发输入。
@@ -1168,6 +1173,7 @@ pub(crate) async fn dispatch_group(
             record_id: member.record_id,
             cells: resolved.as_ref().unwrap_or(member.cells),
             attachment_codes: &member.attachment_codes,
+            widgets: member.widgets,
         })
         .collect();
     tracing::debug!(
@@ -4950,6 +4956,7 @@ mod tests {
                     record_id: if index == 0 { "recA" } else { "recB" },
                     cells,
                     attachment_codes: BTreeMap::new(),
+                    widgets: &self.widgets,
                 })
                 .collect()
         }
@@ -5041,6 +5048,128 @@ mod tests {
                 [{"id":"desc","type":"textarea","value":"明细 B"}]
             ]),
             "明细必须一成员一行"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dispatch_keeps_each_members_detail_option_ids() {
+        // 级联选项：同文案「AMZCCR」在不同费用类型下是不同 option_id。
+        // create 请求里的两条明细必须各带自己成员的 id，不能都取组级（第一个成员）的映射。
+        let snapshot = r#"[{"id":"detail","type":"fieldList","children":[
+            {"id":"fee","type":"radioV2"},
+            {"id":"code","type":"radioV2"}
+        ]}]"#;
+        let option_widget = |id: &str, field: &str, label: &str, mapped: &str| {
+            let mut item = widget(id, "radioV2");
+            item.bitable_field = field.to_string();
+            item.converter = Converter::Option;
+            item.option_map
+                .insert(label.to_string(), mapped.to_string());
+            item
+        };
+        let widgets_a = vec![
+            option_widget("fee", "fld_fee", "信用扣款报销", "fee-id-a"),
+            option_widget("code", "fld_code", "AMZCCR", "code-id-a"),
+        ];
+        let widgets_b = vec![
+            option_widget("fee", "fld_fee", "信用卡挂失补办费用", "fee-id-b"),
+            option_widget("code", "fld_code", "AMZCCR", "code-id-b"),
+        ];
+        let cells_a = cells(&[
+            ("fld_fee", json!("信用扣款报销")),
+            ("fld_code", json!("AMZCCR")),
+        ]);
+        let cells_b = cells(&[
+            ("fld_fee", json!("信用卡挂失补办费用")),
+            ("fld_code", json!("AMZCCR")),
+        ]);
+        let members = [
+            GroupMemberInput {
+                record_id: "recA",
+                cells: &cells_a,
+                attachment_codes: BTreeMap::new(),
+                widgets: &widgets_a,
+            },
+            GroupMemberInput {
+                record_id: "recB",
+                cells: &cells_b,
+                attachment_codes: BTreeMap::new(),
+                widgets: &widgets_b,
+            },
+        ];
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-CASCADE")),
+            (200, &ok_detail("INST-CASCADE", "SERIAL-C")),
+            (200, r#"{"code":0,"data":{}}"#),
+            (200, r#"{"code":0,"data":{}}"#),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let result = dispatch_group(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &GroupDispatchInput {
+                fields: &[],
+                context: None,
+                execution: None,
+                coordinates: &COORDINATES,
+                group_key: "gk00000000000000000000000000opt",
+                group_uuid: "3f1a65c4-2c56-4a05-9bd3-57e0f1f75b3b",
+                instance_code: None,
+                backfill_field_name: "审批编号",
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
+                approval_code: "4202AD96-9EC1",
+                widgets: &widgets_a,
+                form_snapshot: snapshot,
+                timezone_offset: FixedOffset::from_seconds(8 * 3600)
+                    .unwrap_or_else(|error| panic!("{error}")),
+                applicant_field: "fld_applicant",
+                applicant_open_id: Some("ou_clicker"),
+                members: &members,
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+
+        let requests = transport
+            .full_requests
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let create = requests
+            .iter()
+            .find(|request| request.url.ends_with("/approval/v4/instances"))
+            .unwrap_or_else(|| panic!("缺创建请求"));
+        let form: Value = serde_json::from_str(
+            create
+                .json_body
+                .as_ref()
+                .unwrap_or_else(|| panic!("缺请求体"))["form"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            form[0]["value"],
+            json!([
+                [
+                    {"id":"fee","type":"radioV2","value":"fee-id-a"},
+                    {"id":"code","type":"radioV2","value":"code-id-a"}
+                ],
+                [
+                    {"id":"fee","type":"radioV2","value":"fee-id-b"},
+                    {"id":"code","type":"radioV2","value":"code-id-b"}
+                ]
+            ]),
+            "每条明细行必须使用自己成员的选项映射"
         );
     }
 
@@ -5305,6 +5434,7 @@ mod tests {
                 record_id: if index == 0 { "recA" } else { "recB" },
                 cells,
                 attachment_codes: BTreeMap::new(),
+                widgets: &fixture.widgets,
             })
             .collect();
         let transport = ScriptedTransport::new(vec![]);
@@ -5429,6 +5559,7 @@ mod tests {
                 record_id: if index == 0 { "recA" } else { "recB" },
                 cells: cell,
                 attachment_codes: BTreeMap::new(),
+                widgets: &fixture.widgets,
             })
             .collect();
         let transport = ScriptedTransport::new(vec![

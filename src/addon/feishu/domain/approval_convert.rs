@@ -316,6 +316,31 @@ pub(crate) fn prepare_definition<'a>(
     Ok((definition, mappings))
 }
 
+/// 表单定义里位于明细（`fieldList`）内的全部控件 id。
+///
+/// 明细控件的选项必须**按成员行**解析：级联选项的同一文案在不同父值下合法对应
+/// 不同的 `option_id`，把它们并进组级映射会误判成「同文案不同选项」的冲突。
+/// 顶层控件仍按并集处理并保留冲突保护——顶层的值取自 leader 一行，并集冲突
+/// 说明两位成员对同一控件选了不同业务选项，继续合成会写错别人的选择。
+pub(crate) fn detail_widget_ids(form_snapshot: &str) -> Result<BTreeSet<String>, ConvertError> {
+    let definition: Vec<FormWidget> = serde_json::from_str(form_snapshot)
+        .map_err(|_| ConvertError::InvalidDefinition("表单快照不是有效的控件数组".to_string()))?;
+    let mut ids = BTreeSet::new();
+    collect_detail_widget_ids(&definition, false, &mut ids);
+    Ok(ids)
+}
+
+/// 递归收集明细子树；`inside` 一旦进入 `fieldList` 就对全部后代保持为真
+/// （控件组、嵌套明细都算明细内）。
+fn collect_detail_widget_ids(nodes: &[FormWidget], inside: bool, ids: &mut BTreeSet<String>) {
+    for node in nodes {
+        if inside {
+            ids.insert(node.id.clone());
+        }
+        collect_detail_widget_ids(&node.children, inside || node.r#type == "fieldList", ids);
+    }
+}
+
 /// 聚合表单里的一行：一条多维表格记录的全部单元格。
 ///
 /// `record_id` 不参与表单值，只用于错误定位——空明细必须写明是哪条记录。
@@ -323,6 +348,13 @@ pub(crate) struct GroupFormRow<'a> {
     pub(crate) record_id: &'a str,
     pub(crate) cells: &'a Map<String, Value>,
     pub(crate) attachment_codes: &'a BTreeMap<String, Vec<String>>,
+    /// 该成员自己解析出的控件映射，必须逐行使用而不是组级并集。
+    ///
+    /// 级联选项的同一文案在不同父值下合法对应不同的 `option_id`（例如
+    /// 「AMZCCR」在「信用扣款报销」与「信用卡挂失补办费用」下各有一条）。
+    /// 组级并集只能保留一个 id，写进另一个成员的行就是把别人的选项提交上去；
+    /// 明细行的父值、子值都来自本行，所以选项也必须按本行的映射解析。
+    pub(crate) widgets: &'a [WidgetMap],
 }
 
 /// 聚合表单的组装输入：顶层控件取第一行，明细控件每条记录一行。
@@ -341,6 +373,7 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
         record_id: "",
         cells: input.cells,
         attachment_codes: input.attachment_codes,
+        widgets: input.widgets,
     };
     assemble(
         input.widgets,
@@ -621,9 +654,17 @@ fn assemble_definition(
                             reason: format!("记录 {} 的明细为空", row.record_id),
                         });
                     }
+                    // 明细行用它自己成员的映射装配。级联选项的 option_id 取决于
+                    // 本行的父值（如「费用类型」），组级并集可能来自别的父级；
+                    // 复用并集会把这个成员的选择写成别人的选项。
+                    let row_mappings: BTreeMap<&str, &WidgetMap> = row
+                        .widgets
+                        .iter()
+                        .map(|widget| (widget.widget_id.as_str(), widget))
+                        .collect();
                     detail_rows.push(assemble_definition(
                         &node.children,
-                        mappings,
+                        &row_mappings,
                         std::slice::from_ref(row),
                         timezone_offset,
                         true,
@@ -652,9 +693,17 @@ fn assemble_definition(
                 }
                 continue;
             }
+            // 控件组内嵌 / 非聚合路径的明细只取第一行，但选项同样必须用**该行
+            // 自己**的映射：明细控件已被排除出组级并集（`detail_widget_ids`），
+            // 复用 `mappings` 会拿不到动态解析出的 option_id，报 UnmappedOption。
+            let primary_mappings: BTreeMap<&str, &WidgetMap> = primary
+                .widgets
+                .iter()
+                .map(|widget| (widget.widget_id.as_str(), widget))
+                .collect();
             let row = assemble_definition(
                 &node.children,
-                mappings,
+                &primary_mappings,
                 std::slice::from_ref(primary),
                 timezone_offset,
                 true,
@@ -2810,11 +2859,13 @@ mod tests {
                 record_id: "rec-blank",
                 cells: &blank,
                 attachment_codes: &BTreeMap::new(),
+                widgets: std::slice::from_ref(&card),
             },
             GroupFormRow {
                 record_id: "rec-valid",
                 cells: &valid,
                 attachment_codes: &BTreeMap::new(),
+                widgets: std::slice::from_ref(&card),
             },
         ];
         let error = match build_group_form(&GroupFormInput {
@@ -3273,6 +3324,7 @@ mod tests {
                 record_id,
                 cells,
                 attachment_codes: &codes,
+                widgets,
             })
             .collect();
         let form = build_group_form(&GroupFormInput {
@@ -3672,16 +3724,19 @@ mod tests {
                 record_id: "recA",
                 cells: &row_a,
                 attachment_codes: &codes_a,
+                widgets: &widgets,
             },
             GroupFormRow {
                 record_id: "recB",
                 cells: &row_b,
                 attachment_codes: &codes_b,
+                widgets: &widgets,
             },
             GroupFormRow {
                 record_id: "recC",
                 cells: &row_c,
                 attachment_codes: &codes_c,
+                widgets: &widgets,
             },
         ];
         let form = build_group_form(&GroupFormInput {
@@ -3716,11 +3771,13 @@ mod tests {
                 record_id: "recA",
                 cells: &row_a,
                 attachment_codes: &codes,
+                widgets: &widgets,
             },
             GroupFormRow {
                 record_id: "recB",
                 cells: &row_b,
                 attachment_codes: &codes,
+                widgets: &widgets,
             },
         ];
         let form = build_group_form(&GroupFormInput {
@@ -3732,5 +3789,152 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         let form: Value = serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(form[0]["value"], json!(["opt_contract", "opt_invoice"]));
+    }
+
+    #[test]
+    fn detail_widget_ids_only_cover_field_list_subtrees() {
+        // 明细的选项按行解析，顶层仍走并集；判定必须覆盖嵌套明细，
+        // 但不能把顶层控件误判成明细。
+        let snapshot = r#"[
+            {"id":"top","type":"input"},
+            {"id":"detail","type":"fieldList","children":[
+                {"id":"d1","type":"input"},
+                {"id":"sub","type":"fieldList","children":[{"id":"d2","type":"input"}]}
+            ]}
+        ]"#;
+        let ids = detail_widget_ids(snapshot).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            ids,
+            BTreeSet::from(["d1".to_string(), "sub".to_string(), "d2".to_string(),]),
+            "明细子树内（含嵌套明细）全算，顶层不算"
+        );
+    }
+
+    #[test]
+    fn group_form_uses_each_members_cascade_option_ids_in_detail_rows() {
+        // 级联选项：同一文案在不同父值下合法对应不同 option_id（真机：
+        // 「AMZCCR」同时挂在「信用扣款报销」与「信用卡挂失补办费用」下）。
+        // 每条明细行必须用自己成员的映射；复用组级（第一个成员）的映射会把
+        // 「信用卡挂失补办费用」写成一个属于「信用扣款报销」的选项 id。
+        let snapshot = r#"[{"id":"detail","type":"fieldList","children":[
+            {"id":"fee","type":"radioV2"},
+            {"id":"code","type":"radioV2"}
+        ]}]"#;
+        let option_widget = |id: &str, field: &str, label: &str, mapped: &str| {
+            let mut item = widget(id, "radioV2");
+            item.bitable_field = field.to_string();
+            item.option_map
+                .insert(label.to_string(), mapped.to_string());
+            item
+        };
+        let widgets_a = [
+            option_widget("fee", "fld_fee", "信用扣款报销", "fee-id-a"),
+            option_widget("code", "fld_code", "AMZCCR", "code-id-a"),
+        ];
+        let widgets_b = [
+            option_widget("fee", "fld_fee", "信用卡挂失补办费用", "fee-id-b"),
+            option_widget("code", "fld_code", "AMZCCR", "code-id-b"),
+        ];
+        let row_a = cells(&[
+            ("fld_fee", json!("信用扣款报销")),
+            ("fld_code", json!("AMZCCR")),
+        ]);
+        let row_b = cells(&[
+            ("fld_fee", json!("信用卡挂失补办费用")),
+            ("fld_code", json!("AMZCCR")),
+        ]);
+        let codes = BTreeMap::new();
+        let rows = [
+            GroupFormRow {
+                record_id: "recA",
+                cells: &row_a,
+                attachment_codes: &codes,
+                widgets: &widgets_a,
+            },
+            GroupFormRow {
+                record_id: "recB",
+                cells: &row_b,
+                attachment_codes: &codes,
+                widgets: &widgets_b,
+            },
+        ];
+        let form = build_group_form(&GroupFormInput {
+            widgets: &widgets_a,
+            form_snapshot: snapshot,
+            rows: &rows,
+            timezone_offset: shanghai(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let form: Value = serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            form[0]["value"][0],
+            json!([
+                {"id":"fee","type":"radioV2","value":"fee-id-a"},
+                {"id":"code","type":"radioV2","value":"code-id-a"}
+            ]),
+            "第一行用自己的映射"
+        );
+        assert_eq!(
+            form[0]["value"][1],
+            json!([
+                {"id":"fee","type":"radioV2","value":"fee-id-b"},
+                {"id":"code","type":"radioV2","value":"code-id-b"}
+            ]),
+            "第二行必须用自己的映射，不能复用第一行的 option_id"
+        );
+    }
+
+    #[test]
+    fn group_form_uses_first_members_option_ids_in_work_group_detail() {
+        // 控件组（workGroup）内的明细不是「每条成员一行」，只取第一行；
+        // 但它仍属 `detail_widget_ids` 的排除范围——组级并集里没有动态选项 id，
+        // 装配必须回落到第一行自己的映射，否则会报 UnmappedOption。
+        let snapshot = r#"[{"id":"wg","type":"workGroup","value":[
+            {"id":"widgetWorkGroupTimeRangeFieldList","type":"fieldList","children":[
+                {"id":"code","type":"radioV2"}
+            ]}
+        ]}]"#;
+        let option_widget = |label: &str, mapped: &str| {
+            let mut item = widget("code", "radioV2");
+            item.bitable_field = "fld_code".to_string();
+            item.option_map
+                .insert(label.to_string(), mapped.to_string());
+            item
+        };
+        // 组级并集（已跳过明细控件）：option_map 为空，正是 worker 里的形态。
+        let mut pooled = widget("code", "radioV2");
+        pooled.bitable_field = "fld_code".to_string();
+        let first = [option_widget("AMZCCR", "code-id-a")];
+        let second = [option_widget("AMZCCR", "code-id-b")];
+        let row_a = cells(&[("fld_code", json!("AMZCCR"))]);
+        let row_b = cells(&[("fld_code", json!("AMZCCR"))]);
+        let codes = BTreeMap::new();
+        let rows = [
+            GroupFormRow {
+                record_id: "recA",
+                cells: &row_a,
+                attachment_codes: &codes,
+                widgets: &first,
+            },
+            GroupFormRow {
+                record_id: "recB",
+                cells: &row_b,
+                attachment_codes: &codes,
+                widgets: &second,
+            },
+        ];
+        let form = build_group_form(&GroupFormInput {
+            widgets: std::slice::from_ref(&pooled),
+            form_snapshot: snapshot,
+            rows: &rows,
+            timezone_offset: shanghai(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let form: Value = serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            form[0]["value"][0]["value"],
+            json!([[{"id":"code","type":"radioV2","value":"code-id-a"}]]),
+            "控件组内的明细只取第一行，但必须用第一行自己的 option_id"
+        );
     }
 }

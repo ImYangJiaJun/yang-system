@@ -38,7 +38,7 @@
 //! `uuid` 是最后一道防线：即使某条记录被重复处理，飞书也只会回 `60012`，
 //! 走回捞路径拿到同一个实例，不会重复建单。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,8 +59,8 @@ use crate::addon::feishu::domain::approval_aggregation::{
 };
 use crate::addon::feishu::domain::approval_attachment::{preflight, source_identities, transfer};
 use crate::addon::feishu::domain::approval_convert::{
-    amount_currency, build_legacy_signature, build_signature, format_local, FixedOffset, FormInput,
-    WidgetMap,
+    amount_currency, build_legacy_signature, build_signature, detail_widget_ids, format_local,
+    FixedOffset, FormInput, WidgetMap,
 };
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_field_conflict, backfill_in_chunks, dispatch_group, dispatch_one,
@@ -3286,6 +3286,8 @@ struct GroupMemberCells {
     cells: serde_json::Map<String, serde_json::Value>,
     /// 已搬运好的附件 code（空 = 该成员没有媒体控件）。
     attachment_codes: BTreeMap<String, Vec<String>>,
+    /// 该成员自己解析出的控件映射；明细行按它装配（级联选项逐行取 id）。
+    widgets: Vec<WidgetMap>,
 }
 
 /// 处理一个聚合组：组行是身份唯一来源，leader 只承载执行簿记（设计 §4.6）。
@@ -3762,6 +3764,23 @@ async fn run_group_dispatch(
     let prepare_started = std::time::Instant::now();
     let mut last_progress_notified = std::time::Instant::now();
 
+    // 明细（fieldList）内的控件选项必须按成员行解析：级联选项的同一文案在
+    // 不同父值下合法对应不同 `option_id`。把它并进组级映射会误判成冲突，
+    // 而组级映射只服务顶层控件（值取自第一行），明细行用各自的映射装配。
+    let detail_widgets = match detail_widget_ids(&task.form_snapshot) {
+        Ok(ids) => ids,
+        Err(error) => {
+            return settle_group(
+                runner,
+                task,
+                group_key,
+                GroupSettlement::paused(format!("表单快照无法解析：{error}")),
+                member_count,
+            )
+            .await
+        }
+    };
+
     for (index, member) in members.iter().enumerate() {
         let task_id: i64 = match member.require("id") {
             Ok(id) => id,
@@ -3858,8 +3877,8 @@ async fn run_group_dispatch(
                 .await
             }
         };
-        // 外部选项映射按**成员并集**：每个成员各自解析一遍，冲突（同 label 映射到
-        // 不同 option_id）判暂停，避免把别人的选择写进组实例。
+        // 外部选项映射按**成员并集**：顶层控件需要它（多选并集、值取第一行）；
+        // 明细内的差异是级联选项的合法差异，不参与并集也不判冲突。
         let mut widgets = task.widgets.clone();
         match resolve_external_options(
             &runner.context,
@@ -3871,7 +3890,7 @@ async fn run_group_dispatch(
         .await
         {
             Ok(()) => {
-                if let Err(conflict) = merge_option_maps(&mut pooled, &widgets) {
+                if let Err(conflict) = merge_option_maps(&mut pooled, &widgets, &detail_widgets) {
                     return settle_group(
                         runner,
                         task,
@@ -3971,6 +3990,7 @@ async fn run_group_dispatch(
             record_id,
             cells,
             attachment_codes,
+            widgets,
         });
 
         // 检查点：顺延执行租约 + 推进心跳 + 落一次附件缓存。
@@ -4089,6 +4109,7 @@ async fn run_group_dispatch(
             record_id: row.record_id.as_str(),
             cells: &row.cells,
             attachment_codes: row.attachment_codes.clone(),
+            widgets: &row.widgets,
         })
         .collect();
     // 冻结反向同步的成员行序：只在第一次创建前写；写失败只降级（同步时回退到
@@ -4188,12 +4209,23 @@ async fn run_group_dispatch(
     settle_group(runner, task, group_key, settlement, member_count).await
 }
 
-/// 把成员解析出的选项映射并入整组的并集。
+/// 把成员解析出的选项映射并入整组的并集（只服务顶层控件）。
 ///
-/// 同一控件同一文案映射到不同 `option_id` 说明两位成员选了**不同**的业务选项，
+/// 明细（`fieldList`）内的控件**不参与并集**：每一行在 `build_group_form` 里用
+/// 自己的映射装配，同一文案在不同父值下对应不同 `option_id` 是级联选项的合法
+/// 差异（例如「AMZCCR」同时挂在多个费用类型下）。
+///
+/// 顶层控件同一文案映射到不同 `option_id` 说明两位成员选了**不同**的业务选项，
 /// 合成一张单时必须暂停：随便取一个会把别人的选择写进组实例（设计 §4.6 第 4 步）。
-fn merge_option_maps(pooled: &mut [WidgetMap], member: &[WidgetMap]) -> Result<(), String> {
+fn merge_option_maps(
+    pooled: &mut [WidgetMap],
+    member: &[WidgetMap],
+    detail_widgets: &BTreeSet<String>,
+) -> Result<(), String> {
     for widget in member {
+        if detail_widgets.contains(&widget.widget_id) {
+            continue;
+        }
         let Some(target) = pooled
             .iter_mut()
             .find(|target| target.widget_id == widget.widget_id)
@@ -5959,9 +5991,10 @@ mod tests {
         );
     }
 
-    /// 选项并集：同 label 同 option_id 合并，冲突判暂停（否则会把别人的选择写进组实例）。
+    /// 选项并集：顶层同 label 冲突判暂停（否则会把别人的选择写进组实例）；
+    /// 明细内的同文案不同 id 是级联选项的合法差异，既不并入也不判冲突。
     #[test]
-    fn option_union_merges_and_rejects_conflicting_labels() {
+    fn option_union_skips_detail_widgets_and_rejects_top_level_conflicts() {
         let widget = |option_map: &[(&str, &str)]| WidgetMap {
             widget_id: "wSel".to_string(),
             widget_type: "radioV2".to_string(),
@@ -5977,17 +6010,31 @@ mod tests {
             currency: None,
             strip_spaces: false,
         };
+        let top_level = BTreeSet::new();
         let mut pooled = vec![widget(&[("差旅", "opt-1")])];
-        assert!(merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-1")])]).is_ok());
         assert!(
-            merge_option_maps(&mut pooled, &[widget(&[("采购", "opt-2")])]).is_ok(),
+            merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-1")])], &top_level).is_ok()
+        );
+        assert!(
+            merge_option_maps(&mut pooled, &[widget(&[("采购", "opt-2")])], &top_level).is_ok(),
             "新文案必须并入并集"
         );
         assert_eq!(pooled[0].option_map.len(), 2);
-        let conflict = merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-9")])]);
+        let conflict = merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-9")])], &top_level);
         assert!(
             matches!(&conflict, Err(reason) if reason.contains("不同的审批选项")),
             "{conflict:?}"
+        );
+
+        let detail = BTreeSet::from(["wSel".to_string()]);
+        let before = pooled[0].option_map.clone();
+        assert!(
+            merge_option_maps(&mut pooled, &[widget(&[("差旅", "opt-9")])], &detail).is_ok(),
+            "明细内的级联选项差异不得判冲突"
+        );
+        assert_eq!(
+            pooled[0].option_map, before,
+            "明细选项不得混入只服务顶层的并集"
         );
     }
 

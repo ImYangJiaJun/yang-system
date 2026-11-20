@@ -168,7 +168,14 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
    取编号后回填。恢复**不覆盖明确写着别人的非空申请人列**：`write_extended` 只补空列
    （空列按本轮点击人补写，与单条同一产品决策），人工改过的非空归属保持原样。
 3. 若 `group.effect_phase='lookup'`：按组 `uuid` `get_instance`；命中则落实例码；`1390003` 未命中则把组行与 leader 阶段重置为 `ready`，有界退避后重发 create。
-4. 否则：按 100 条分片 `records/batch_get` → `rekey_cells_by_field_id` → 逐记录解析外部选项并**合并 `label→option_id` 映射**（同 label 冲突判暂停）→ 逐记录预检/搬运附件 → `build_group_form`。
+4. 否则：按 100 条分片 `records/batch_get` → `rekey_cells_by_field_id` → 逐记录解析外部选项：
+   - **顶层控件**合并 `label→option_id` 映射（同 label 冲突判暂停——顶层值取自第一行，
+     冲突说明两位成员选了不同业务选项，继续合成会写错别人的选择）；
+   - **明细（`fieldList`）内控件不参与并集**：`build_group_form` 装配每条明细行时用
+     **该成员自己**解析出的映射。级联选项的同一文案在不同父值下合法对应不同
+     `option_id`（2026-11-20 真机：「AMZCCR」同时挂在 4 个费用类型下），复用组级
+     并集只会留下一个 id，写进另一个成员的行就是把别人的选项提交上去。
+   → 逐记录预检/搬运附件 → `build_group_form`。
 5. 签名复核**仅当组行 `effect_phase='ready'`**（真正从未尝试创建）；不再用 `attempts=0` 代理。
 6. 创建前把组行阶段写为 `creating`（提交）；`create` 的 `uuid` 用组行 `uuid`。
 7. 成功：组专用确认写入 `group.instance_code`、`group.effect_phase='created'`，leader 阶段 `created` 但 **`instance_code` 保持 NULL**；`60012` 按组 uuid 回捞。
@@ -260,7 +267,7 @@ unique_named("uk_feishu_approval_group_config_key", [config_id, group_key])
 
 单元：
 - 签名：明细子树（含 workGroup 内嵌 fieldList）全部排除；顶层公式/附件/多选排除（合计不同、附件 token 不同、勾选不同都不拆组）；数值/包装归一；空必填编码 null；旧口径仍含附件源标识与顺序；组键含成员集合；组 uuid 36 字符。
-- 多行表单：顶层 fieldList N 行；空明细成员返回错误；嵌套 fieldList 用当前行数据；非明细取 leader（顶层公式控件按成员求和、缺任一份即报错；附件取并集并按「文件名+大小」去重；多选取并集；明细行内公式仍逐行）；选项并集；两行文案 9.1330/9.133 命中同一 id。
+- 多行表单：顶层 fieldList N 行；空明细成员返回错误；嵌套 fieldList 用当前行数据；非明细取 leader（顶层公式控件按成员求和、缺任一份即报错；附件取并集并按「文件名+大小」去重；多选取并集；明细行内公式仍逐行）；顶层选项并集、同 label 冲突判暂停；明细行内级联选项按成员各自解析（同文案不同 id 合法，不判冲突）；两行文案 9.1330/9.133 命中同一 id。
 - 组派发：一次 create 两行；60012 按组 uuid 回捞；组确认不写 leader instance_code；回填失败返回 CreatedPendingBackfill；Fatal 时 `RecordingBackfill.writes()` 为空；组成功后成员扩展列与发起人列已写。
 - 认领：批量跳过成员；only_id 命中成员；`paused` 零认领；`lookup` leader 可恢复。
 - 事件：组表优先；uuid 兜底；任务行命中但 `group_id` 非空时仍 fan-out。
